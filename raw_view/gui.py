@@ -166,6 +166,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RAW/YUV Viewer")
         self.options = DecodeOptions()
         self.current_display: np.ndarray | None = None
+        self.raw_formats = ["RAW8", "RAW10", "RAW10 Packed", "RAW12", "RAW12 Packed", "RAW14 Packed", "RAW16", "RAW32"]
+        self.yuv_formats = ["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"]
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -176,7 +178,7 @@ class MainWindow(QMainWindow):
         self.type_combo = QComboBox()
         self.type_combo.addItems(["RAW", "YUV", "Standard Image"])
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["RAW8", "RAW10", "RAW10 Packed", "RAW12", "RAW12 Packed", "RAW14 Packed", "RAW16", "RAW32"])
+        self.format_combo.addItems(self.raw_formats)
         self.align_combo = QComboBox()
         self.align_combo.addItems(["lsb", "msb"])
         self.endian_combo = QComboBox()
@@ -189,8 +191,14 @@ class MainWindow(QMainWindow):
         self.height_spin.setValue(480)
         self.offset_spin = QSpinBox()
         self.offset_spin.setRange(0, 1_000_000_000)
+        self.frame_spin = QSpinBox()
+        self.frame_spin.setRange(0, 1_000_000)
+        self.frame_spin.setEnabled(False)
+        self.yuv_desc = QLabel("YUV420: U/V 2x2 downsample; YUV422: horizontal 2:1 downsample")
+        self.yuv_desc.setWordWrap(True)
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.clicked.connect(self.decode_current)
+        self.type_combo.currentTextChanged.connect(self._on_type_changed)
 
         panel = QWidget()
         form = QFormLayout(panel)
@@ -201,6 +209,8 @@ class MainWindow(QMainWindow):
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
+        form.addRow("Frame Index", self.frame_spin)
+        form.addRow("YUV Note", self.yuv_desc)
         form.addRow(self.apply_btn)
 
         root = QWidget()
@@ -241,6 +251,25 @@ class MainWindow(QMainWindow):
         fmt_help = QAction("Format Help", self)
         fmt_help.triggered.connect(self.show_help)
         help_menu.addAction(fmt_help)
+        self._on_type_changed(self.type_combo.currentText())
+
+    def _on_type_changed(self, image_type: str) -> None:
+        self.format_combo.clear()
+        if image_type == "RAW":
+            self.format_combo.addItems(self.raw_formats)
+            self.align_combo.setEnabled(True)
+            self.endian_combo.setEnabled(True)
+            self.yuv_desc.setVisible(False)
+        elif image_type == "YUV":
+            self.format_combo.addItems(self.yuv_formats)
+            self.align_combo.setEnabled(False)
+            self.endian_combo.setEnabled(False)
+            self.yuv_desc.setVisible(True)
+        else:
+            self.format_combo.addItems(["N/A"])
+            self.align_combo.setEnabled(False)
+            self.endian_combo.setEnabled(False)
+            self.yuv_desc.setVisible(False)
 
     def _qimage_from_gray(self, gray: np.ndarray) -> QImage:
         h, w = gray.shape
