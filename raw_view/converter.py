@@ -60,7 +60,6 @@ def image_file_to_yuv(
     out_height: int,
 ) -> int:
     bgr = load_bgr_image(input_path)
-    _require_cv2()
     src_h, src_w = bgr.shape[:2]
     if (src_w, src_h) != (out_width, out_height):
         bgr = cv2.resize(bgr, (out_width, out_height), interpolation=cv2.INTER_LINEAR)
