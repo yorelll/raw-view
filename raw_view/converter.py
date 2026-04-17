@@ -8,7 +8,7 @@ from .formats import gray8_to_raw_bytes, rgb_to_yuv_bytes
 
 try:
     import cv2
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     cv2 = None
 
 
