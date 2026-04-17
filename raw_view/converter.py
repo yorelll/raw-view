@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 
 from .formats import gray8_to_raw_bytes, rgb_to_yuv_bytes
@@ -12,12 +10,6 @@ try:
     import cv2
 except Exception:  # pragma: no cover
     cv2 = None
-
-
-@dataclass(frozen=True)
-class ConvertOptions:
-    out_width: int
-    out_height: int
 
 
 def _require_cv2() -> None:

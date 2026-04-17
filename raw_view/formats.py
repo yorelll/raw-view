@@ -153,7 +153,9 @@ def decode_raw(
         out = np.empty(b.shape[0] * 4, dtype=np.uint16)
         out[0::4] = b[:, 0] | ((b[:, 4] & 0x3F) << 8)
         out[1::4] = b[:, 1] | (((b[:, 4] >> 6) & 0x03) << 8) | (((b[:, 5] >> 4) & 0x0F) << 10)
-        out[2::4] = b[:, 2] | ((b[:, 5] & 0x0F) << 10) | (((b[:, 6] >> 6) & 0x03) << 8)
+        # P2: low 8 bits from B2, then bits[9:8] from B6[7:6], then bits[13:10] from B5[3:0].
+        out[2::4] = b[:, 2] | (((b[:, 6] >> 6) & 0x03) << 8) | ((b[:, 5] & 0x0F) << 10)
+        # P3: low 8 bits from B3 and high 6 bits from B6[5:0] => 14-bit value.
         out[3::4] = b[:, 3] | ((b[:, 6] & 0x3F) << 8)
         if alignment == "msb":
             out = out << 2
