@@ -70,6 +70,7 @@ class ImageView(QGraphicsView):
         self._pixmap_item.setPixmap(pixmap)
         self.setSceneRect(self._pixmap_item.boundingRect())
 
+    # Qt override must keep camelCase method name to hook wheel events.
     def wheelEvent(self, event):  # noqa: N802
         if QApplication.keyboardModifiers() & Qt.ControlModifier:
             scale = 1.25 if event.angleDelta().y() > 0 else 0.8
