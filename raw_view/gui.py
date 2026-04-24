@@ -20,7 +20,7 @@ from .formats import (
 from .help_content import HELP_HTML
 
 from PyQt5.QtCore import QSettings, Qt, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -64,14 +64,17 @@ class AppSettings:
     def __init__(self) -> None:
         self._store = QSettings("yorelll", "raw-view")
 
+    @staticmethod
+    def _normalize_dirname(value: str | None) -> str:
+        return (value or "out").strip() or "out"
+
     @property
     def default_output_dirname(self) -> str:
-        return (self._store.value("convert/default_output_dirname", "out") or "out").strip() or "out"
+        return self._normalize_dirname(self._store.value("convert/default_output_dirname", "out"))
 
     @default_output_dirname.setter
     def default_output_dirname(self, value: str) -> None:
-        clean = (value or "out").strip() or "out"
-        self._store.setValue("convert/default_output_dirname", clean)
+        self._store.setValue("convert/default_output_dirname", self._normalize_dirname(value))
 
     @property
     def save_dpi(self) -> int:
@@ -107,14 +110,14 @@ class FileDropLineEdit(QLineEdit):
         self.setAcceptDrops(True)
 
     # Qt override must keep camelCase method name.
-    def dragEnterEvent(self, event):  # noqa: N802
+    def dragEnterEvent(self, event: QDragEnterEvent):  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     # Qt override must keep camelCase method name.
-    def dropEvent(self, event):  # noqa: N802
+    def dropEvent(self, event: QDropEvent):  # noqa: N802
         urls = event.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
@@ -287,8 +290,10 @@ class ConvertDialog(QDialog):
                 self.target_type.currentText(),
                 self._settings.default_output_dirname,
             )
-            if not input_path or not output_path:
-                raise ValueError("input/output path is required")
+            if not input_path:
+                raise ValueError("input path is required")
+            if not output_path:
+                raise ValueError("output path is required")
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             if self.target_type.currentText() == "RAW":
                 image_file_to_raw(
@@ -476,14 +481,14 @@ class MainWindow(QMainWindow):
             self.image_view.fitInView(self.image_view.sceneRect(), Qt.KeepAspectRatio)
 
     # Qt override must keep camelCase method name.
-    def dragEnterEvent(self, event):  # noqa: N802
+    def dragEnterEvent(self, event: QDragEnterEvent):  # noqa: N802
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     # Qt override must keep camelCase method name.
-    def dropEvent(self, event):  # noqa: N802
+    def dropEvent(self, event: QDropEvent):  # noqa: N802
         urls = event.mimeData().urls()
         if not urls:
             return
