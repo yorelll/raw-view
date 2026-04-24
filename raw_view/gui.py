@@ -66,6 +66,8 @@ class DecodeOptions:
 
 @dataclass
 class ViewerItem:
+    """State container for one opened file tab and its decode/view configuration."""
+
     options: DecodeOptions = field(default_factory=DecodeOptions)
     current_display: np.ndarray | None = None
     view: "ImageView | None" = None
@@ -73,6 +75,8 @@ class ViewerItem:
 
 
 def normalize_recent_files(value: object, max_items: int = MAX_RECENT_FILES) -> list[str]:
+    """Normalize recent-file values by trimming, deduplicating, and enforcing max length."""
+
     if value is None:
         return []
     if isinstance(value, str):
@@ -92,6 +96,8 @@ def normalize_recent_files(value: object, max_items: int = MAX_RECENT_FILES) -> 
 
 
 def add_recent_file_entry(existing: object, path: str, max_items: int = MAX_RECENT_FILES) -> list[str]:
+    """Insert one path at the front of recent files while keeping uniqueness and limits."""
+
     trimmed = path.strip()
     if not trimmed:
         return normalize_recent_files(existing, max_items)
@@ -235,9 +241,13 @@ class ImageView(QGraphicsView):
         self.zoomChanged.emit(self._zoom_percent)
 
     def has_image(self) -> bool:
+        """Return whether the view currently contains a non-empty pixmap."""
+
         return not self._pixmap_item.pixmap().isNull()
 
     def current_pixmap(self) -> QPixmap:
+        """Return the pixmap currently displayed in the view."""
+
         return self._pixmap_item.pixmap()
 
     def _apply_zoom_step(self, factor: float) -> None:
@@ -627,7 +637,6 @@ class MainWindow(QMainWindow):
 
     def _set_file_path(self, item: ViewerItem, path: str) -> None:
         item.options.file_path = path
-        self.options.file_path = path
         ext = Path(path).suffix.lower()
         if ext in IMAGE_EXTENSIONS:
             self.type_combo.setCurrentText("Standard Image")
@@ -842,7 +851,7 @@ class MainWindow(QMainWindow):
             return
         item = ViewerItem()
         item.view = ImageView()
-        item.view.zoomChanged.connect(lambda zoom, it=item: self._on_item_zoom_changed(it, zoom))
+        item.view.zoomChanged.connect(lambda zoom: self._on_item_zoom_changed(item, zoom))
         item.view.contextMenuRequested.connect(self._show_image_context_menu)
         self._set_file_path(item, path)
         item.options.format_name = self.raw_formats[0]
@@ -980,7 +989,7 @@ class MainWindow(QMainWindow):
             return
         for path in files:
             action = QAction(path, self)
-            action.triggered.connect(lambda checked=False, p=path: self._open_recent_file(p))
+            action.triggered.connect(lambda _checked=False, p=path: self._open_recent_file(p))
             self.recent_menu.addAction(action)
 
     def _open_recent_file(self, path: str) -> None:
