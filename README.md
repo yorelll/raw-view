@@ -32,11 +32,11 @@ python -m raw_view
 
 ## 打包为 EXE
 
-详见：`/home/runner/work/raw-view/raw-view/docs/release_exe.md`
+详见：`docs/release_exe.md`
 
 ## 后续功能扩展建议
 
-详见：`/home/runner/work/raw-view/raw-view/docs/future_extensions.md`
+详见：`docs/future_extensions.md`
 
 ## 测试
 
