@@ -35,6 +35,83 @@ def bgr_to_gray8(bgr: np.ndarray, out_width: int, out_height: int) -> np.ndarray
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
+def bgr_to_bayer8(
+    bgr: np.ndarray,
+    out_width: int,
+    out_height: int,
+    pattern: str = "RGGB",
+) -> np.ndarray:
+    _require_cv2()
+    if out_width <= 0 or out_height <= 0:
+        raise ValueError("output width/height must be > 0")
+    src_h, src_w = bgr.shape[:2]
+    if (src_w, src_h) != (out_width, out_height):
+        bgr = cv2.resize(bgr, (out_width, out_height), interpolation=cv2.INTER_LINEAR)
+    if bgr.dtype != np.uint8:
+        bgr = np.clip(bgr, 0, 255).astype(np.uint8)
+    b = bgr[:, :, 0]
+    g = bgr[:, :, 1]
+    r = bgr[:, :, 2]
+    out = np.empty((out_height, out_width), dtype=np.uint8)
+    p = pattern.upper()
+    if p == "RGGB":
+        out[0::2, 0::2], out[0::2, 1::2], out[1::2, 0::2], out[1::2, 1::2] = (
+            r[0::2, 0::2],
+            g[0::2, 1::2],
+            g[1::2, 0::2],
+            b[1::2, 1::2],
+        )
+    elif p == "BGGR":
+        out[0::2, 0::2], out[0::2, 1::2], out[1::2, 0::2], out[1::2, 1::2] = (
+            b[0::2, 0::2],
+            g[0::2, 1::2],
+            g[1::2, 0::2],
+            r[1::2, 1::2],
+        )
+    elif p == "GRBG":
+        out[0::2, 0::2], out[0::2, 1::2], out[1::2, 0::2], out[1::2, 1::2] = (
+            g[0::2, 0::2],
+            r[0::2, 1::2],
+            b[1::2, 0::2],
+            g[1::2, 1::2],
+        )
+    elif p == "GBRG":
+        out[0::2, 0::2], out[0::2, 1::2], out[1::2, 0::2], out[1::2, 1::2] = (
+            g[0::2, 0::2],
+            b[0::2, 1::2],
+            r[1::2, 0::2],
+            g[1::2, 1::2],
+        )
+    else:
+        raise ValueError(f"unsupported bayer pattern: {pattern}")
+    return out
+
+
+def bayer8_to_rgb(bayer8: np.ndarray, pattern: str = "RGGB") -> np.ndarray:
+    try:
+        _require_cv2()
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    if bayer8.ndim != 2:
+        raise ValueError("bayer image must be 2D")
+    p = pattern.upper()
+    conversion = {
+        "RGGB": cv2.COLOR_BayerRG2BGR,
+        "BGGR": cv2.COLOR_BayerBG2BGR,
+        "GRBG": cv2.COLOR_BayerGR2BGR,
+        "GBRG": cv2.COLOR_BayerGB2BGR,
+    }.get(p)
+    if conversion is None:
+        raise ValueError(f"unsupported bayer pattern: {pattern}")
+    try:
+        return cv2.cvtColor(bayer8, conversion)
+    except Exception as exc:
+        cv_error = getattr(cv2, "error", None)
+        if cv_error is not None and isinstance(exc, cv_error):
+            raise ValueError(f"failed to convert Bayer pattern {p} to RGB: {exc}") from exc
+        raise
+
+
 def image_file_to_raw(
     input_path: str,
     output_path: str,
@@ -43,10 +120,18 @@ def image_file_to_raw(
     out_height: int,
     alignment: str = "lsb",
     endianness: str = "little",
+    source_mode: str = "bayer",
+    bayer_pattern: str = "RGGB",
 ) -> int:
     bgr = load_bgr_image(input_path)
-    gray = bgr_to_gray8(bgr, out_width, out_height)
-    raw_bytes = gray8_to_raw_bytes(gray, raw_type, alignment=alignment, endianness=endianness)
+    mode = source_mode.lower()
+    if mode == "gray":
+        raw8 = bgr_to_gray8(bgr, out_width, out_height)
+    elif mode == "bayer":
+        raw8 = bgr_to_bayer8(bgr, out_width, out_height, pattern=bayer_pattern)
+    else:
+        raise ValueError(f"unsupported RAW source mode '{source_mode}', valid options are: 'bayer', 'gray'")
+    raw_bytes = gray8_to_raw_bytes(raw8, raw_type, alignment=alignment, endianness=endianness)
     with open(output_path, "wb") as f:
         f.write(raw_bytes)
     return len(raw_bytes)
