@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from .converter import bayer8_to_rgb, image_file_to_raw, image_file_to_yuv
 from .formats import (
     ImageSpec,
-    RAW_BITS,
     decode_raw,
     decode_yuv,
     expected_frame_size_raw,
@@ -19,7 +19,7 @@ from .formats import (
 )
 from .help_content import HELP_HTML
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSettings, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
@@ -44,6 +44,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+
 
 @dataclass
 class DecodeOptions:
@@ -55,6 +58,72 @@ class DecodeOptions:
     alignment: str = "lsb"
     endianness: str = "little"
     offset: int = 0
+
+
+class AppSettings:
+    def __init__(self) -> None:
+        self._store = QSettings("yorelll", "raw-view")
+
+    @property
+    def default_output_dirname(self) -> str:
+        return (self._store.value("convert/default_output_dirname", "out") or "out").strip() or "out"
+
+    @default_output_dirname.setter
+    def default_output_dirname(self, value: str) -> None:
+        clean = (value or "out").strip() or "out"
+        self._store.setValue("convert/default_output_dirname", clean)
+
+    @property
+    def save_dpi(self) -> int:
+        value = self._store.value("save/dpi", 300)
+        try:
+            return max(72, min(2400, int(value)))
+        except (TypeError, ValueError):
+            return 300
+
+    @save_dpi.setter
+    def save_dpi(self, value: int) -> None:
+        self._store.setValue("save/dpi", max(72, min(2400, int(value))))
+
+
+def build_default_output_path(input_path: str, target_type: str, output_dir_name: str) -> str:
+    if not input_path:
+        return ""
+    src = Path(input_path)
+    suffix = ".raw" if target_type == "RAW" else ".yuv"
+    out_dir = src.parent / (output_dir_name or "out")
+    return str(out_dir / f"{src.stem}{suffix}")
+
+
+def dpi_to_dots_per_meter(dpi: int) -> int:
+    return int(round(max(1, dpi) / 0.0254))
+
+
+class FileDropLineEdit(QLineEdit):
+    fileDropped = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    # Qt override must keep camelCase method name.
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    # Qt override must keep camelCase method name.
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self.setText(path)
+                self.fileDropped.emit(path)
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
 
 class ImageView(QGraphicsView):
@@ -79,11 +148,47 @@ class ImageView(QGraphicsView):
         super().wheelEvent(event)
 
 
-class ConvertDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
+class SettingsDialog(QDialog):
+    def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("Settings")
+
+        self.output_dir_edit = QLineEdit(settings.default_output_dirname)
+        self.dpi_spin = QSpinBox()
+        self.dpi_spin.setRange(72, 2400)
+        self.dpi_spin.setValue(settings.save_dpi)
+
+        form = QFormLayout()
+        form.addRow("Default convert output folder", self.output_dir_edit)
+        form.addRow("Saved image DPI", self.dpi_spin)
+
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        save_btn.clicked.connect(self._save)
+        cancel_btn.clicked.connect(self.reject)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(cancel_btn)
+        row.addWidget(save_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addLayout(row)
+
+    def _save(self) -> None:
+        self._settings.default_output_dirname = self.output_dir_edit.text()
+        self._settings.save_dpi = self.dpi_spin.value()
+        self.accept()
+
+
+class ConvertDialog(QDialog):
+    def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = settings
         self.setWindowTitle("Convert Image")
-        self.input_edit = QLineEdit()
+        self.input_edit = FileDropLineEdit()
         self.output_edit = QLineEdit()
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
@@ -95,12 +200,15 @@ class ConvertDialog(QDialog):
         self.align.addItems(["lsb", "msb"])
         self.raw_source_mode = QComboBox()
         self.raw_source_mode.addItems(["bayer", "gray"])
+        self.bayer_pattern = QComboBox()
+        self.bayer_pattern.addItems(BAYER_PATTERNS)
         self.width = QSpinBox()
         self.width.setRange(1, 65535)
         self.width.setValue(640)
         self.height = QSpinBox()
         self.height.setRange(1, 65535)
         self.height.setValue(480)
+        self._auto_output_path = ""
 
         form = QFormLayout()
         form.addRow("Input image", self.input_edit)
@@ -110,6 +218,7 @@ class ConvertDialog(QDialog):
         form.addRow("YUV format", self.yuv_type)
         form.addRow("Alignment", self.align)
         form.addRow("RAW source", self.raw_source_mode)
+        form.addRow("Bayer pattern", self.bayer_pattern)
         form.addRow("Width", self.width)
         form.addRow("Height", self.height)
 
@@ -129,36 +238,78 @@ class ConvertDialog(QDialog):
         layout.addLayout(form)
         layout.addLayout(row)
 
+        self.input_edit.fileDropped.connect(self._sync_default_output)
+        self.input_edit.textChanged.connect(self._sync_default_output)
+        self.target_type.currentTextChanged.connect(self._sync_controls)
+        self.raw_source_mode.currentTextChanged.connect(self._sync_controls)
+        self.target_type.currentTextChanged.connect(self._sync_default_output)
+        self.output_edit.textEdited.connect(self._on_output_edited)
+        self._sync_controls()
+
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Input Image", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if path:
             self.input_edit.setText(path)
 
     def _browse_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Output", "", "All Files (*.*)")
+        path, _ = QFileDialog.getSaveFileName(self, "Output", self.output_edit.text(), "All Files (*.*)")
         if path:
             self.output_edit.setText(path)
 
+    def _sync_controls(self) -> None:
+        is_raw = self.target_type.currentText() == "RAW"
+        is_bayer = self.raw_source_mode.currentText() == "bayer"
+        self.raw_type.setEnabled(is_raw)
+        self.align.setEnabled(is_raw)
+        self.raw_source_mode.setEnabled(is_raw)
+        self.bayer_pattern.setEnabled(is_raw and is_bayer)
+        self.yuv_type.setEnabled(not is_raw)
+
+    def _sync_default_output(self) -> None:
+        path = build_default_output_path(
+            self.input_edit.text().strip(),
+            self.target_type.currentText(),
+            self._settings.default_output_dirname,
+        )
+        current = self.output_edit.text().strip()
+        if path and (not current or current == self._auto_output_path):
+            self._auto_output_path = path
+            self.output_edit.setText(path)
+
+    def _on_output_edited(self) -> None:
+        self._auto_output_path = ""
+
     def _convert(self) -> None:
         try:
+            input_path = self.input_edit.text().strip()
+            output_path = self.output_edit.text().strip() or build_default_output_path(
+                input_path,
+                self.target_type.currentText(),
+                self._settings.default_output_dirname,
+            )
+            if not input_path or not output_path:
+                raise ValueError("input/output path is required")
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             if self.target_type.currentText() == "RAW":
                 image_file_to_raw(
-                    self.input_edit.text(),
-                    self.output_edit.text(),
+                    input_path,
+                    output_path,
                     self.raw_type.currentText(),
                     self.width.value(),
                     self.height.value(),
                     alignment=self.align.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
+                    bayer_pattern=self.bayer_pattern.currentText(),
                 )
             else:
                 image_file_to_yuv(
-                    self.input_edit.text(),
-                    self.output_edit.text(),
+                    input_path,
+                    output_path,
                     self.yuv_type.currentText(),
                     self.width.value(),
                     self.height.value(),
                 )
+            self.output_edit.setText(output_path)
         except Exception as exc:  # pragma: no cover - UI path
             QMessageBox.critical(self, "Convert Failed", str(exc))
             return
@@ -173,9 +324,16 @@ class MainWindow(QMainWindow):
         self.current_display: np.ndarray | None = None
         self.raw_formats = ["RAW8", "RAW10", "RAW10 Packed", "RAW12", "RAW12 Packed", "RAW14 Packed", "RAW16", "RAW32"]
         self.yuv_formats = ["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"]
+        self.settings = AppSettings()
+        self.setAcceptDrops(True)
         self._build_ui()
 
     def _build_ui(self) -> None:
+        self.setStyleSheet(
+            "QMainWindow { background-color: #f4f6fa; } "
+            "QWidget { font-size: 13px; } "
+            "QPushButton { padding: 6px 10px; }"
+        )
         self.image_view = ImageView()
         self.status = QStatusBar()
         self.setStatusBar(self.status)
@@ -189,7 +347,9 @@ class MainWindow(QMainWindow):
         self.endian_combo = QComboBox()
         self.endian_combo.addItems(["little", "big"])
         self.raw_preview_combo = QComboBox()
-        self.raw_preview_combo.addItems(["Bayer Color (RGGB)", "Grayscale"])
+        self.raw_preview_combo.addItems(["Bayer Color", "Grayscale"])
+        self.bayer_pattern_combo = QComboBox()
+        self.bayer_pattern_combo.addItems(BAYER_PATTERNS)
         self.width_spin = QSpinBox()
         self.width_spin.setRange(1, 65535)
         self.width_spin.setValue(640)
@@ -206,14 +366,18 @@ class MainWindow(QMainWindow):
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.clicked.connect(self.decode_current)
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
+        self.raw_preview_combo.currentTextChanged.connect(self._on_raw_preview_changed)
 
         panel = QWidget()
+        panel.setMinimumWidth(320)
         form = QFormLayout(panel)
+        form.setVerticalSpacing(10)
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
         form.addRow("Alignment", self.align_combo)
         form.addRow("Endianness", self.endian_combo)
         form.addRow("RAW preview", self.raw_preview_combo)
+        form.addRow("Bayer pattern", self.bayer_pattern_combo)
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
@@ -223,6 +387,8 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QHBoxLayout(root)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
         layout.addWidget(panel)
         layout.addWidget(self.image_view, 1)
         self.setCentralWidget(root)
@@ -247,14 +413,14 @@ class MainWindow(QMainWindow):
         zoom_out = QAction("Zoom Out", self)
         zoom_out.triggered.connect(lambda: self.image_view.scale(0.8, 0.8))
         fit = QAction("Fit to Window", self)
-        fit.triggered.connect(lambda: self.image_view.fitInView(self.image_view.sceneRect(), Qt.KeepAspectRatio))
-        actual = QAction("Actual Size", self)
-        actual.triggered.connect(lambda: self.image_view.resetTransform())
-        view_menu.addActions([zoom_in, zoom_out, fit, actual])
+        fit.triggered.connect(self._fit_image)
+        view_menu.addActions([zoom_in, zoom_out, fit])
 
         convert = QAction("Convert Image...", self)
         convert.triggered.connect(self.open_convert_dialog)
-        tools_menu.addAction(convert)
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self.open_settings_dialog)
+        tools_menu.addActions([convert, settings_action])
 
         fmt_help = QAction("Format Help", self)
         fmt_help.triggered.connect(self.show_help)
@@ -268,19 +434,25 @@ class MainWindow(QMainWindow):
             self.align_combo.setEnabled(True)
             self.endian_combo.setEnabled(True)
             self.raw_preview_combo.setEnabled(True)
+            self.bayer_pattern_combo.setEnabled(self.raw_preview_combo.currentText().startswith("Bayer"))
             self.yuv_desc.setVisible(False)
         elif image_type == "YUV":
             self.format_combo.addItems(self.yuv_formats)
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
+            self.bayer_pattern_combo.setEnabled(False)
             self.yuv_desc.setVisible(True)
         else:
             self.format_combo.addItems(["N/A"])
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
+            self.bayer_pattern_combo.setEnabled(False)
             self.yuv_desc.setVisible(False)
+
+    def _on_raw_preview_changed(self, value: str) -> None:
+        self.bayer_pattern_combo.setEnabled(self.type_combo.currentText() == "RAW" and value.startswith("Bayer"))
 
     def _qimage_from_gray(self, gray: np.ndarray) -> QImage:
         h, w = gray.shape
@@ -289,6 +461,39 @@ class MainWindow(QMainWindow):
     def _qimage_from_rgb(self, rgb: np.ndarray) -> QImage:
         h, w = rgb.shape[:2]
         return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+
+    def _set_file_path(self, path: str) -> None:
+        self.options.file_path = path
+        ext = Path(path).suffix.lower()
+        if ext in IMAGE_EXTENSIONS:
+            self.type_combo.setCurrentText("Standard Image")
+        elif ext == ".yuv":
+            self.type_combo.setCurrentText("YUV")
+        self.status.showMessage(f"Opened: {path} ({os.path.getsize(path)} bytes)")
+
+    def _fit_image(self) -> None:
+        if not self.image_view.sceneRect().isNull():
+            self.image_view.fitInView(self.image_view.sceneRect(), Qt.KeepAspectRatio)
+
+    # Qt override must keep camelCase method name.
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    # Qt override must keep camelCase method name.
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        path = urls[0].toLocalFile()
+        if path and os.path.isfile(path):
+            self._set_file_path(path)
+            self.decode_current()
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
     def open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -299,8 +504,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        self.options.file_path = path
-        self.status.showMessage(f"Opened: {path} ({os.path.getsize(path)} bytes)")
+        self._set_file_path(path)
         self.decode_current()
 
     def _warn_size_mismatch(self, actual: int, expected: int) -> bool:
@@ -340,10 +544,10 @@ class MainWindow(QMainWindow):
                 raw8 = raw_to_display_gray(raw, self.options.format_name)
                 if self.raw_preview_combo.currentText().startswith("Bayer"):
                     try:
-                        rgb = bayer8_to_rgb(raw8, pattern="RGGB")
+                        rgb = bayer8_to_rgb(raw8, pattern=self.bayer_pattern_combo.currentText())
                     except ValueError as exc:
                         self.status.showMessage(
-                            f"Bayer color preview failed; auto-switched to grayscale for this frame (check Bayer pattern/size): {exc}"
+                            f"Bayer preview failed; switched to grayscale (check Bayer pattern/size): {exc}"
                         )
                         qimg = self._qimage_from_gray(raw8)
                         self.current_display = raw8
@@ -368,6 +572,7 @@ class MainWindow(QMainWindow):
                 qimg = self._qimage_from_rgb(rgb)
                 self.current_display = rgb
             self.image_view.set_pixmap(QPixmap.fromImage(qimg))
+            self._fit_image()
             self.status.showMessage(
                 f"{os.path.basename(path)} | {self.options.width}x{self.options.height} | format={self.options.format_name}"
             )
@@ -385,7 +590,12 @@ class MainWindow(QMainWindow):
             qimg = self._qimage_from_gray(img)
         else:
             qimg = self._qimage_from_rgb(img)
+        dpi = self.settings.save_dpi
+        dpm = dpi_to_dots_per_meter(dpi)
+        qimg.setDotsPerMeterX(dpm)
+        qimg.setDotsPerMeterY(dpm)
         qimg.save(path)
+        self.status.showMessage(f"Saved image: {path} @ {dpi} DPI")
 
     def show_help(self) -> None:
         dlg = QDialog(self)
@@ -398,7 +608,11 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def open_convert_dialog(self) -> None:
-        dlg = ConvertDialog(self)
+        dlg = ConvertDialog(self.settings, self)
+        dlg.exec_()
+
+    def open_settings_dialog(self) -> None:
+        dlg = SettingsDialog(self.settings, self)
         dlg.exec_()
 
 

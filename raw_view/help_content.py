@@ -29,8 +29,14 @@ HELP_HTML = """
 <h3>Image Conversion Rules</h3>
 <p>PNG/JPEG/BMP are loaded as BGR and optionally resized.</p>
 <ul>
-<li>RAW conversion supports Bayer (default, RGGB) or gray source.</li>
-<li>RAW viewing supports Bayer color preview (RGGB) or grayscale preview.</li>
+<li>RAW conversion supports Bayer (RGGB/GRBG/GBRG/BGGR) or gray source.</li>
+<li>RAW viewing supports Bayer color preview (RGGB/GRBG/GBRG/BGGR) or grayscale preview.</li>
 <li>YUV conversion uses RGB-to-YUV conversion with subformat-specific chroma sampling.</li>
+</ul>
+<h3>Productivity</h3>
+<ul>
+<li>Support dragging files into the main window to open quickly.</li>
+<li>Conversion input supports drag-and-drop, and output defaults to an <code>out</code> folder beside input file.</li>
+<li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
 </ul>
 """
