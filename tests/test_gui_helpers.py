@@ -1,6 +1,11 @@
 import unittest
 
-from raw_view.gui import build_default_output_path, dpi_to_dots_per_meter
+from raw_view.gui import (
+    add_recent_file_entry,
+    build_default_output_path,
+    dpi_to_dots_per_meter,
+    normalize_recent_files,
+)
 
 
 class GuiHelperTests(unittest.TestCase):
@@ -26,6 +31,25 @@ class GuiHelperTests(unittest.TestCase):
             build_default_output_path("/tmp/input/sample", "RAW", ""),
             "/tmp/input/out/sample.raw",
         )
+
+    def test_normalize_recent_files(self):
+        self.assertEqual(
+            normalize_recent_files([" /a.raw ", "/b.raw", "/a.raw", ""], max_items=3),
+            ["/a.raw", "/b.raw"],
+        )
+
+    def test_normalize_recent_files_string(self):
+        self.assertEqual(normalize_recent_files(" /a.raw "), ["/a.raw"])
+
+    def test_add_recent_file_entry(self):
+        existing = ["/a.raw", "/b.raw", "/c.raw"]
+        self.assertEqual(
+            add_recent_file_entry(existing, "/b.raw", max_items=3),
+            ["/b.raw", "/a.raw", "/c.raw"],
+        )
+
+    def test_add_recent_file_entry_empty(self):
+        self.assertEqual(add_recent_file_entry(["/a.raw"], "  "), ["/a.raw"])
 
 
 if __name__ == "__main__":

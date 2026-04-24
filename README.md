@@ -9,6 +9,8 @@ Python RAW/YUV 图像查看与格式转换工具。
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
 - 支持主界面拖拽打开文件，支持转换输入拖拽
+- 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item
+- 支持 Recent Files 最近文件列表
 - Convert 输出支持默认 `out` 目录（可在 Settings 调整）与手动更改
 - 内置 Help：格式排列、Packed bit 规则与示例
 - 默认显示为 Fit to Window，可自行缩放
@@ -29,6 +31,7 @@ python -m raw_view
 
 - `Default convert output folder`：转换默认输出子目录名（默认 `out`）
 - `Saved image DPI`：导出 PNG/JPEG 的目标 DPI（默认 300）
+- `UI font size`：主界面字体大小（默认 13）
 
 ## 打包为 EXE
 
