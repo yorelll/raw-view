@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .converter import image_file_to_raw, image_file_to_yuv
+from .converter import bayer8_to_rgb, image_file_to_raw, image_file_to_yuv
 from .formats import (
     ImageSpec,
     RAW_BITS,
@@ -93,6 +93,8 @@ class ConvertDialog(QDialog):
         self.yuv_type.addItems(["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"])
         self.align = QComboBox()
         self.align.addItems(["lsb", "msb"])
+        self.raw_source_mode = QComboBox()
+        self.raw_source_mode.addItems(["bayer", "gray"])
         self.width = QSpinBox()
         self.width.setRange(1, 65535)
         self.width.setValue(640)
@@ -107,6 +109,7 @@ class ConvertDialog(QDialog):
         form.addRow("RAW type", self.raw_type)
         form.addRow("YUV format", self.yuv_type)
         form.addRow("Alignment", self.align)
+        form.addRow("RAW source", self.raw_source_mode)
         form.addRow("Width", self.width)
         form.addRow("Height", self.height)
 
@@ -146,6 +149,7 @@ class ConvertDialog(QDialog):
                     self.width.value(),
                     self.height.value(),
                     alignment=self.align.currentText(),
+                    source_mode=self.raw_source_mode.currentText(),
                 )
             else:
                 image_file_to_yuv(
@@ -184,6 +188,8 @@ class MainWindow(QMainWindow):
         self.align_combo.addItems(["lsb", "msb"])
         self.endian_combo = QComboBox()
         self.endian_combo.addItems(["little", "big"])
+        self.raw_preview_combo = QComboBox()
+        self.raw_preview_combo.addItems(["Bayer Color (RGGB)", "Grayscale"])
         self.width_spin = QSpinBox()
         self.width_spin.setRange(1, 65535)
         self.width_spin.setValue(640)
@@ -207,6 +213,7 @@ class MainWindow(QMainWindow):
         form.addRow("Format", self.format_combo)
         form.addRow("Alignment", self.align_combo)
         form.addRow("Endianness", self.endian_combo)
+        form.addRow("RAW preview", self.raw_preview_combo)
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
@@ -260,16 +267,19 @@ class MainWindow(QMainWindow):
             self.format_combo.addItems(self.raw_formats)
             self.align_combo.setEnabled(True)
             self.endian_combo.setEnabled(True)
+            self.raw_preview_combo.setEnabled(True)
             self.yuv_desc.setVisible(False)
         elif image_type == "YUV":
             self.format_combo.addItems(self.yuv_formats)
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
+            self.raw_preview_combo.setEnabled(False)
             self.yuv_desc.setVisible(True)
         else:
             self.format_combo.addItems(["N/A"])
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
+            self.raw_preview_combo.setEnabled(False)
             self.yuv_desc.setVisible(False)
 
     def _qimage_from_gray(self, gray: np.ndarray) -> QImage:
@@ -328,8 +338,18 @@ class MainWindow(QMainWindow):
                     return
                 raw = decode_raw(data, spec, self.options.format_name, self.options.alignment, self.options.endianness)
                 gray = raw_to_display_gray(raw, self.options.format_name)
-                qimg = self._qimage_from_gray(gray)
-                self.current_display = gray
+                if self.raw_preview_combo.currentText().startswith("Bayer"):
+                    try:
+                        rgb = bayer8_to_rgb(gray, pattern="RGGB")
+                    except Exception:
+                        qimg = self._qimage_from_gray(gray)
+                        self.current_display = gray
+                    else:
+                        qimg = self._qimage_from_rgb(rgb)
+                        self.current_display = rgb
+                else:
+                    qimg = self._qimage_from_gray(gray)
+                    self.current_display = gray
             elif self.options.image_type == "YUV":
                 expected = expected_frame_size_yuv(self.options.format_name, spec.width, spec.height)
                 if not self._warn_size_mismatch(len(data) - spec.offset, expected):

@@ -27,5 +27,10 @@ HELP_HTML = """
 <li>422: YUYV, UYVY, NV16</li>
 </ul>
 <h3>Image Conversion Rules</h3>
-<p>PNG/JPEG/BMP are loaded as BGR, optionally resized, converted to gray for RAW or RGB-to-YUV for YUV formats.</p>
+<p>PNG/JPEG/BMP are loaded as BGR and optionally resized.</p>
+<ul>
+<li>RAW conversion supports Bayer (default, RGGB) or gray source.</li>
+<li>RAW viewing supports Bayer color preview (RGGB) or grayscale preview.</li>
+<li>YUV conversion uses RGB-to-YUV conversion with subformat-specific chroma sampling.</li>
+</ul>
 """
