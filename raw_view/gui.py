@@ -337,19 +337,22 @@ class MainWindow(QMainWindow):
                 if not self._warn_size_mismatch(len(data) - spec.offset, expected):
                     return
                 raw = decode_raw(data, spec, self.options.format_name, self.options.alignment, self.options.endianness)
-                gray = raw_to_display_gray(raw, self.options.format_name)
+                raw8 = raw_to_display_gray(raw, self.options.format_name)
                 if self.raw_preview_combo.currentText().startswith("Bayer"):
                     try:
-                        rgb = bayer8_to_rgb(gray, pattern="RGGB")
-                    except Exception:
-                        qimg = self._qimage_from_gray(gray)
-                        self.current_display = gray
+                        rgb = bayer8_to_rgb(raw8, pattern="RGGB")
+                    except ValueError as exc:
+                        self.status.showMessage(
+                            f"Bayer color preview failed; auto-switched to grayscale for this frame (check Bayer pattern/size): {exc}"
+                        )
+                        qimg = self._qimage_from_gray(raw8)
+                        self.current_display = raw8
                     else:
                         qimg = self._qimage_from_rgb(rgb)
                         self.current_display = rgb
                 else:
-                    qimg = self._qimage_from_gray(gray)
-                    self.current_display = gray
+                    qimg = self._qimage_from_gray(raw8)
+                    self.current_display = raw8
             elif self.options.image_type == "YUV":
                 expected = expected_frame_size_yuv(self.options.format_name, spec.width, spec.height)
                 if not self._warn_size_mismatch(len(data) - spec.offset, expected):
