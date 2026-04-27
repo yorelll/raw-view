@@ -20,6 +20,8 @@ pyinstaller --noconfirm --clean --windowed --name raw-view `
     --hidden-import=PIL `
     --collect-all=cv2 `
     --collect-all=PyQt5 `
+    --collect-all=qdarkstyle `
+    --collect-all=qtawesome `
     --add-data ".venv/Lib/site-packages/PyQt5/Qt5/translations;Qt5/translations" `
     raw_view/__main__.py
 ```
@@ -45,6 +47,8 @@ pyinstaller --noconfirm --clean --console --name raw-view ^
     --hidden-import=PIL ^
     --collect-all=cv2 ^
     --collect-all=PyQt5 ^
+    --collect-all=qdarkstyle ^
+    --collect-all=qtawesome ^
     raw_view/__main__.py
 dist\raw-view\raw-view.exe
 ```

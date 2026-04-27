@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import qdarkstyle
+import qtawesome as qta
 
 from .converter import bayer8_to_rgb, image_file_to_raw, image_file_to_yuv
 from .formats import (
@@ -18,9 +20,10 @@ from .formats import (
     raw_to_display_gray,
 )
 from .help_content import HELP_HTML
+from qdarkstyle.light.palette import LightPalette
 
 from PyQt5.QtCore import QSettings, Qt, pyqtSignal
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QImage, QKeySequence, QPixmap
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -678,14 +681,14 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(toolbar.iconSize())
-        for action, icon_type in [
-            (open_action, QStyle.SP_DialogOpenButton),
-            (save_action, QStyle.SP_DialogSaveButton),
-            (convert, QStyle.SP_ArrowRight),
-            (settings_action, QStyle.SP_FileDialogDetailedView),
-            (fmt_help, QStyle.SP_MessageBoxQuestion),
+        for action, icon_name, icon_type in [
+            (open_action, "fa5s.folder-open", QStyle.SP_DialogOpenButton),
+            (save_action, "fa5s.save", QStyle.SP_DialogSaveButton),
+            (convert, "fa5s.exchange-alt", QStyle.SP_ArrowRight),
+            (settings_action, "fa5s.cog", QStyle.SP_FileDialogDetailedView),
+            (fmt_help, "fa5s.question-circle", QStyle.SP_MessageBoxQuestion),
         ]:
-            action.setIcon(self.style().standardIcon(icon_type))
+            action.setIcon(self._build_action_icon(icon_name, icon_type))
             toolbar.addAction(action)
 
         self._on_type_changed(self.type_combo.currentText())
@@ -899,7 +902,21 @@ class MainWindow(QMainWindow):
     def _apply_theme(self) -> None:
         font_size = self.settings.ui_font_size
         selected_theme = self.settings.ui_theme
-        self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
+        app = QApplication.instance()
+        if app is not None:
+            if selected_theme == "dark":
+                base_stylesheet = qdarkstyle.load_stylesheet_pyqt5()
+            else:
+                base_stylesheet = qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
+            app.setStyleSheet(f"{base_stylesheet}\n{build_ui_stylesheet(selected_theme, font_size)}")
+        else:
+            self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
+
+    def _build_action_icon(self, icon_name: str, fallback_icon: QStyle.StandardPixmap) -> QIcon:
+        try:
+            return qta.icon(icon_name, color="#3B82F6", color_disabled="#64748B")
+        except Exception:
+            return self.style().standardIcon(fallback_icon)
 
     def _open_item(self, path: str, decode: bool) -> None:
         if not path or not os.path.isfile(path):
