@@ -114,12 +114,12 @@ def add_recent_file_entry(existing: object, path: str, max_items: int = MAX_RECE
     return result
 
 
-def normalize_ui_theme(value: object) -> str:
+def normalize_ui_theme(theme: object) -> str:
     """Normalize UI theme key to one of supported values."""
 
-    if value is None:
+    if theme is None:
         return "light"
-    normalized = str(value).strip().lower()
+    normalized = str(theme).strip().lower()
     return normalized if normalized in MATERIAL_THEME_FILES else "light"
 
 
@@ -332,7 +332,7 @@ class SettingsDialog(QDialog):
         self._settings.default_output_dirname = self.output_dir_edit.text()
         self._settings.save_dpi = self.dpi_spin.value()
         self._settings.ui_font_size = self.font_size_spin.value()
-        self._settings.ui_theme = str(self.theme_combo.currentData() or "light")
+        self._settings.ui_theme = str(self.theme_combo.currentData())
         self.accept()
 
 
@@ -838,36 +838,34 @@ class MainWindow(QMainWindow):
         font_size = self.settings.ui_font_size
         selected_theme = self.settings.ui_theme
         app = QApplication.instance()
-        qt_material_apply_stylesheet = None
         if app is not None:
             try:
-                from qt_material import apply_stylesheet as qt_material_apply_stylesheet
+                from qt_material import apply_stylesheet
+                apply_stylesheet(app, theme=MATERIAL_THEME_FILES[selected_theme])
+                self.setStyleSheet(
+                    f"""
+                    QWidget {{
+                        font-size: {font_size}px;
+                    }}
+                    #controlPanel {{
+                        border-radius: 8px;
+                    }}
+                    QTabWidget::pane {{
+                        border-radius: 8px;
+                    }}
+                    QComboBox, QSpinBox, QLineEdit {{
+                        border-radius: 6px;
+                        padding: 5px 8px;
+                    }}
+                    QPushButton {{
+                        border-radius: 6px;
+                        padding: 8px 14px;
+                    }}
+                    """
+                )
+                return
             except ImportError:
-                qt_material_apply_stylesheet = None
-        if app is not None and qt_material_apply_stylesheet is not None:
-            qt_material_apply_stylesheet(app, theme=MATERIAL_THEME_FILES[selected_theme])
-            self.setStyleSheet(
-                f"""
-                QWidget {{
-                    font-size: {font_size}px;
-                }}
-                #controlPanel {{
-                    border-radius: 8px;
-                }}
-                QTabWidget::pane {{
-                    border-radius: 8px;
-                }}
-                QComboBox, QSpinBox, QLineEdit {{
-                    border-radius: 6px;
-                    padding: 5px 8px;
-                }}
-                QPushButton {{
-                    border-radius: 6px;
-                    padding: 8px 14px;
-                }}
-                """
-            )
-            return
+                pass
 
         self.setStyleSheet(
             f"""

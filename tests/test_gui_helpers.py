@@ -55,6 +55,7 @@ class GuiHelperTests(unittest.TestCase):
     def test_normalize_ui_theme(self):
         self.assertEqual(normalize_ui_theme("dark"), "dark")
         self.assertEqual(normalize_ui_theme(" Light "), "light")
+        self.assertEqual(normalize_ui_theme(""), "light")
         self.assertEqual(normalize_ui_theme("unknown"), "light")
         self.assertEqual(normalize_ui_theme(None), "light")
 
