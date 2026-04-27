@@ -54,6 +54,8 @@ BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 MAX_RECENT_FILES = 10
 UI_THEMES = {"light", "dark"}
+ACTION_ICON_COLOR = "#3B82F6"
+ACTION_ICON_DISABLED_COLOR = "#64748B"
 THEME_PALETTES = {
     "light": {
         "main_bg": "#F8FAFC",
@@ -914,8 +916,8 @@ class MainWindow(QMainWindow):
 
     def _build_action_icon(self, icon_name: str, fallback_icon: QStyle.StandardPixmap) -> QIcon:
         try:
-            return qta.icon(icon_name, color="#3B82F6", color_disabled="#64748B")
-        except Exception:
+            return qta.icon(icon_name, color=ACTION_ICON_COLOR, color_disabled=ACTION_ICON_DISABLED_COLOR)
+        except (KeyError, TypeError, ValueError):
             return self.style().standardIcon(fallback_icon)
 
     def _open_item(self, path: str, decode: bool) -> None:
