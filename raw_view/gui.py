@@ -51,6 +51,22 @@ BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 MAX_RECENT_FILES = 10
 UI_THEMES = {"light", "dark"}
+THEME_PALETTES = {
+    "light": {
+        "main_bg": "#F8FAFC",
+        "text_color": "#1E293B",
+        "panel_bg": "#FFFFFF",
+        "border_color": "#E2E8F0",
+        "input_bg": "#FFFFFF",
+    },
+    "dark": {
+        "main_bg": "#0F172A",
+        "text_color": "#E2E8F0",
+        "panel_bg": "#111827",
+        "border_color": "#334155",
+        "input_bg": "#1F2937",
+    },
+}
 
 
 @dataclass
@@ -122,36 +138,33 @@ def normalize_ui_theme(theme: object) -> str:
 
 def build_ui_stylesheet(theme: str, font_size: int) -> str:
     normalized_theme = normalize_ui_theme(theme)
-    if normalized_theme == "dark":
-        main_bg, text_color, panel_bg, border_color, input_bg = "#0F172A", "#E2E8F0", "#111827", "#334155", "#1F2937"
-    else:
-        main_bg, text_color, panel_bg, border_color, input_bg = "#F8FAFC", "#1E293B", "#FFFFFF", "#E2E8F0", "#FFFFFF"
+    palette = THEME_PALETTES[normalized_theme]
 
     return f"""
         QMainWindow {{
-            background-color: {main_bg};
-            color: {text_color};
+            background-color: {palette["main_bg"]};
+            color: {palette["text_color"]};
         }}
         QWidget {{
             font-size: {font_size}px;
-            color: {text_color};
+            color: {palette["text_color"]};
         }}
         #controlPanel {{
-            background: {panel_bg};
-            border: 1px solid {border_color};
+            background: {palette["panel_bg"]};
+            border: 1px solid {palette["border_color"]};
             border-radius: 8px;
         }}
         QTabWidget::pane {{
-            border: 1px solid {border_color};
-            background: {panel_bg};
+            border: 1px solid {palette["border_color"]};
+            background: {palette["panel_bg"]};
             border-radius: 8px;
         }}
         QComboBox, QSpinBox, QLineEdit {{
-            border: 1px solid {border_color};
+            border: 1px solid {palette["border_color"]};
             border-radius: 6px;
             padding: 6px 8px;
-            background: {input_bg};
-            color: {text_color};
+            background: {palette["input_bg"]};
+            color: {palette["text_color"]};
         }}
         QPushButton {{
             border-radius: 6px;
