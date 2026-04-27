@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,13 @@ MAX_RECENT_FILES = 10
 UI_THEMES = {"light", "dark"}
 ACTION_ICON_COLOR = "#3B82F6"
 ACTION_ICON_DISABLED_COLOR = "#64748B"
+ACTION_ICON_NAMES = {
+    "open": "fa5s.folder-open",
+    "save": "fa5s.save",
+    "convert": "fa5s.exchange-alt",
+    "settings": "fa5s.cog",
+    "help": "fa5s.question-circle",
+}
 THEME_PALETTES = {
     "light": {
         "main_bg": "#F8FAFC",
@@ -187,6 +195,15 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {palette["button_hover_bg"]};
         }}
     """
+
+
+@lru_cache(maxsize=2)
+def load_qdarkstyle_stylesheet(theme: str) -> str:
+    if normalize_ui_theme(theme) == "dark":
+        return qdarkstyle.load_stylesheet_pyqt5()
+    from qdarkstyle.light.palette import LightPalette
+
+    return qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
 
 
 class AppSettings:
@@ -683,11 +700,11 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setIconSize(toolbar.iconSize())
         for action, icon_name, icon_type in [
-            (open_action, "fa5s.folder-open", QStyle.SP_DialogOpenButton),
-            (save_action, "fa5s.save", QStyle.SP_DialogSaveButton),
-            (convert, "fa5s.exchange-alt", QStyle.SP_ArrowRight),
-            (settings_action, "fa5s.cog", QStyle.SP_FileDialogDetailedView),
-            (fmt_help, "fa5s.question-circle", QStyle.SP_MessageBoxQuestion),
+            (open_action, ACTION_ICON_NAMES["open"], QStyle.SP_DialogOpenButton),
+            (save_action, ACTION_ICON_NAMES["save"], QStyle.SP_DialogSaveButton),
+            (convert, ACTION_ICON_NAMES["convert"], QStyle.SP_ArrowRight),
+            (settings_action, ACTION_ICON_NAMES["settings"], QStyle.SP_FileDialogDetailedView),
+            (fmt_help, ACTION_ICON_NAMES["help"], QStyle.SP_MessageBoxQuestion),
         ]:
             action.setIcon(self._build_action_icon(icon_name, icon_type))
             toolbar.addAction(action)
@@ -905,12 +922,7 @@ class MainWindow(QMainWindow):
         selected_theme = self.settings.ui_theme
         app = QApplication.instance()
         if app is not None:
-            if selected_theme == "dark":
-                base_stylesheet = qdarkstyle.load_stylesheet_pyqt5()
-            else:
-                from qdarkstyle.light.palette import LightPalette
-
-                base_stylesheet = qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
+            base_stylesheet = load_qdarkstyle_stylesheet(selected_theme)
             app.setStyleSheet(f"{base_stylesheet}\n{build_ui_stylesheet(selected_theme, font_size)}")
         else:
             self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
