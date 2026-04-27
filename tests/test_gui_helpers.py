@@ -1,7 +1,9 @@
 import unittest
 
 from raw_view.gui import (
+    THEME_PALETTES,
     add_recent_file_entry,
+    build_ui_stylesheet,
     build_default_output_path,
     dpi_to_dots_per_meter,
     normalize_recent_files,
@@ -58,6 +60,18 @@ class GuiHelperTests(unittest.TestCase):
         self.assertEqual(normalize_ui_theme(""), "light")
         self.assertEqual(normalize_ui_theme("unknown"), "light")
         self.assertEqual(normalize_ui_theme(None), "light")
+
+    def test_build_ui_stylesheet_light(self):
+        stylesheet = build_ui_stylesheet("light", 13)
+        self.assertIn("font-size: 13px;", stylesheet)
+        for color in THEME_PALETTES["light"].values():
+            self.assertIn(color, stylesheet)
+
+    def test_build_ui_stylesheet_dark(self):
+        stylesheet = build_ui_stylesheet("dark", 15)
+        self.assertIn("font-size: 15px;", stylesheet)
+        for color in THEME_PALETTES["dark"].values():
+            self.assertIn(color, stylesheet)
 
 
 if __name__ == "__main__":
