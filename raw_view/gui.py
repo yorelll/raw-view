@@ -50,10 +50,7 @@ from PyQt5.QtWidgets import (
 BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 MAX_RECENT_FILES = 10
-MATERIAL_THEME_FILES = {
-    "light": "light_blue.xml",
-    "dark": "dark_teal.xml",
-}
+UI_THEMES = {"light", "dark"}
 
 
 @dataclass
@@ -120,7 +117,90 @@ def normalize_ui_theme(theme: object) -> str:
     if theme is None:
         return "light"
     normalized = str(theme).strip().lower()
-    return normalized if normalized in MATERIAL_THEME_FILES else "light"
+    return normalized if normalized in UI_THEMES else "light"
+
+
+def build_ui_stylesheet(theme: str, font_size: int) -> str:
+    normalized_theme = normalize_ui_theme(theme)
+    if normalized_theme == "dark":
+        return (
+            f"""
+            QMainWindow {{
+                background-color: #0F172A;
+                color: #E2E8F0;
+            }}
+            QWidget {{
+                font-size: {font_size}px;
+                color: #E2E8F0;
+            }}
+            #controlPanel {{
+                background: #111827;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }}
+            QTabWidget::pane {{
+                border: 1px solid #334155;
+                background: #111827;
+                border-radius: 8px;
+            }}
+            QComboBox, QSpinBox, QLineEdit {{
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px 8px;
+                background: #1F2937;
+                color: #E2E8F0;
+            }}
+            QPushButton {{
+                border-radius: 6px;
+                padding: 8px 14px;
+                background: #2563EB;
+                color: white;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background: #1D4ED8;
+            }}
+            """
+        )
+
+    return (
+        f"""
+        QMainWindow {{
+            background-color: #F8FAFC;
+            color: #1E293B;
+        }}
+        QWidget {{
+            font-size: {font_size}px;
+            color: #1E293B;
+        }}
+        #controlPanel {{
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 8px;
+        }}
+        QTabWidget::pane {{
+            border: 1px solid #E2E8F0;
+            background: #FFFFFF;
+            border-radius: 8px;
+        }}
+        QComboBox, QSpinBox, QLineEdit {{
+            border: 1px solid #E2E8F0;
+            border-radius: 6px;
+            padding: 6px 8px;
+            background: #FFFFFF;
+        }}
+        QPushButton {{
+            border-radius: 6px;
+            padding: 8px 14px;
+            background: #2563EB;
+            color: white;
+            border: none;
+        }}
+        QPushButton:hover {{
+            background: #1D4ED8;
+        }}
+        """
+    )
 
 
 class AppSettings:
@@ -837,74 +917,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self) -> None:
         font_size = self.settings.ui_font_size
         selected_theme = self.settings.ui_theme
-        app = QApplication.instance()
-        if app is not None:
-            try:
-                from qt_material import apply_stylesheet
-                apply_stylesheet(app, theme=MATERIAL_THEME_FILES[selected_theme])
-                self.setStyleSheet(
-                    f"""
-                    QWidget {{
-                        font-size: {font_size}px;
-                    }}
-                    #controlPanel {{
-                        border-radius: 8px;
-                    }}
-                    QTabWidget::pane {{
-                        border-radius: 8px;
-                    }}
-                    QComboBox, QSpinBox, QLineEdit {{
-                        border-radius: 6px;
-                        padding: 5px 8px;
-                    }}
-                    QPushButton {{
-                        border-radius: 6px;
-                        padding: 8px 14px;
-                    }}
-                    """
-                )
-                return
-            except ImportError:
-                pass
-
-        self.setStyleSheet(
-            f"""
-            QMainWindow {{
-                background-color: #F8FAFC;
-                color: #1E293B;
-            }}
-            QWidget {{
-                font-size: {font_size}px;
-                color: #1E293B;
-            }}
-            #controlPanel {{
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-            }}
-            QTabWidget::pane {{
-                border: 1px solid #E2E8F0;
-                background: #FFFFFF;
-                border-radius: 8px;
-            }}
-            QComboBox, QSpinBox, QLineEdit {{
-                border: 1px solid #E2E8F0;
-                border-radius: 6px;
-                padding: 6px 8px;
-                background: #FFFFFF;
-            }}
-            QPushButton {{
-                border-radius: 6px;
-                padding: 8px 14px;
-                background: #2563EB;
-                color: white;
-                border: none;
-            }}
-            QPushButton:hover {{
-                background: #1D4ED8;
-            }}
-            """
-        )
+        self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
 
     def _open_item(self, path: str, decode: bool) -> None:
         if not path or not os.path.isfile(path):

@@ -32,7 +32,7 @@ python -m raw_view
 - `Default convert output folder`：转换默认输出子目录名（默认 `out`）
 - `Saved image DPI`：导出 PNG/JPEG 的目标 DPI（默认 300）
 - `UI font size`：主界面字体大小（默认 13）
-- `UI theme`：界面主题（`Light` / `Dark`，基于 Qt-Material）
+- `UI theme`：界面主题（`Light` / `Dark`，内置样式）
 
 ## 打包为 EXE
 
