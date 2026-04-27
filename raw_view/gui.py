@@ -58,6 +58,9 @@ THEME_PALETTES = {
         "panel_bg": "#FFFFFF",
         "border_color": "#E2E8F0",
         "input_bg": "#FFFFFF",
+        "button_bg": "#2563EB",
+        "button_hover_bg": "#1D4ED8",
+        "button_text_color": "#FFFFFF",
     },
     "dark": {
         "main_bg": "#0F172A",
@@ -65,6 +68,9 @@ THEME_PALETTES = {
         "panel_bg": "#111827",
         "border_color": "#334155",
         "input_bg": "#1F2937",
+        "button_bg": "#2563EB",
+        "button_hover_bg": "#1D4ED8",
+        "button_text_color": "#FFFFFF",
     },
 }
 
@@ -169,12 +175,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton {{
             border-radius: 6px;
             padding: 8px 14px;
-            background: #2563EB;
-            color: white;
+            background: {palette["button_bg"]};
+            color: {palette["button_text_color"]};
             border: none;
         }}
         QPushButton:hover {{
-            background: #1D4ED8;
+            background: {palette["button_hover_bg"]};
         }}
     """
 
