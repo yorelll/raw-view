@@ -5,6 +5,7 @@ from raw_view.gui import (
     build_default_output_path,
     dpi_to_dots_per_meter,
     normalize_recent_files,
+    normalize_ui_theme,
 )
 
 
@@ -50,6 +51,13 @@ class GuiHelperTests(unittest.TestCase):
 
     def test_add_recent_file_entry_empty(self):
         self.assertEqual(add_recent_file_entry(["/a.raw"], "  "), ["/a.raw"])
+
+    def test_normalize_ui_theme(self):
+        self.assertEqual(normalize_ui_theme("dark"), "dark")
+        self.assertEqual(normalize_ui_theme(" Light "), "light")
+        self.assertEqual(normalize_ui_theme(""), "light")
+        self.assertEqual(normalize_ui_theme("unknown"), "light")
+        self.assertEqual(normalize_ui_theme(None), "light")
 
 
 if __name__ == "__main__":

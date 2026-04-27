@@ -50,6 +50,10 @@ from PyQt5.QtWidgets import (
 BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 MAX_RECENT_FILES = 10
+MATERIAL_THEME_FILES = {
+    "light": "light_blue.xml",
+    "dark": "dark_teal.xml",
+}
 
 
 @dataclass
@@ -110,6 +114,15 @@ def add_recent_file_entry(existing: object, path: str, max_items: int = MAX_RECE
     return result
 
 
+def normalize_ui_theme(theme: object) -> str:
+    """Normalize UI theme key to one of supported values."""
+
+    if theme is None:
+        return "light"
+    normalized = str(theme).strip().lower()
+    return normalized if normalized in MATERIAL_THEME_FILES else "light"
+
+
 class AppSettings:
     def __init__(self) -> None:
         self._store = QSettings("yorelll", "raw-view")
@@ -149,6 +162,14 @@ class AppSettings:
     @ui_font_size.setter
     def ui_font_size(self, value: int) -> None:
         self._store.setValue("ui/font_size", max(10, min(24, int(value))))
+
+    @property
+    def ui_theme(self) -> str:
+        return normalize_ui_theme(self._store.value("ui/theme", "light"))
+
+    @ui_theme.setter
+    def ui_theme(self, value: str) -> None:
+        self._store.setValue("ui/theme", normalize_ui_theme(value))
 
     @property
     def recent_files(self) -> list[str]:
@@ -280,11 +301,18 @@ class SettingsDialog(QDialog):
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(10, 24)
         self.font_size_spin.setValue(settings.ui_font_size)
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Dark", "dark")
+        selected_theme_index = self.theme_combo.findData(settings.ui_theme)
+        if selected_theme_index >= 0:
+            self.theme_combo.setCurrentIndex(selected_theme_index)
 
         form = QFormLayout()
         form.addRow("Default convert output folder", self.output_dir_edit)
         form.addRow("Saved image DPI", self.dpi_spin)
         form.addRow("UI font size", self.font_size_spin)
+        form.addRow("UI theme", self.theme_combo)
 
         save_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
@@ -304,6 +332,7 @@ class SettingsDialog(QDialog):
         self._settings.default_output_dirname = self.output_dir_edit.text()
         self._settings.save_dpi = self.dpi_spin.value()
         self._settings.ui_font_size = self.font_size_spin.value()
+        self._settings.ui_theme = str(self.theme_combo.currentData())
         self.accept()
 
 
@@ -807,6 +836,37 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         font_size = self.settings.ui_font_size
+        selected_theme = self.settings.ui_theme
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                from qt_material import apply_stylesheet
+                apply_stylesheet(app, theme=MATERIAL_THEME_FILES[selected_theme])
+                self.setStyleSheet(
+                    f"""
+                    QWidget {{
+                        font-size: {font_size}px;
+                    }}
+                    #controlPanel {{
+                        border-radius: 8px;
+                    }}
+                    QTabWidget::pane {{
+                        border-radius: 8px;
+                    }}
+                    QComboBox, QSpinBox, QLineEdit {{
+                        border-radius: 6px;
+                        padding: 5px 8px;
+                    }}
+                    QPushButton {{
+                        border-radius: 6px;
+                        padding: 8px 14px;
+                    }}
+                    """
+                )
+                return
+            except ImportError:
+                pass
+
         self.setStyleSheet(
             f"""
             QMainWindow {{
