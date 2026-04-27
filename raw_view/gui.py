@@ -123,71 +123,35 @@ def normalize_ui_theme(theme: object) -> str:
 def build_ui_stylesheet(theme: str, font_size: int) -> str:
     normalized_theme = normalize_ui_theme(theme)
     if normalized_theme == "dark":
-        return (
-            f"""
-            QMainWindow {{
-                background-color: #0F172A;
-                color: #E2E8F0;
-            }}
-            QWidget {{
-                font-size: {font_size}px;
-                color: #E2E8F0;
-            }}
-            #controlPanel {{
-                background: #111827;
-                border: 1px solid #334155;
-                border-radius: 8px;
-            }}
-            QTabWidget::pane {{
-                border: 1px solid #334155;
-                background: #111827;
-                border-radius: 8px;
-            }}
-            QComboBox, QSpinBox, QLineEdit {{
-                border: 1px solid #334155;
-                border-radius: 6px;
-                padding: 6px 8px;
-                background: #1F2937;
-                color: #E2E8F0;
-            }}
-            QPushButton {{
-                border-radius: 6px;
-                padding: 8px 14px;
-                background: #2563EB;
-                color: white;
-                border: none;
-            }}
-            QPushButton:hover {{
-                background: #1D4ED8;
-            }}
-            """
-        )
+        main_bg, text_color, panel_bg, border_color, input_bg = "#0F172A", "#E2E8F0", "#111827", "#334155", "#1F2937"
+    else:
+        main_bg, text_color, panel_bg, border_color, input_bg = "#F8FAFC", "#1E293B", "#FFFFFF", "#E2E8F0", "#FFFFFF"
 
-    return (
-        f"""
+    return f"""
         QMainWindow {{
-            background-color: #F8FAFC;
-            color: #1E293B;
+            background-color: {main_bg};
+            color: {text_color};
         }}
         QWidget {{
             font-size: {font_size}px;
-            color: #1E293B;
+            color: {text_color};
         }}
         #controlPanel {{
-            background: #FFFFFF;
-            border: 1px solid #E2E8F0;
+            background: {panel_bg};
+            border: 1px solid {border_color};
             border-radius: 8px;
         }}
         QTabWidget::pane {{
-            border: 1px solid #E2E8F0;
-            background: #FFFFFF;
+            border: 1px solid {border_color};
+            background: {panel_bg};
             border-radius: 8px;
         }}
         QComboBox, QSpinBox, QLineEdit {{
-            border: 1px solid #E2E8F0;
+            border: 1px solid {border_color};
             border-radius: 6px;
             padding: 6px 8px;
-            background: #FFFFFF;
+            background: {input_bg};
+            color: {text_color};
         }}
         QPushButton {{
             border-radius: 6px;
@@ -199,8 +163,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton:hover {{
             background: #1D4ED8;
         }}
-        """
-    )
+    """
 
 
 class AppSettings:
