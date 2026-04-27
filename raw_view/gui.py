@@ -20,7 +20,6 @@ from .formats import (
     raw_to_display_gray,
 )
 from .help_content import HELP_HTML
-from qdarkstyle.light.palette import LightPalette
 
 from PyQt5.QtCore import QSettings, Qt, pyqtSignal
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPixmap
@@ -909,6 +908,8 @@ class MainWindow(QMainWindow):
             if selected_theme == "dark":
                 base_stylesheet = qdarkstyle.load_stylesheet_pyqt5()
             else:
+                from qdarkstyle.light.palette import LightPalette
+
                 base_stylesheet = qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
             app.setStyleSheet(f"{base_stylesheet}\n{build_ui_stylesheet(selected_theme, font_size)}")
         else:
