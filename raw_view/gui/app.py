@@ -19,7 +19,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QStatusBar,
-    QStyle,
     QTabWidget,
     QWidget,
 )
@@ -75,9 +74,11 @@ class MainWindow(QMainWindow):
         self.file_status = QLabel("File: -")
         self.image_status = QLabel("Image: -")
         self.zoom_status = QLabel("Zoom: 100%")
+        self.frame_status = QLabel("Frame: -")
         self.state_status = QLabel("Ready")
         self.status.addPermanentWidget(self.file_status, 2)
         self.status.addPermanentWidget(self.image_status, 2)
+        self.status.addPermanentWidget(self.frame_status, 1)
         self.status.addPermanentWidget(self.zoom_status, 1)
         self.status.addPermanentWidget(self.state_status, 1)
 
@@ -86,6 +87,8 @@ class MainWindow(QMainWindow):
         self.panel.applyClicked.connect(self.decode_current)
         self.panel.typeChanged.connect(self._on_panel_type_changed)
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
+        self.panel.frameChanged.connect(self._on_frame_changed)
+        self.panel.zoomChanged.connect(self._on_panel_zoom_changed)
 
         # Tab widget
         self.item_tabs = QTabWidget()
@@ -150,10 +153,31 @@ class MainWindow(QMainWindow):
         fit = QAction("Fit to Window", self)
         fit.setShortcut("Ctrl+0")
         fit.triggered.connect(self._fit_image)
-        reset_zoom = QAction("Reset Zoom", self)
+        reset_zoom = QAction("Reset Zoom (1:1)", self)
         reset_zoom.triggered.connect(self._reset_zoom_current)
-        view_menu.addActions([zoom_in, zoom_out, fit])
-        view_menu.addAction(reset_zoom)
+
+        self.fullscreen_action = QAction("Fullscreen", self)
+        self.fullscreen_action.setShortcut("F11")
+        self.fullscreen_action.setCheckable(True)
+        self.fullscreen_action.triggered.connect(self._toggle_fullscreen)
+
+        view_menu.addActions([zoom_in, zoom_out, fit, reset_zoom])
+        view_menu.addSeparator()
+        view_menu.addAction(self.fullscreen_action)
+        view_menu.addSeparator()
+
+        # ── Rotate / Flip ──
+        rotate_cw = QAction("Rotate Clockwise", self)
+        rotate_cw.setShortcut("Ctrl+R")
+        rotate_cw.triggered.connect(self._rotate_cw_current)
+        rotate_ccw = QAction("Rotate Counter-clockwise", self)
+        rotate_ccw.setShortcut("Ctrl+Shift+R")
+        rotate_ccw.triggered.connect(self._rotate_ccw_current)
+        flip_h = QAction("Flip Horizontal", self)
+        flip_h.triggered.connect(self._flip_h_current)
+        flip_v = QAction("Flip Vertical", self)
+        flip_v.triggered.connect(self._flip_v_current)
+        view_menu.addActions([rotate_cw, rotate_ccw, flip_h, flip_v])
 
         # ── Tools ──
         tools_menu = menu.addMenu("Tools")
@@ -172,6 +196,7 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
+        toolbar.setObjectName("mainToolbar")
         for action, icon_name in [
             (self.open_action, ACTION_ICON_NAMES["open"]),
             (self.save_action, ACTION_ICON_NAMES["save"]),
@@ -180,7 +205,6 @@ class MainWindow(QMainWindow):
             action.setIcon(self._build_action_icon(icon_name))
             toolbar.addAction(action)
 
-        # Separator
         toolbar.addSeparator()
 
         settings_icon = self._build_action_icon(ACTION_ICON_NAMES["settings"])
@@ -237,6 +261,47 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes,
         )
         return result == QMessageBox.Yes
+
+    # ── Frame helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_frame_size(opts: DecodeOptions) -> int:
+        """Get the size of one frame in bytes for the current decode options."""
+        try:
+            if opts.image_type == "RAW" or opts.format_name in (
+                "RAW8", "RAW10", "RAW12", "RAW16", "RAW32",
+                "RAW10 Packed", "RAW12 Packed", "RAW14 Packed",
+            ):
+                return expected_frame_size_raw(opts.format_name, opts.width, opts.height)
+            else:
+                return expected_frame_size_yuv(opts.format_name, opts.width, opts.height)
+        except Exception:
+            return 0
+
+    def _compute_frame_info(self, item: ViewerItem) -> None:
+        """Calculate total frames from file size and frame size, store on item."""
+        opts = item.options
+        frame_size = self._get_frame_size(opts)
+        if frame_size <= 0:
+            item.total_frames = 1
+            return
+        try:
+            file_size = os.path.getsize(opts.file_path) - opts.offset
+        except OSError:
+            item.total_frames = 1
+            return
+        if file_size <= 0:
+            item.total_frames = 1
+            return
+        item.total_frames = max(1, file_size // frame_size)
+
+    def _update_frame_display(self, item: ViewerItem) -> None:
+        """Update panel frame info and status bar from item state."""
+        self.panel.set_frame_info(item.current_frame, item.total_frames)
+        if item.total_frames > 1:
+            self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
+        else:
+            self.frame_status.setText("Frame: -")
 
     # ── Drag & drop ──────────────────────────────────────────────────
 
@@ -336,6 +401,7 @@ class MainWindow(QMainWindow):
             self.file_status.setText("File: -")
             self.image_status.setText("Image: -")
             self.zoom_status.setText("Zoom: 100%")
+            self.frame_status.setText("Frame: -")
             self.state_status.setText("No item")
             self.panel.set_enabled(False)
         else:
@@ -373,6 +439,8 @@ class MainWindow(QMainWindow):
             endianness=opts.endianness,
             offset=opts.offset,
         )
+        self.panel.set_zoom_percent(item.zoom_percent)
+        self._update_frame_display(item)
         self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
         self._loading_item = False
 
@@ -384,14 +452,41 @@ class MainWindow(QMainWindow):
             f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
         )
         self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
+        if item.total_frames > 1:
+            self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
+        else:
+            self.frame_status.setText("Frame: -")
 
     # ── Panel signal handlers ────────────────────────────────────────
 
     def _on_panel_type_changed(self, image_type: str) -> None:
-        pass  # Panel handles its own UI updates
+        pass
 
     def _on_panel_raw_preview_changed(self, value: str) -> None:
-        pass  # Panel handles its own UI updates
+        pass
+
+    def _on_frame_changed(self, frame_index: int) -> None:
+        """User changed frame spin or clicked prev/next."""
+        item = self._current_item()
+        if item is None:
+            return
+        if frame_index == item.current_frame:
+            return
+        item.current_frame = max(0, min(frame_index, max(0, item.total_frames - 1)))
+        frame_size = self._get_frame_size(item.options)
+        if frame_size > 0:
+            item.options.offset = self.panel.offset_spin.value()  # base offset from panel
+            # Recalculate offset: base + frame * frame_size
+            # We store the effective decode offset separately
+            self.decode_current()
+
+    def _on_panel_zoom_changed(self, percent: int) -> None:
+        """Zoom slider or 1:1 button changed."""
+        item = self._current_item()
+        if item and item.view:
+            item.view.zoom_to(percent)
+            item.zoom_percent = percent
+            self.zoom_status.setText(f"Zoom: {percent}%")
 
     # ── Decode (async) ───────────────────────────────────────────────
 
@@ -405,7 +500,14 @@ class MainWindow(QMainWindow):
         self._save_panel_to_item(item)
 
         opts = item.options
-        spec = ImageSpec(opts.width, opts.height, opts.offset)
+
+        # Compute effective offset = base offset + frame_index * frame_size
+        frame_size = self._get_frame_size(opts)
+        effective_offset = opts.offset
+        if frame_size > 0 and item.total_frames > 0:
+            effective_offset = opts.offset + item.current_frame * frame_size
+
+        spec = ImageSpec(opts.width, opts.height, effective_offset)
 
         try:
             with open(path, "rb") as f:
@@ -426,16 +528,19 @@ class MainWindow(QMainWindow):
         except Exception:
             expected = -1
 
-        if expected > 0 and not self._warn_size_mismatch(self, len(data) - spec.offset, expected):
+        if expected > 0 and not self._warn_size_mismatch(self, len(data) - effective_offset, expected):
             return
 
-        # Standard Image — decode synchronously (fast, no thread overhead)
+        # Compute and store total frames
+        self._compute_frame_info(item)
+
+        # Standard Image — decode synchronously
         if opts.image_type == "Standard Image":
             self._decode_standard_image(data, item, opts)
             return
 
-        # RAW/YUV — decode in background thread
-        self._start_async_decode(data, item, opts)
+        # RAW/YUV — async
+        self._start_async_decode(data, item, opts, effective_offset)
 
     def _decode_standard_image(self, data: bytes, item: ViewerItem, opts: DecodeOptions) -> None:
         try:
@@ -446,16 +551,17 @@ class MainWindow(QMainWindow):
             item.current_display = rgb
             item.options.width = w
             item.options.height = h
+            item.total_frames = 1
+            item.current_frame = 0
             self._on_decode_success(item, qimg, w, h, "Standard Image")
         except Exception as exc:
             QMessageBox.critical(self, "Decode Failed", str(exc))
             self.state_status.setText("Decode failed")
 
-    def _start_async_decode(self, data: bytes, item: ViewerItem, opts: DecodeOptions) -> None:
-        # Cancel any existing worker
+    def _start_async_decode(self, data: bytes, item: ViewerItem, opts: DecodeOptions, effective_offset: int) -> None:
         self._cancel_async_decode()
 
-        spec = ImageSpec(opts.width, opts.height, opts.offset)
+        spec = ImageSpec(opts.width, opts.height, effective_offset)
         preview_mode = self.panel.raw_preview_combo.currentText() if hasattr(self, "panel") else "Grayscale"
         bayer_pattern = self.panel.bayer_pattern_combo.currentText() if hasattr(self, "panel") else "RGGB"
 
@@ -509,6 +615,7 @@ class MainWindow(QMainWindow):
         self.file_status.setText(f"File: {os.path.basename(path)} ({size} bytes)")
         self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
         self.state_status.setText("Decoded")
+        self._update_frame_display(item)
 
     def _on_decode_error(self, message: str) -> None:
         QMessageBox.critical(self, "Decode Failed", message)
@@ -551,26 +658,97 @@ class MainWindow(QMainWindow):
         item = self._current_item()
         if item and item.view:
             item.view.fit_image()
+            self.panel.set_zoom_percent(item.view.zoom_percent)
+            self.zoom_status.setText(f"Zoom: {item.view.zoom_percent}%")
 
     def _zoom_in_current(self) -> None:
         item = self._current_item()
         if item and item.view:
             item.view.zoom_in()
+            item.zoom_percent = item.view.zoom_percent
+            self.panel.set_zoom_percent(item.zoom_percent)
+            self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
 
     def _zoom_out_current(self) -> None:
         item = self._current_item()
         if item and item.view:
             item.view.zoom_out()
+            item.zoom_percent = item.view.zoom_percent
+            self.panel.set_zoom_percent(item.zoom_percent)
+            self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
 
     def _reset_zoom_current(self) -> None:
         item = self._current_item()
         if item and item.view:
             item.view.reset_zoom()
+            item.zoom_percent = 100
+            self.panel.set_zoom_percent(100)
+            self.zoom_status.setText("Zoom: 100%")
 
     def _on_item_zoom_changed(self, item: ViewerItem, zoom: int) -> None:
         item.zoom_percent = zoom
         if item is self._current_item():
             self.zoom_status.setText(f"Zoom: {zoom}%")
+            self.panel.set_zoom_percent(zoom)
+
+    # ── Rotate / Flip ───────────────────────────────────────────────
+
+    def _rotate_cw_current(self) -> None:
+        item = self._current_item()
+        if item and item.view and item.view.has_image():
+            item.view.rotate_cw()
+
+    def _rotate_ccw_current(self) -> None:
+        item = self._current_item()
+        if item and item.view and item.view.has_image():
+            item.view.rotate_ccw()
+
+    def _flip_h_current(self) -> None:
+        item = self._current_item()
+        if item and item.view and item.view.has_image():
+            item.view.flip_horizontal()
+
+    def _flip_v_current(self) -> None:
+        item = self._current_item()
+        if item and item.view and item.view.has_image():
+            item.view.flip_vertical()
+
+    # ── Fullscreen ──────────────────────────────────────────────────
+
+    def _toggle_fullscreen(self, checked: bool) -> None:
+        if checked:
+            self.showFullScreen()
+            self.menuBar().hide()
+            tb = self.findChild(QWidget, "mainToolbar")
+            if tb:
+                tb.hide()
+        else:
+            self.showNormal()
+            self.menuBar().show()
+            tb = self.findChild(QWidget, "mainToolbar")
+            if tb:
+                tb.show()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        """Handle keyboard shortcuts: arrows for frame nav, Escape to exit fullscreen."""
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self.fullscreen_action.setChecked(False)
+            self._toggle_fullscreen(False)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Left:
+            item = self._current_item()
+            if item and item.total_frames > 1 and item.current_frame > 0:
+                self.panel.frame_spin.setValue(item.current_frame - 1)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Right:
+            item = self._current_item()
+            if item and item.total_frames > 1 and item.current_frame < item.total_frames - 1:
+                self.panel.frame_spin.setValue(item.current_frame + 1)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ── Context menu ─────────────────────────────────────────────────
 
@@ -579,7 +757,12 @@ class MainWindow(QMainWindow):
         zoom_in = menu.addAction("Zoom In")
         zoom_out = menu.addAction("Zoom Out")
         fit = menu.addAction("Fit to Window")
-        reset = menu.addAction("Reset Zoom")
+        reset = menu.addAction("Reset Zoom (1:1)")
+        menu.addSeparator()
+        rotate_cw = menu.addAction("Rotate CW")
+        rotate_ccw = menu.addAction("Rotate CCW")
+        flip_h = menu.addAction("Flip H")
+        flip_v = menu.addAction("Flip V")
         menu.addSeparator()
         copy_action = menu.addAction("Copy Image")
         selected = menu.exec_(pos)
@@ -591,6 +774,14 @@ class MainWindow(QMainWindow):
             view.fit_image()
         elif selected == reset:
             view.reset_zoom()
+        elif selected == rotate_cw:
+            view.rotate_cw()
+        elif selected == rotate_ccw:
+            view.rotate_ccw()
+        elif selected == flip_h:
+            view.flip_horizontal()
+        elif selected == flip_v:
+            view.flip_vertical()
         elif selected == copy_action and view.has_image():
             QApplication.clipboard().setPixmap(view.current_pixmap())
 

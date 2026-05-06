@@ -76,6 +76,9 @@ class ViewerItem:
     current_display: object | None = None
     view: object | None = None
     zoom_percent: int = 100
+    current_frame: int = 0
+    total_frames: int = 0
+    rotation_angle: int = 0  # cumulative rotation in degrees
 
 
 # ── Settings ─────────────────────────────────────────────────────────────

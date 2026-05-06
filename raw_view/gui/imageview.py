@@ -39,6 +39,7 @@ class ImageView(QGraphicsView):
         self._img_height = pixmap.height()
         self.resetTransform()
         self._zoom_percent = 100
+        self._rotation = 0
         self.zoomChanged.emit(self._zoom_percent)
         self.setSceneRect(self._pixmap_item.boundingRect())
 
@@ -49,7 +50,7 @@ class ImageView(QGraphicsView):
         self._apply_zoom_step(0.8)
 
     def reset_zoom(self) -> None:
-        self.resetTransform()
+        self._reset_full_transform()
         self._zoom_percent = 100
         self.zoomChanged.emit(self._zoom_percent)
 
@@ -63,9 +64,11 @@ class ImageView(QGraphicsView):
     def zoom_to(self, percent: int) -> None:
         """Zoom to a specific percentage (clamped 10–1000)."""
         percent = max(10, min(1000, percent))
-        factor = percent / self._zoom_percent
-        self._apply_zoom_step(factor, emit=False)
+        self._reset_full_transform()
         self._zoom_percent = percent
+        if percent != 100:
+            factor = percent / 100.0
+            self.scale(factor, factor)
         self.zoomChanged.emit(self._zoom_percent)
 
     def has_image(self) -> bool:
@@ -85,6 +88,26 @@ class ImageView(QGraphicsView):
         """Return (width, height) of the currently displayed image."""
         return (self._img_width, self._img_height)
 
+    # ── Rotate / Flip ───────────────────────────────────────────────
+
+    def rotate_cw(self) -> None:
+        """Rotate 90 degrees clockwise."""
+        self.rotate(90)
+        self._rotation = (self._rotation + 90) % 360
+
+    def rotate_ccw(self) -> None:
+        """Rotate 90 degrees counter-clockwise."""
+        self.rotate(-90)
+        self._rotation = (self._rotation - 90) % 360
+
+    def flip_horizontal(self) -> None:
+        """Flip the view horizontally."""
+        self.scale(-1, 1)
+
+    def flip_vertical(self) -> None:
+        """Flip the view vertically."""
+        self.scale(1, -1)
+
     # ── internals ────────────────────────────────────────────────────
 
     def _apply_zoom_step(self, factor: float, *, emit: bool = True) -> None:
@@ -96,6 +119,10 @@ class ImageView(QGraphicsView):
         if emit:
             self.zoomChanged.emit(self._zoom_percent)
 
+    def _reset_full_transform(self) -> None:
+        """Reset transform, preserving nothing (used by zoom_to / reset_zoom)."""
+        self.resetTransform()
+
     # ── Qt event overrides ───────────────────────────────────────────
 
     def wheelEvent(self, event):  # noqa: N802
@@ -103,6 +130,18 @@ class ImageView(QGraphicsView):
             self._apply_zoom_step(1.25 if event.angleDelta().y() > 0 else 0.8)
             return
         super().wheelEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        """Double-click toggles between Fit to Window and 1:1 zoom."""
+        if self.has_image():
+            current = self._zoom_percent
+            # If within 5% of fit, go to 1:1; otherwise fit
+            estimated_fit = max(1, int(round(self.transform().m11() * 100))) if self.sceneRect().isNull() else current
+            if estimated_fit < 110:  # close to fit view
+                self.reset_zoom()
+            else:
+                self.fit_image()
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
         self.contextMenuRequested.emit(self, event.globalPos())
