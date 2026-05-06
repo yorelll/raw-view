@@ -1,10 +1,21 @@
-"""Image file conversion helpers."""
+"""Image file conversion helpers (encode image→RAW/YUV and decode RAW/YUV→image)."""
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
-from .formats import gray8_to_raw_bytes, rgb_to_yuv_bytes
+from .formats import (
+    gray8_to_raw_bytes,
+    rgb_to_yuv_bytes,
+    decode_raw,
+    decode_yuv,
+    ImageSpec,
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+    raw_to_display_gray,
+)
 
 try:
     import cv2
@@ -153,3 +164,56 @@ def image_file_to_yuv(
     with open(output_path, "wb") as f:
         f.write(yuv_bytes)
     return len(yuv_bytes)
+
+
+# ── Decode (RAW/YUV → viewable image) ─────────────────────────────────
+
+
+def raw_file_to_image(
+    input_path: str,
+    output_path: str,
+    raw_type: str,
+    width: int,
+    height: int,
+    alignment: str = "lsb",
+    endianness: str = "little",
+    preview_mode: str = "Bayer Color",
+    bayer_pattern: str = "RGGB",
+    offset: int = 0,
+) -> int:
+    """Decode a RAW file and save as PNG/JPEG."""
+    with open(input_path, "rb") as f:
+        data = f.read()
+    spec = ImageSpec(width, height, offset)
+    raw = decode_raw(data, spec, raw_type, alignment=alignment, endianness=endianness)
+    raw8 = raw_to_display_gray(raw, raw_type)
+
+    if preview_mode.startswith("Bayer") and raw8.ndim == 2:
+        try:
+            rgb = bayer8_to_rgb(raw8, pattern=bayer_pattern)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        except ValueError:
+            bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
+
+    cv2.imwrite(output_path, bgr)
+    return os.path.getsize(output_path)
+
+
+def yuv_file_to_image(
+    input_path: str,
+    output_path: str,
+    subformat: str,
+    width: int,
+    height: int,
+    offset: int = 0,
+) -> int:
+    """Decode a YUV file and save as PNG/JPEG."""
+    with open(input_path, "rb") as f:
+        data = f.read()
+    spec = ImageSpec(width, height, offset)
+    rgb = decode_yuv(data, spec, subformat)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(output_path, bgr)
+    return os.path.getsize(output_path)

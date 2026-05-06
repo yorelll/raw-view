@@ -97,11 +97,19 @@ class AppSettings:
 
     @property
     def default_output_dirname(self) -> str:
-        return self._normalize_dirname(self._store.value("convert/default_output_dirname", "out"))
+        return self._normalize_dirname(self._store.value("convert/default_output_dirname", "convert_out"))
 
     @default_output_dirname.setter
     def default_output_dirname(self, value: str) -> None:
         self._store.setValue("convert/default_output_dirname", self._normalize_dirname(value))
+
+    @property
+    def output_template(self) -> str:
+        return str(self._store.value("convert/output_template", DEFAULT_OUTPUT_TEMPLATE))
+
+    @output_template.setter
+    def output_template(self, value: str) -> None:
+        self._store.setValue("convert/output_template", value.strip() or DEFAULT_OUTPUT_TEMPLATE)
 
     @property
     def save_dpi(self) -> int:
@@ -251,8 +259,63 @@ def load_qdarkstyle_stylesheet(theme: str) -> str:
     return qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
 
 
+# Default output filename template
+# Supported placeholders:
+#   {date}       — current date as YYYYMMDD (e.g. 20260506)
+#   {time}       — current time as HHMMSS (e.g. 143021)
+#   {input_stem} — input file name without extension
+#   {width}      — output image width
+#   {height}     — output image height
+#   {ext}        — output file extension (.raw / .yuv)
+DEFAULT_OUTPUT_TEMPLATE = "{date}_{time}_{input_stem}_{width}x{height}{ext}"
+
+
+def format_output_template(
+    template: str,
+    input_path: str,
+    width: int,
+    height: int,
+    target_type: str,
+    output_dir: str | None = None,
+    output_ext: str | None = None,
+) -> str:
+    """Build an output filename from a template string.
+
+    When *output_ext* is provided (e.g. ``.png``) it is used as-is;
+    otherwise it is derived from *target_type* (``.raw`` / ``.yuv``).
+
+    Returns a full file path.  When *output_dir* is given the file is
+    placed there; otherwise it goes into a sub-directory named after
+    the target mode (``convert_out`` / ``view_out``) beside the input.
+    """
+    from datetime import datetime
+
+    src = Path(input_path)
+    now = datetime.now()
+    if output_ext is not None:
+        ext = output_ext if output_ext.startswith(".") else f".{output_ext}"
+    else:
+        ext = ".raw" if target_type == "RAW" else ".yuv"
+    if output_dir is None:
+        out_dir = src.parent / "out"
+    else:
+        out_dir = Path(output_dir) if Path(output_dir).is_absolute() else src.parent / output_dir
+
+    name = template.replace("{date}", now.strftime("%Y%m%d"))
+    name = name.replace("{time}", now.strftime("%H%M%S"))
+    name = name.replace("{input_stem}", src.stem)
+    name = name.replace("{width}", str(width))
+    name = name.replace("{height}", str(height))
+    name = name.replace("{ext}", ext)
+
+    return str(out_dir / name)
+
+
 def build_default_output_path(input_path: str, target_type: str, output_dir_name: str) -> str:
-    """Build a default output path from an input path, target type, and directory name."""
+    """Build a default output path from an input path, target type, and directory name.
+
+    Uses the output template when available; falls back to simple ``{input_stem}{ext}``.
+    """
     if not input_path:
         return ""
     src = Path(input_path)

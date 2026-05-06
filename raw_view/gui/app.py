@@ -45,7 +45,7 @@ from raw_view.models import (
 from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
-from raw_view.gui.dialogs import ConvertDialog, SettingsDialog, HelpDialog
+from raw_view.gui.dialogs import BatchConvertDialog, ConvertDialog, SettingsDialog, HelpDialog
 from raw_view.gui.worker import DecodeWorker
 
 
@@ -194,9 +194,11 @@ class MainWindow(QMainWindow):
         tools_menu = menu.addMenu("Tools")
         self.convert_action = QAction("Convert Image...", self)
         self.convert_action.triggered.connect(self.open_convert_dialog)
+        self.batch_convert_action = QAction("Batch Convert...", self)
+        self.batch_convert_action.triggered.connect(self.open_batch_convert_dialog)
         settings_action = QAction("Settings...", self)
         settings_action.triggered.connect(self.open_settings_dialog)
-        tools_menu.addActions([self.convert_action, settings_action])
+        tools_menu.addActions([self.convert_action, self.batch_convert_action, settings_action])
 
         # ── Help ──
         help_menu = menu.addMenu("Help")
@@ -212,6 +214,7 @@ class MainWindow(QMainWindow):
             (self.open_action, ACTION_ICON_NAMES["open"]),
             (self.save_action, ACTION_ICON_NAMES["save"]),
             (self.convert_action, ACTION_ICON_NAMES["convert"]),
+            (self.batch_convert_action, ACTION_ICON_NAMES["convert"]),
         ]:
             action.setIcon(self._build_action_icon(icon_name))
             toolbar.addAction(action)
@@ -906,16 +909,31 @@ class MainWindow(QMainWindow):
         dlg = ConvertDialog(self.settings, self)
         dlg.exec_()
 
+    def open_batch_convert_dialog(self) -> None:
+        dlg = BatchConvertDialog(self.settings, self)
+        dlg.exec_()
+
     def open_settings_dialog(self) -> None:
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_():
             self._apply_theme()
 
 
-def run() -> None:
-    """Application entry point — create QApplication and show MainWindow."""
+def run(files: list[str] | None = None) -> None:
+    """Application entry point — create QApplication and show MainWindow.
+
+    Parameters
+    ----------
+    files : list of str, optional
+        File paths to open on startup (from CLI arguments).
+    """
     app = QApplication.instance() or QApplication([])
     w = MainWindow()
     w.resize(1200, 700)
     w.show()
+    if files:
+        for path in files:
+            w._open_item(path, decode=False)
+        if files:
+            w.decode_current()
     app.exec_()
