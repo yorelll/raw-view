@@ -7,12 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QThread, Qt
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPixmap
+from PyQt5.QtCore import QThread, Qt, QTimer
+from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QFileDialog,
+    QFrame,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -30,6 +31,7 @@ from raw_view.formats import (
     expected_frame_size_raw,
     expected_frame_size_yuv,
 )
+from raw_view.logger import get_logger
 from raw_view.models import (
     AppSettings,
     ACTION_ICON_COLOR,
@@ -42,11 +44,75 @@ from raw_view.models import (
     dpi_to_dots_per_meter,
     load_qdarkstyle_stylesheet,
 )
+
+logger = get_logger(__name__)
 from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import BatchConvertDialog, ConvertDialog, SettingsDialog, HelpDialog
 from raw_view.gui.worker import DecodeWorker
+
+
+class DropOverlay(QWidget):
+    """Semi-transparent overlay shown during drag-and-drop to give visual feedback."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.hide()
+
+    def paintEvent(self, event):  # noqa: N802
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))  # fully transparent click-through
+
+        # Border highlight
+        pen = painter.pen()
+        pen.setColor(QColor("#3B82F6"))
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 12, 12)
+
+        # Center label
+        painter.setPen(QColor("#3B82F6"))
+        font = painter.font()
+        font.setPointSize(16)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignCenter, "Drop files or folders here")
+
+        font.setPointSize(10)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(QColor("#94A3B8"))
+        painter.drawText(
+            self.rect().adjusted(0, 40, 0, 0),
+            Qt.AlignCenter,
+            "Supports RAW, YUV, PNG, JPG, BMP",
+        )
+
+
+_RAW_YUV_EXTS = {".raw", ".bin", ".yuv"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+_DROP_EXTS = _RAW_YUV_EXTS | _IMAGE_EXTS
+
+
+def _scan_directory(path: str) -> list[str]:
+    """Recursively scan a directory for RAW/YUV/image files, returning sorted file paths."""
+    results: list[str] = []
+    try:
+        for root, _dirs, files in os.walk(path):
+            for fname in sorted(files):
+                ext = Path(fname).suffix.lower()
+                if ext in _DROP_EXTS:
+                    results.append(str(Path(root) / fname))
+    except OSError:
+        logger.warning("Failed to scan directory: %s", path)
+    return results
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +127,8 @@ class MainWindow(QMainWindow):
         self._loading_item = False
         self._thread: QThread | None = None
         self._worker: DecodeWorker | None = None
+        self._drop_overlay: DropOverlay | None = None
+        self._drop_highlight_timer: QTimer | None = None
 
         self.setAcceptDrops(True)
         self._build_ui()
@@ -105,6 +173,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.panel)
         layout.addWidget(self.item_tabs, 1)
         self.setCentralWidget(root)
+
+        # Drop overlay (for visual drag feedback)
+        self._drop_overlay = DropOverlay(self.centralWidget())
+        self._drop_overlay.resize(self.centralWidget().size())
+        self._drop_highlight_timer = QTimer(self)
+        self._drop_highlight_timer.setSingleShot(True)
+        self._drop_highlight_timer.timeout.connect(self._hide_drop_highlight)
 
         self._build_menus()
         self._build_toolbar()
@@ -334,24 +409,74 @@ class MainWindow(QMainWindow):
             idx = (self.item_tabs.currentIndex() - 1 + count) % count
             self.item_tabs.setCurrentIndex(idx)
 
-    # ── Drag & drop ──────────────────────────────────────────────────
+    # ── Drag & drop (enhanced) ─────────────────────────────────────────
+
+    def _handle_drop_paths(self, urls) -> list[str]:
+        """Extract file/directory paths from MIME urls and resolve to files."""
+        paths: list[str] = []
+        for url in urls:
+            local_path = url.toLocalFile()
+            if not local_path:
+                continue
+            if os.path.isfile(local_path):
+                ext = Path(local_path).suffix.lower()
+                if ext in _DROP_EXTS:
+                    paths.append(local_path)
+            elif os.path.isdir(local_path):
+                paths.extend(_scan_directory(local_path))
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in paths:
+            norm = os.path.normcase(os.path.normpath(p))
+            if norm not in seen:
+                seen.add(norm)
+                deduped.append(p)
+        return deduped
+
+    def _show_drop_highlight(self) -> None:
+        if self._drop_overlay:
+            self._drop_overlay.setGeometry(self.centralWidget().rect())
+            self._drop_overlay.raise_()
+            self._drop_overlay.show()
+
+    def _hide_drop_highlight(self) -> None:
+        if self._drop_overlay:
+            self._drop_overlay.hide()
 
     def dragEnterEvent(self, event: QDragEnterEvent):  # noqa: N802
         if event.mimeData().hasUrls():
+            self._show_drop_highlight()
+            # Auto-hide highlight after 3 s if still dragging
+            if self._drop_highlight_timer:
+                self._drop_highlight_timer.start(3000)
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
+    def dragLeaveEvent(self, event):  # noqa: N802
+        self._hide_drop_highlight()
+        if self._drop_highlight_timer:
+            self._drop_highlight_timer.stop()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent):  # noqa: N802
+        self._hide_drop_highlight()
+        if self._drop_highlight_timer:
+            self._drop_highlight_timer.stop()
         urls = event.mimeData().urls()
         if not urls:
             return
-        path = urls[0].toLocalFile()
-        if path and os.path.isfile(path):
-            self._open_item(path, decode=True)
-            event.acceptProposedAction()
+        paths = self._handle_drop_paths(urls)
+        if not paths:
+            super().dropEvent(event)
             return
-        super().dropEvent(event)
+        logger.info("Drop: %d file(s) resolved from drag", len(paths))
+        for path in paths:
+            self._open_item(path, decode=False)
+        if paths:
+            self.decode_current()
+        event.acceptProposedAction()
 
     # ── File open ─────────────────────────────────────────────────────
 
@@ -364,6 +489,7 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             return
+        logger.info("Opening %d file(s)", len(paths))
         for path in paths:
             self._open_item(path, decode=False)
         if paths:
@@ -371,7 +497,9 @@ class MainWindow(QMainWindow):
 
     def _open_item(self, path: str, decode: bool) -> None:
         if not path or not os.path.isfile(path):
+            logger.warning("File not found: %s", path)
             return
+        logger.info("Opening item: %s (decode=%s)", path, decode)
 
         item = ViewerItem()
         item.view = ImageView()
@@ -570,6 +698,14 @@ class MainWindow(QMainWindow):
 
         opts = item.options
 
+        logger.debug(
+            "Decode request: %s (type=%s, format=%s, %dx%d, frame=%d)",
+            path, opts.image_type, opts.format_name,
+            opts.width, opts.height, item.current_frame,
+        )
+
+        opts = item.options
+
         # Compute effective offset = base offset + frame_index * frame_size
         frame_size = self._get_frame_size(opts)
         effective_offset = opts.offset
@@ -626,8 +762,10 @@ class MainWindow(QMainWindow):
             item.options.height = h
             item.total_frames = 1
             item.current_frame = 0
+            logger.debug("Standard image decoded: %s (%dx%d)", opts.file_path, w, h)
             self._on_decode_success(item, qimg, w, h, "Standard Image")
         except Exception as exc:
+            logger.exception("Failed to decode standard image: %s", opts.file_path)
             QMessageBox.critical(self, "Decode Failed", str(exc))
             self.state_status.setText("Decode failed")
 
@@ -828,6 +966,12 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event):  # noqa: N802
+        """Keep drop overlay sized to the central widget."""
+        super().resizeEvent(event)
+        if self._drop_overlay and self.centralWidget():
+            self._drop_overlay.setGeometry(self.centralWidget().rect())
 
     # ── Context menu ─────────────────────────────────────────────────
 

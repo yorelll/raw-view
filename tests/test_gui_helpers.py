@@ -11,6 +11,14 @@ from raw_view.models import (
 )
 
 
+# Keys in THEME_PALETTES whose values should appear in the stylesheet
+_STYLESHEET_PALETTE_KEYS = {
+    "main_bg", "text_color", "panel_bg", "border_color",
+    "input_bg", "button_bg", "button_hover_bg", "button_text_color",
+    "accent", "accent_light", "text_secondary",
+}
+
+
 class GuiHelperTests(unittest.TestCase):
     def test_build_default_output_path_raw(self):
         path = build_default_output_path("/tmp/input/sample.png", "RAW", "out")
@@ -64,14 +72,14 @@ class GuiHelperTests(unittest.TestCase):
     def test_build_ui_stylesheet_light(self):
         stylesheet = build_ui_stylesheet("light", 13)
         self.assertIn("font-size: 13px;", stylesheet)
-        for color in THEME_PALETTES["light"].values():
-            self.assertIn(color, stylesheet)
+        for key in _STYLESHEET_PALETTE_KEYS:
+            self.assertIn(THEME_PALETTES["light"][key], stylesheet)
 
     def test_build_ui_stylesheet_dark(self):
         stylesheet = build_ui_stylesheet("dark", 15)
         self.assertIn("font-size: 15px;", stylesheet)
-        for color in THEME_PALETTES["dark"].values():
-            self.assertIn(color, stylesheet)
+        for key in _STYLESHEET_PALETTE_KEYS:
+            self.assertIn(THEME_PALETTES["dark"][key], stylesheet)
 
 
 if __name__ == "__main__":

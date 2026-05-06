@@ -16,6 +16,9 @@ from .formats import (
     expected_frame_size_yuv,
     raw_to_display_gray,
 )
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 try:
     import cv2
@@ -182,8 +185,17 @@ def raw_file_to_image(
     offset: int = 0,
 ) -> int:
     """Decode a RAW file and save as PNG/JPEG."""
-    with open(input_path, "rb") as f:
-        data = f.read()
+    logger.debug(
+        "raw_file_to_image: %s -> %s (%s, %dx%d, align=%s, endian=%s, preview=%s, pattern=%s, offset=%d)",
+        input_path, output_path, raw_type, width, height,
+        alignment, endianness, preview_mode, bayer_pattern, offset,
+    )
+    try:
+        with open(input_path, "rb") as f:
+            data = f.read()
+    except OSError as exc:
+        logger.error("Failed to read input file %s: %s", input_path, exc)
+        raise
     spec = ImageSpec(width, height, offset)
     raw = decode_raw(data, spec, raw_type, alignment=alignment, endianness=endianness)
     raw8 = raw_to_display_gray(raw, raw_type)
@@ -192,13 +204,16 @@ def raw_file_to_image(
         try:
             rgb = bayer8_to_rgb(raw8, pattern=bayer_pattern)
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("Bayer demosaic failed (%s), falling back to grayscale", exc)
             bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
     else:
         bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
 
     cv2.imwrite(output_path, bgr)
-    return os.path.getsize(output_path)
+    size = os.path.getsize(output_path)
+    logger.debug("raw_file_to_image OK: %d bytes written", size)
+    return size
 
 
 def yuv_file_to_image(
@@ -210,10 +225,16 @@ def yuv_file_to_image(
     offset: int = 0,
 ) -> int:
     """Decode a YUV file and save as PNG/JPEG."""
+    logger.debug(
+        "yuv_file_to_image: %s -> %s (%s, %dx%d, offset=%d)",
+        input_path, output_path, subformat, width, height, offset,
+    )
     with open(input_path, "rb") as f:
         data = f.read()
     spec = ImageSpec(width, height, offset)
     rgb = decode_yuv(data, spec, subformat)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     cv2.imwrite(output_path, bgr)
-    return os.path.getsize(output_path)
+    size = os.path.getsize(output_path)
+    logger.debug("yuv_file_to_image OK: %d bytes written", size)
+    return size

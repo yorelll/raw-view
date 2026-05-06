@@ -14,6 +14,11 @@ from .formats import (
 from . import models
 from . import gui
 
+# Initialise the root logger on first import
+from .logger import setup_logger
+
+setup_logger()
+
 __all__ = [
     "FormatError",
     "ImageSpec",

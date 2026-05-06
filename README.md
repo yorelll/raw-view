@@ -12,10 +12,11 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **转换预览**：Convert 对话框中显示原图缩略图及目标格式帧大小信息
 - **输出模板命名**：支持 `{date}_{time}_{input_stem}_{width}x{height}{ext}` 模板，可在 Settings 中自定义
 - **CLI 模式**：支持命令行解码 RAW/YUV→PNG/JPEG（`python -m raw_view view`）、编码 image→RAW/YUV（`convert`）、批量模式（`batch`）、启动 GUI 并打开文件
-- 支持主界面拖拽打开文件，支持转换输入拖拽
+- 支持主界面拖拽打开文件、拖拽文件夹自动扫描 RAW/YUV 文件、拖入时高亮窗口边框视觉反馈
+- 支持转换输入拖拽
 - 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item
 - 支持 Recent Files 最近文件列表
-- Convert 输出支持默认 `out` 目录（可在 Settings 调整）与手动更改
+- Convert 输出支持默认 `convert_out` 目录（可在 Settings 调整）与手动更改
 - 内置 Help：格式排列、Packed bit 规则与示例
 - 默认显示为 Fit to Window，可自行缩放
 - **帧导航**：支持 RAW/YUV 多帧切换（图像下方 Prev/Next 按钮、上/下方向键快捷键），自动检测总帧数，显示帧号从 1 开始
@@ -23,6 +24,8 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **全屏模式**：F11 进入/退出全屏，Escape 退出
 - **图像旋转/翻转**：顺时针/逆时针旋转 90°（Ctrl+R / Ctrl+Shift+R）、水平/垂直翻转
 - **标签页切换**：Ctrl+Tab / Ctrl+Shift+Tab 或右键菜单切换多文件标签页
+- **现代主题**：卡片式设计（圆角 12px、阴影）、Material Design 色系、Light/Dark 双主题、选项卡与菜单圆角风格
+- **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
 
 ## 安装
 

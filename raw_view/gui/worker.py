@@ -13,6 +13,9 @@ from raw_view.formats import (
     raw_to_display_gray,
 )
 from raw_view.converter import bayer8_to_rgb
+from raw_view.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class DecodeResult:
@@ -73,6 +76,7 @@ class DecodeWorker(QObject):
         """Decode the image (call from QThread)."""
         try:
             if self._data is None or self._spec is None:
+                logger.error("No data configured for decode")
                 self.error.emit("No data configured for decode")
                 return
 
@@ -80,18 +84,20 @@ class DecodeWorker(QObject):
 
             if self._format_name in ("I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"):
                 # ── YUV path ────────────────────────────────────────
-                expected = expected_frame_size_yuv(
-                    self._format_name, self._spec.width, self._spec.height
+                logger.debug(
+                    "Worker decoding YUV: %s, %dx%d, offset=%d",
+                    self._format_name, self._spec.width, self._spec.height, self._spec.offset,
                 )
-                # We only run when the caller already validated the size
                 rgb = decode_yuv(self._data, self._spec, self._format_name)
                 h, w = rgb.shape[:2]
                 qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
                 result = DecodeResult(rgb, qimg, w, h, self._format_name)
             else:
                 # ── RAW path ────────────────────────────────────────
-                expected = expected_frame_size_raw(
-                    self._format_name, self._spec.width, self._spec.height
+                logger.debug(
+                    "Worker decoding RAW: %s, %dx%d, align=%s, endian=%s, offset=%d",
+                    self._format_name, self._spec.width, self._spec.height,
+                    self._alignment, self._endianness, self._spec.offset,
                 )
                 raw = decode_raw(
                     self._data,
@@ -108,7 +114,8 @@ class DecodeWorker(QObject):
                         h, w = rgb.shape[:2]
                         qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
                         result = DecodeResult(rgb, qimg, w, h, self._format_name)
-                    except ValueError:
+                    except ValueError as exc:
+                        logger.warning("Bayer demosaic failed (%s), falling back to grayscale", exc)
                         fallback = raw8
                         h, w = fallback.shape
                         qimg = QImage(
@@ -122,6 +129,8 @@ class DecodeWorker(QObject):
                     ).copy()
                     result = DecodeResult(raw8, qimg, w, h, self._format_name)
 
+            logger.debug("Worker decode finished successfully")
             self.finished.emit(result)
         except Exception as exc:
+            logger.exception("Worker decode failed")
             self.error.emit(str(exc))

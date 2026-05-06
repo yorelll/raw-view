@@ -29,6 +29,10 @@ import os
 import sys
 from pathlib import Path
 
+from raw_view.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -88,6 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _show_batch_help() -> None:
+    logger.debug("Showing batch JSON format help")
     print("""Batch JSON format:
 {
   // ── Global defaults (applied to every file) ──
@@ -211,6 +216,7 @@ def _run_view_decode(
 ) -> None:
     """Decode a RAW/YUV file to a PNG/JPEG image."""
     if not os.path.isfile(input_path):
+        logger.error("Input file not found: %s", input_path)
         print(f"Error: input file not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
@@ -228,6 +234,11 @@ def _run_view_decode(
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     is_raw = target == "RAW"
+
+    logger.info(
+        "View decode: %s -> %s (%s, %dx%d, %s)",
+        input_path, output_path, raw_type if is_raw else yuv_type, width, height,
+    )
 
     print(f"Input:        {input_path}")
     print(f"Output:       {output_path}")
@@ -257,8 +268,10 @@ def _run_view_decode(
                 input_path, output_path, yuv_type, width, height,
                 offset=offset,
             )
+        logger.info("View decode OK: %s -> %s (%d bytes)", input_path, output_path, size)
         print(f"Decoded: {input_path} -> {output_path} ({size} bytes)")
     except Exception as exc:
+        logger.exception("View decode failed: %s -> %s", input_path, output_path)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -268,9 +281,11 @@ def _run_view_decode(
 def _run_convert(args: argparse.Namespace) -> None:
     """Single-file encode and print all parameters."""
     if not args.input:
+        logger.error("--input is required for convert mode")
         print("Error: --input is required for convert mode", file=sys.stderr)
         sys.exit(1)
     if not os.path.isfile(args.input):
+        logger.error("Input file not found: %s", args.input)
         print(f"Error: input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
@@ -286,6 +301,11 @@ def _run_convert(args: argparse.Namespace) -> None:
         )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Convert: %s -> %s (%s, %dx%d)",
+        args.input, output_path, args.target, args.width, args.height,
+    )
 
     print(f"Input:        {args.input}")
     print(f"Output:       {output_path}")
@@ -315,8 +335,10 @@ def _run_convert(args: argparse.Namespace) -> None:
                 args.input, output_path,
                 args.yuv_type, args.width, args.height,
             )
+        logger.info("Convert OK: %s -> %s (%d bytes)", args.input, output_path, size)
         print(f"Converted: {args.input} -> {output_path} ({size} bytes)")
     except Exception as exc:
+        logger.exception("Convert failed: %s -> %s", args.input, output_path)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -441,12 +463,15 @@ def _run_batch(args: argparse.Namespace) -> None:
                         params["yuv_type"], width, height,
                         offset=params["offset"],
                     )
+            logger.info("Batch OK: %s -> %s (%d bytes)", input_path, output_path, size)
             print(f"  OK: {input_path} -> {output_path} ({size} bytes)")
             success += 1
         except Exception as exc:
+            logger.exception("Batch FAIL: %s -> %s", input_path, output_path)
             print(f"  FAIL: {input_path} -> {exc}")
             failed += 1
 
+    logger.info("Batch complete: %d succeeded, %d failed", success, failed)
     print(f"\nBatch complete: {success} succeeded, {failed} failed")
     if failed > 0:
         sys.exit(1)
