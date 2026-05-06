@@ -1,4 +1,4 @@
-"""raw_view package."""
+"""raw-view: RAW/YUV image viewer and format converter."""
 
 from .formats import (
     FormatError,
@@ -11,6 +11,9 @@ from .formats import (
     rgb_to_yuv_bytes,
 )
 
+from . import models
+from . import gui
+
 __all__ = [
     "FormatError",
     "ImageSpec",
@@ -20,4 +23,6 @@ __all__ = [
     "expected_frame_size_yuv",
     "gray8_to_raw_bytes",
     "rgb_to_yuv_bytes",
+    "models",
+    "gui",
 ]

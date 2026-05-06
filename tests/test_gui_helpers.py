@@ -1,6 +1,6 @@
 import unittest
 
-from raw_view.gui import (
+from raw_view.models import (
     THEME_PALETTES,
     add_recent_file_entry,
     build_ui_stylesheet,
