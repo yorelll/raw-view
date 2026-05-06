@@ -9,7 +9,6 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
-    QMenu,
 )
 
 
@@ -18,6 +17,8 @@ class ImageView(QGraphicsView):
 
     zoomChanged = pyqtSignal(int)
     contextMenuRequested = pyqtSignal(object, object)
+    framePrevRequested = pyqtSignal()
+    frameNextRequested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -142,6 +143,17 @@ class ImageView(QGraphicsView):
             else:
                 self.fit_image()
         super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key_Up:
+            self.framePrevRequested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Down:
+            self.frameNextRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
         self.contextMenuRequested.emit(self, event.globalPos())

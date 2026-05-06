@@ -14,10 +14,11 @@ Python RAW/YUV 图像查看与格式转换工具。
 - Convert 输出支持默认 `out` 目录（可在 Settings 调整）与手动更改
 - 内置 Help：格式排列、Packed bit 规则与示例
 - 默认显示为 Fit to Window，可自行缩放
-- **帧导航**：支持 RAW/YUV 多帧切换（面板 Prev/Next 按钮、方向键快捷键），自动检测总帧数
-- **缩放控件**：缩放滑块（10%-1000%）、1:1 实际像素按钮、双击图像切换 Fit/1:1
+- **帧导航**：支持 RAW/YUV 多帧切换（图像下方 Prev/Next 按钮、上/下方向键快捷键），自动检测总帧数，显示帧号从 1 开始
+- **缩放控件**：缩放滑块（10%-1000%）、双击图像切换 Fit/1:1
 - **全屏模式**：F11 进入/退出全屏，Escape 退出
 - **图像旋转/翻转**：顺时针/逆时针旋转 90°（Ctrl+R / Ctrl+Shift+R）、水平/垂直翻转
+- **标签页切换**：Ctrl+Tab / Ctrl+Shift+Tab 或右键菜单切换多文件标签页
 
 ## 安装
 
@@ -38,6 +39,12 @@ python -m raw_view
 - `UI font size`：主界面字体大小（默认 13）
 - `UI theme`：界面主题（`Light` / `Dark`，基于 QDarkStyle + 自定义样式）
 - 工具栏图标：基于 QtAwesome Font Awesome 图标集（PyQt5 兼容）
+
+## 默认参数
+
+- RAW 格式默认：RAW12、MSB 对齐、2560×1440
+- YUV 格式默认：YUYV
+- 帧号显示与状态栏均从 1 开始计数
 
 ## 打包为 EXE
 

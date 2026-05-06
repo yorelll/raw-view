@@ -9,8 +9,10 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -28,8 +30,6 @@ class ControlPanel(QWidget):
         Emitted when the image type selection changes.
     rawPreviewChanged(str)
         Emitted when the RAW preview mode changes.
-    frameChanged(int)
-        Emitted when the user changes the frame index.
     zoomChanged(int)
         Emitted when the zoom slider is moved.
     """
@@ -37,7 +37,6 @@ class ControlPanel(QWidget):
     applyClicked = pyqtSignal()
     typeChanged = pyqtSignal(str)
     rawPreviewChanged = pyqtSignal(str)
-    frameChanged = pyqtSignal(int)
     zoomChanged = pyqtSignal(int)
 
     RAW_FORMATS = [
@@ -65,15 +64,24 @@ class ControlPanel(QWidget):
         self.setMinimumWidth(320)
         self.setObjectName("controlPanel")
 
+        # Scrollable content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(0)  # no border
+        content = QWidget()
+        content.setObjectName("controlPanelContent")
+
         # ── Format parameters ──
         self.type_combo = QComboBox()
         self.type_combo.addItems(["RAW", "YUV", "Standard Image"])
 
         self.format_combo = QComboBox()
         self.format_combo.addItems(self.RAW_FORMATS)
+        self.format_combo.setCurrentText("RAW12")
 
         self.align_combo = QComboBox()
         self.align_combo.addItems(["lsb", "msb"])
+        self.align_combo.setCurrentText("msb")
 
         self.endian_combo = QComboBox()
         self.endian_combo.addItems(["little", "big"])
@@ -86,34 +94,14 @@ class ControlPanel(QWidget):
 
         self.width_spin = QSpinBox()
         self.width_spin.setRange(1, 65535)
-        self.width_spin.setValue(640)
+        self.width_spin.setValue(2560)
 
         self.height_spin = QSpinBox()
         self.height_spin.setRange(1, 65535)
-        self.height_spin.setValue(480)
+        self.height_spin.setValue(1440)
 
         self.offset_spin = QSpinBox()
         self.offset_spin.setRange(0, 1_000_000_000)
-
-        # ── Frame navigation ──
-        frame_row = QWidget()
-        frame_layout = QHBoxLayout(frame_row)
-        frame_layout.setContentsMargins(0, 0, 0, 0)
-        self.frame_prev_btn = QPushButton("<")
-        self.frame_prev_btn.setFixedWidth(32)
-        self.frame_prev_btn.setToolTip("Previous frame")
-        self.frame_spin = QSpinBox()
-        self.frame_spin.setRange(0, 1_000_000)
-        self.frame_spin.setEnabled(False)
-        self.frame_next_btn = QPushButton(">")
-        self.frame_next_btn.setFixedWidth(32)
-        self.frame_next_btn.setToolTip("Next frame")
-        self.frame_total_label = QLabel("/ 0")
-        frame_layout.addWidget(self.frame_prev_btn)
-        frame_layout.addWidget(self.frame_spin)
-        frame_layout.addWidget(self.frame_next_btn)
-        frame_layout.addWidget(self.frame_total_label)
-        frame_layout.addStretch()
 
         # ── YUV note ──
         self.yuv_desc = QLabel(
@@ -133,17 +121,14 @@ class ControlPanel(QWidget):
         self.zoom_slider.setTickInterval(100)
         self.zoom_label = QLabel("100%")
         self.zoom_label.setFixedWidth(48)
-        self.one2one_btn = QPushButton("1:1")
-        self.one2one_btn.setToolTip("Actual pixel size")
         zoom_layout.addWidget(self.zoom_slider, 1)
         zoom_layout.addWidget(self.zoom_label)
-        zoom_layout.addWidget(self.one2one_btn)
 
         # ── Apply button ──
         self.apply_btn = QPushButton("Apply")
 
         # ── Layout ──
-        form = QFormLayout(self)
+        form = QFormLayout(content)
         form.setVerticalSpacing(10)
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
@@ -154,20 +139,20 @@ class ControlPanel(QWidget):
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
-        form.addRow("Frame", frame_row)
         form.addRow("YUV Note", self.yuv_desc)
         form.addRow("Zoom", zoom_row)
         form.addRow(self.apply_btn)
+
+        scroll.setWidget(content)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.addWidget(scroll)
 
         # ── Signals ──
         self.apply_btn.clicked.connect(self.applyClicked)
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
         self.raw_preview_combo.currentTextChanged.connect(self._on_raw_preview_changed)
-        self.frame_spin.valueChanged.connect(self.frameChanged.emit)
-        self.frame_prev_btn.clicked.connect(self._prev_frame)
-        self.frame_next_btn.clicked.connect(self._next_frame)
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
-        self.one2one_btn.clicked.connect(lambda: self.zoomChanged.emit(100))
 
         self._on_type_changed(self.type_combo.currentText())
 
@@ -193,7 +178,6 @@ class ControlPanel(QWidget):
             "offset": self.offset_spin.value(),
             "preview_mode": self.raw_preview_combo.currentText(),
             "bayer_pattern": self.bayer_pattern_combo.currentText(),
-            "frame_index": self.frame_spin.value(),
         }
 
     def set_values(self, **kwargs) -> None:
@@ -216,8 +200,6 @@ class ControlPanel(QWidget):
             self.raw_preview_combo.setCurrentText(kwargs["preview_mode"])
         if "bayer_pattern" in kwargs:
             self.bayer_pattern_combo.setCurrentText(kwargs["bayer_pattern"])
-        if "frame_index" in kwargs:
-            self.frame_spin.setValue(kwargs["frame_index"])
 
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable all controls in the panel."""
@@ -231,20 +213,9 @@ class ControlPanel(QWidget):
             self.width_spin,
             self.height_spin,
             self.offset_spin,
-            self.frame_spin,
             self.apply_btn,
         ]:
             widget.setEnabled(enabled)
-
-    def set_frame_info(self, current: int, total: int) -> None:
-        """Update frame display and enable/disable nav buttons."""
-        self.frame_spin.setRange(0, max(0, total - 1))
-        self.frame_spin.setValue(current)
-        self.frame_total_label.setText(f"/ {total}")
-        has_multiple = total > 1
-        self.frame_spin.setEnabled(has_multiple)
-        self.frame_prev_btn.setEnabled(has_multiple and current > 0)
-        self.frame_next_btn.setEnabled(has_multiple and current < total - 1)
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and label without emitting zoomChanged."""
@@ -255,15 +226,6 @@ class ControlPanel(QWidget):
         self.zoom_label.setText(f"{percent}%")
 
     # ── internal slots ───────────────────────────────────────────────
-
-    def _prev_frame(self) -> None:
-        if self.frame_spin.value() > 0:
-            self.frame_spin.setValue(self.frame_spin.value() - 1)
-
-    def _next_frame(self) -> None:
-        max_val = self.frame_spin.maximum()
-        if self.frame_spin.value() < max_val:
-            self.frame_spin.setValue(self.frame_spin.value() + 1)
 
     def _on_slider_zoom(self, value: int) -> None:
         self.zoom_label.setText(f"{value}%")

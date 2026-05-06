@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QStatusBar,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -41,6 +42,7 @@ from raw_view.models import (
     dpi_to_dots_per_meter,
     load_qdarkstyle_stylesheet,
 )
+from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import ConvertDialog, SettingsDialog, HelpDialog
@@ -87,7 +89,6 @@ class MainWindow(QMainWindow):
         self.panel.applyClicked.connect(self.decode_current)
         self.panel.typeChanged.connect(self._on_panel_type_changed)
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
-        self.panel.frameChanged.connect(self._on_frame_changed)
         self.panel.zoomChanged.connect(self._on_panel_zoom_changed)
 
         # Tab widget
@@ -141,6 +142,16 @@ class MainWindow(QMainWindow):
         file_menu.addAction(clear_recent_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
+
+        # ── Navigate ──
+        nav_menu = menu.addMenu("Navigate")
+        next_tab = QAction("Next Tab", self)
+        next_tab.setShortcut("Ctrl+Tab")
+        next_tab.triggered.connect(self._next_tab)
+        prev_tab = QAction("Previous Tab", self)
+        prev_tab.setShortcut("Ctrl+Shift+Tab")
+        prev_tab.triggered.connect(self._prev_tab)
+        nav_menu.addActions([next_tab, prev_tab])
 
         # ── View ──
         view_menu = menu.addMenu("View")
@@ -296,12 +307,29 @@ class MainWindow(QMainWindow):
         item.total_frames = max(1, file_size // frame_size)
 
     def _update_frame_display(self, item: ViewerItem) -> None:
-        """Update panel frame info and status bar from item state."""
-        self.panel.set_frame_info(item.current_frame, item.total_frames)
+        """Update frame nav bar and status bar from item state."""
+        if item.frame_nav is None:
+            return
+        item.frame_nav.set_frame_info(item.current_frame, item.total_frames)
+        item.frame_nav.setVisible(item.total_frames > 1)
         if item.total_frames > 1:
             self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
         else:
             self.frame_status.setText("Frame: -")
+
+    # ── Tab navigation ──────────────────────────────────────────────
+
+    def _next_tab(self) -> None:
+        count = self.item_tabs.count()
+        if count > 1:
+            idx = (self.item_tabs.currentIndex() + 1) % count
+            self.item_tabs.setCurrentIndex(idx)
+
+    def _prev_tab(self) -> None:
+        count = self.item_tabs.count()
+        if count > 1:
+            idx = (self.item_tabs.currentIndex() - 1 + count) % count
+            self.item_tabs.setCurrentIndex(idx)
 
     # ── Drag & drop ──────────────────────────────────────────────────
 
@@ -346,6 +374,20 @@ class MainWindow(QMainWindow):
         item.view = ImageView()
         item.view.zoomChanged.connect(lambda zoom: self._on_item_zoom_changed(item, zoom))
         item.view.contextMenuRequested.connect(self._show_image_context_menu)
+        item.view.framePrevRequested.connect(lambda: self._nav_frame(item, -1))
+        item.view.frameNextRequested.connect(lambda: self._nav_frame(item, 1))
+
+        # Frame navigation bar below the image
+        item.frame_nav = FrameNavBar()
+        item.frame_nav.frameChanged.connect(self._on_frame_changed)
+
+        # Container: ImageView + FrameNavBar
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(item.view, 1)
+        layout.addWidget(item.frame_nav)
 
         # Configure item options based on file extension
         item.options.file_path = path
@@ -355,16 +397,20 @@ class MainWindow(QMainWindow):
             item.options.format_name = "N/A"
         elif ext == ".yuv":
             item.options.image_type = "YUV"
-            item.options.format_name = "I420"
+            item.options.format_name = "YUYV"
         else:
             item.options.image_type = "RAW"
-            item.options.format_name = "RAW8"
+            item.options.format_name = "RAW12"
+            item.options.alignment = "msb"
+
+        item.options.width = 2560
+        item.options.height = 1440
 
         self.settings.add_recent_file(path)
         self._refresh_recent_files_menu()
 
         self.items.append(item)
-        index = self.item_tabs.addTab(item.view, os.path.basename(path))
+        index = self.item_tabs.addTab(container, os.path.basename(path))
         self.item_tabs.setCurrentIndex(index)
         self.panel.set_enabled(True)
 
@@ -466,22 +512,27 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_frame_changed(self, frame_index: int) -> None:
-        """User changed frame spin or clicked prev/next."""
+        """User changed frame via nav bar buttons or spin box."""
         item = self._current_item()
         if item is None:
             return
         if frame_index == item.current_frame:
             return
         item.current_frame = max(0, min(frame_index, max(0, item.total_frames - 1)))
-        frame_size = self._get_frame_size(item.options)
-        if frame_size > 0:
-            item.options.offset = self.panel.offset_spin.value()  # base offset from panel
-            # Recalculate offset: base + frame * frame_size
-            # We store the effective decode offset separately
-            self.decode_current()
+        self.decode_current()
+
+    def _nav_frame(self, item: ViewerItem, delta: int) -> None:
+        """Navigate frames by delta (-1 prev, +1 next) for any item (not just current)."""
+        new_index = item.current_frame + delta
+        if 0 <= new_index < item.total_frames:
+            item.current_frame = new_index
+            item.frame_nav.set_frame_index(new_index)
+            # If this is the current visible tab, decode immediately
+            if item is self._current_item():
+                self.decode_current()
 
     def _on_panel_zoom_changed(self, percent: int) -> None:
-        """Zoom slider or 1:1 button changed."""
+        """Zoom slider changed."""
         item = self._current_item()
         if item and item.view:
             item.view.zoom_to(percent)
@@ -504,7 +555,7 @@ class MainWindow(QMainWindow):
         # Compute effective offset = base offset + frame_index * frame_size
         frame_size = self._get_frame_size(opts)
         effective_offset = opts.offset
-        if frame_size > 0 and item.total_frames > 0:
+        if frame_size > 0 and item.current_frame > 0:
             effective_offset = opts.offset + item.current_frame * frame_size
 
         spec = ImageSpec(opts.width, opts.height, effective_offset)
@@ -528,8 +579,12 @@ class MainWindow(QMainWindow):
         except Exception:
             expected = -1
 
-        if expected > 0 and not self._warn_size_mismatch(self, len(data) - effective_offset, expected):
-            return
+        if expected > 0:
+            remaining = len(data) - effective_offset
+            # Only warn if remaining data is less than one frame (truncated).
+            # Multi-frame files naturally have remaining > expected, which is fine.
+            if remaining < expected and not self._warn_size_mismatch(self, remaining, expected):
+                return
 
         # Compute and store total frames
         self._compute_frame_info(item)
@@ -730,22 +785,22 @@ class MainWindow(QMainWindow):
                 tb.show()
 
     def keyPressEvent(self, event):  # noqa: N802
-        """Handle keyboard shortcuts: arrows for frame nav, Escape to exit fullscreen."""
+        """Handle keyboard: Up/Down for frame nav, Escape exits fullscreen."""
         if event.key() == Qt.Key_Escape and self.isFullScreen():
             self.fullscreen_action.setChecked(False)
             self._toggle_fullscreen(False)
             event.accept()
             return
-        if event.key() == Qt.Key_Left:
+        if event.key() == Qt.Key_Up:
             item = self._current_item()
-            if item and item.total_frames > 1 and item.current_frame > 0:
-                self.panel.frame_spin.setValue(item.current_frame - 1)
+            if item:
+                self._nav_frame(item, -1)
             event.accept()
             return
-        if event.key() == Qt.Key_Right:
+        if event.key() == Qt.Key_Down:
             item = self._current_item()
-            if item and item.total_frames > 1 and item.current_frame < item.total_frames - 1:
-                self.panel.frame_spin.setValue(item.current_frame + 1)
+            if item:
+                self._nav_frame(item, 1)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -765,6 +820,12 @@ class MainWindow(QMainWindow):
         flip_v = menu.addAction("Flip V")
         menu.addSeparator()
         copy_action = menu.addAction("Copy Image")
+        menu.addSeparator()
+        if self.item_tabs.count() > 1:
+            next_tab = menu.addAction("Next Tab (Ctrl+Tab)")
+            prev_tab = menu.addAction("Previous Tab (Ctrl+Shift+Tab)")
+        else:
+            next_tab = prev_tab = None
         selected = menu.exec_(pos)
         if selected == zoom_in:
             view.zoom_in()
@@ -784,6 +845,10 @@ class MainWindow(QMainWindow):
             view.flip_vertical()
         elif selected == copy_action and view.has_image():
             QApplication.clipboard().setPixmap(view.current_pixmap())
+        elif next_tab and selected == next_tab:
+            self._next_tab()
+        elif prev_tab and selected == prev_tab:
+            self._prev_tab()
 
     # ── Recent files ─────────────────────────────────────────────────
 

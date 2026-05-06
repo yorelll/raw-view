@@ -60,10 +60,10 @@ class DecodeOptions:
 
     file_path: str = ""
     image_type: str = "RAW"
-    format_name: str = "RAW8"
-    width: int = 640
-    height: int = 480
-    alignment: str = "lsb"
+    format_name: str = "RAW12"
+    width: int = 2560
+    height: int = 1440
+    alignment: str = "msb"
     endianness: str = "little"
     offset: int = 0
 
@@ -75,6 +75,7 @@ class ViewerItem:
     options: DecodeOptions = field(default_factory=DecodeOptions)
     current_display: object | None = None
     view: object | None = None
+    frame_nav: object | None = None  # FrameNavBar widget
     zoom_percent: int = 100
     current_frame: int = 0
     total_frames: int = 0
