@@ -103,12 +103,6 @@ class ControlPanel(QWidget):
         self.offset_spin = QSpinBox()
         self.offset_spin.setRange(0, 1_000_000_000)
 
-        # ── YUV note ──
-        self.yuv_desc = QLabel(
-            "YUV420: U/V 2x2 downsample; YUV422: horizontal 2:1 downsample"
-        )
-        self.yuv_desc.setWordWrap(True)
-
         # ── Zoom controls ──
         zoom_row = QWidget()
         zoom_layout = QHBoxLayout(zoom_row)
@@ -139,7 +133,6 @@ class ControlPanel(QWidget):
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
-        form.addRow("YUV Note", self.yuv_desc)
         form.addRow("Zoom", zoom_row)
         form.addRow(self.apply_btn)
 
@@ -225,6 +218,30 @@ class ControlPanel(QWidget):
         self.zoom_slider.blockSignals(False)
         self.zoom_label.setText(f"{percent}%")
 
+    def _sync_type_enabled(self) -> None:
+        """Re-apply type-specific enabled states without changing formats.
+
+        Called after set_enabled(True) to restore type-appropriate controls.
+        """
+        image_type = self.type_combo.currentText()
+        if image_type == "RAW":
+            self.align_combo.setEnabled(True)
+            self.endian_combo.setEnabled(True)
+            self.raw_preview_combo.setEnabled(True)
+            self.bayer_pattern_combo.setEnabled(
+                self.raw_preview_combo.currentText().startswith("Bayer")
+            )
+        elif image_type == "YUV":
+            self.align_combo.setEnabled(False)
+            self.endian_combo.setEnabled(False)
+            self.raw_preview_combo.setEnabled(False)
+            self.bayer_pattern_combo.setEnabled(False)
+        else:
+            self.align_combo.setEnabled(False)
+            self.endian_combo.setEnabled(False)
+            self.raw_preview_combo.setEnabled(False)
+            self.bayer_pattern_combo.setEnabled(False)
+
     # ── internal slots ───────────────────────────────────────────────
 
     def _on_slider_zoom(self, value: int) -> None:
@@ -235,27 +252,26 @@ class ControlPanel(QWidget):
         self.format_combo.clear()
         if image_type == "RAW":
             self.format_combo.addItems(self.RAW_FORMATS)
+            self.format_combo.setCurrentText("RAW12")
             self.align_combo.setEnabled(True)
             self.endian_combo.setEnabled(True)
             self.raw_preview_combo.setEnabled(True)
             self.bayer_pattern_combo.setEnabled(
                 self.raw_preview_combo.currentText().startswith("Bayer")
             )
-            self.yuv_desc.setVisible(False)
         elif image_type == "YUV":
             self.format_combo.addItems(self.YUV_FORMATS)
+            self.format_combo.setCurrentText("YUYV")
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
             self.bayer_pattern_combo.setEnabled(False)
-            self.yuv_desc.setVisible(True)
         else:
             self.format_combo.addItems(["N/A"])
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
             self.bayer_pattern_combo.setEnabled(False)
-            self.yuv_desc.setVisible(False)
         self.typeChanged.emit(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:

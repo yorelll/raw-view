@@ -429,6 +429,10 @@ class MainWindow(QMainWindow):
             self._load_item_to_panel(self.items[index])
             self._sync_status_from_item(self.items[index])
         self.panel.set_enabled(index >= 0)
+        # set_enabled(True) enables all controls blindly, so re-sync
+        # type-specific control states (e.g., disable bayer for YUV).
+        if index >= 0:
+            self.panel._sync_type_enabled()
 
     def close_current_item(self) -> None:
         idx = self.item_tabs.currentIndex()
@@ -493,10 +497,21 @@ class MainWindow(QMainWindow):
     def _sync_status_from_item(self, item: ViewerItem) -> None:
         path = item.options.file_path
         if path:
-            self.file_status.setText(f"File: {os.path.basename(path)}")
-        self.image_status.setText(
-            f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
-        )
+            try:
+                size = os.path.getsize(path)
+                self.file_status.setText(f"File: {os.path.basename(path)} ({size} bytes)")
+            except OSError:
+                self.file_status.setText(f"File: {os.path.basename(path)}")
+        # Show image data size (frame size)
+        frame_size = self._get_frame_size(item.options)
+        if frame_size > 0:
+            self.image_status.setText(
+                f"Image: {item.options.width}x{item.options.height} ({frame_size}) | Format: {item.options.format_name}"
+            )
+        else:
+            self.image_status.setText(
+                f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
+            )
         self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
         if item.total_frames > 1:
             self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
@@ -668,7 +683,13 @@ class MainWindow(QMainWindow):
         except OSError:
             size = 0
         self.file_status.setText(f"File: {os.path.basename(path)} ({size} bytes)")
-        self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
+        frame_size = self._get_frame_size(item.options)
+        if frame_size > 0:
+            self.image_status.setText(
+                f"Image: {width}x{height} ({frame_size}) | Format: {format_name}"
+            )
+        else:
+            self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
         self.state_status.setText("Decoded")
         self._update_frame_display(item)
 

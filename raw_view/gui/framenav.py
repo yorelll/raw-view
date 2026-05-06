@@ -42,6 +42,7 @@ class FrameNavBar(QWidget):
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(1, 1_000_000)
         self.frame_spin.setFixedWidth(80)
+        self.frame_spin.setAlignment(Qt.AlignCenter)
         self.frame_spin.setEnabled(False)
 
         self.next_btn = QPushButton(">")
