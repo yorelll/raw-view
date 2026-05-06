@@ -7,13 +7,12 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QThread, Qt, QTimer
+from PyQt5.QtCore import QThread, Qt
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QFileDialog,
-    QFrame,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -53,22 +52,29 @@ from raw_view.gui.dialogs import BatchConvertDialog, ConvertDialog, SettingsDial
 from raw_view.gui.worker import DecodeWorker
 
 
-class DropOverlay(QWidget):
-    """Semi-transparent overlay shown during drag-and-drop to give visual feedback."""
+class DropCentralWidget(QWidget):
+    """Central widget that paints a drag-drop highlight border when active.
+
+    We override ``paintEvent`` rather than using a separate overlay widget
+    so that Qt drag-drop events (dragEnterEvent / dropEvent) are **not**
+    intercepted — they reach ``MainWindow`` directly.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.hide()
+        self._drag_hover = False
+
+    def set_drag_hover(self, active: bool) -> None:
+        if active != self._drag_hover:
+            self._drag_hover = active
+            self.update()
 
     def paintEvent(self, event):  # noqa: N802
-        if not self.isVisible():
+        super().paintEvent(event)
+        if not self._drag_hover:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))  # fully transparent click-through
 
         # Border highlight
         pen = painter.pen()
@@ -127,9 +133,6 @@ class MainWindow(QMainWindow):
         self._loading_item = False
         self._thread: QThread | None = None
         self._worker: DecodeWorker | None = None
-        self._drop_overlay: DropOverlay | None = None
-        self._drop_highlight_timer: QTimer | None = None
-
         self.setAcceptDrops(True)
         self._build_ui()
 
@@ -165,21 +168,14 @@ class MainWindow(QMainWindow):
         self.item_tabs.tabCloseRequested.connect(self.close_item)
         self.item_tabs.currentChanged.connect(self._on_tab_changed)
 
-        # Central layout
-        root = QWidget()
+        # Central layout — DropCentralWidget handles drag-highlight painting
+        root = DropCentralWidget()
         layout = QHBoxLayout(root)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
         layout.addWidget(self.panel)
         layout.addWidget(self.item_tabs, 1)
         self.setCentralWidget(root)
-
-        # Drop overlay (for visual drag feedback)
-        self._drop_overlay = DropOverlay(self.centralWidget())
-        self._drop_overlay.resize(self.centralWidget().size())
-        self._drop_highlight_timer = QTimer(self)
-        self._drop_highlight_timer.setSingleShot(True)
-        self._drop_highlight_timer.timeout.connect(self._hide_drop_highlight)
 
         self._build_menus()
         self._build_toolbar()
@@ -435,35 +431,28 @@ class MainWindow(QMainWindow):
         return deduped
 
     def _show_drop_highlight(self) -> None:
-        if self._drop_overlay:
-            self._drop_overlay.setGeometry(self.centralWidget().rect())
-            self._drop_overlay.raise_()
-            self._drop_overlay.show()
+        cw = self.centralWidget()
+        if isinstance(cw, DropCentralWidget):
+            cw.set_drag_hover(True)
 
     def _hide_drop_highlight(self) -> None:
-        if self._drop_overlay:
-            self._drop_overlay.hide()
+        cw = self.centralWidget()
+        if isinstance(cw, DropCentralWidget):
+            cw.set_drag_hover(False)
 
     def dragEnterEvent(self, event: QDragEnterEvent):  # noqa: N802
         if event.mimeData().hasUrls():
             self._show_drop_highlight()
-            # Auto-hide highlight after 3 s if still dragging
-            if self._drop_highlight_timer:
-                self._drop_highlight_timer.start(3000)
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragLeaveEvent(self, event):  # noqa: N802
         self._hide_drop_highlight()
-        if self._drop_highlight_timer:
-            self._drop_highlight_timer.stop()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent):  # noqa: N802
         self._hide_drop_highlight()
-        if self._drop_highlight_timer:
-            self._drop_highlight_timer.stop()
         urls = event.mimeData().urls()
         if not urls:
             return
@@ -966,12 +955,6 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         super().keyPressEvent(event)
-
-    def resizeEvent(self, event):  # noqa: N802
-        """Keep drop overlay sized to the central widget."""
-        super().resizeEvent(event)
-        if self._drop_overlay and self.centralWidget():
-            self._drop_overlay.setGeometry(self.centralWidget().rect())
 
     # ── Context menu ─────────────────────────────────────────────────
 
