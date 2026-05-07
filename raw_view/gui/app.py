@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QThread, Qt
-from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
+from PyQt5.QtCore import QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -53,21 +53,56 @@ from raw_view.gui.worker import DecodeWorker
 
 
 class DropCentralWidget(QWidget):
-    """Central widget that paints a drag-drop highlight border when active.
+    """Central widget that paints a drag-drop highlight border when active
+    and handles drag-drop events directly, emitting ``filesDropped``.
 
-    We override ``paintEvent`` rather than using a separate overlay widget
-    so that Qt drag-drop events (dragEnterEvent / dropEvent) are **not**
-    intercepted — they reach ``MainWindow`` directly.
+    Widgets under the cursor that do not accept drops propagate the event
+    up the hierarchy, so this widget receives and handles all drag-drop
+    events transparently — no separate overlay needed.
     """
+
+    filesDropped = pyqtSignal(list)  # list[str]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._drag_hover = False
+        self.setAcceptDrops(True)
 
-    def set_drag_hover(self, active: bool) -> None:
-        if active != self._drag_hover:
-            self._drag_hover = active
+    # ── drag-drop event handlers ────────────────────────────────────
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            self._drag_hover = True
             self.update()
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:  # noqa: N802
+        if self._drag_hover:
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._drag_hover = False
+        self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        self._drag_hover = False
+        self.update()
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        paths = handle_drop_paths(urls)
+        if not paths:
+            super().dropEvent(event)
+            return
+        self.filesDropped.emit(paths)
+        event.acceptProposedAction()
+
+    # ── paint ────────────────────────────────────────────────────────
 
     def paintEvent(self, event):  # noqa: N802
         super().paintEvent(event)
@@ -102,23 +137,50 @@ class DropCentralWidget(QWidget):
         )
 
 
-_RAW_YUV_EXTS = {".raw", ".bin", ".yuv"}
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
-_DROP_EXTS = _RAW_YUV_EXTS | _IMAGE_EXTS
+_YUV_EXTS: dict[str, str] = {
+    ".yuv": "YUYV",
+    ".nv12": "NV12",
+    ".nv21": "NV21",
+    ".i420": "I420",
+    ".yv12": "YV12",
+    ".yuyv": "YUYV",
+    ".uyvy": "UYVY",
+    ".nv16": "NV16",
+}
 
 
 def _scan_directory(path: str) -> list[str]:
-    """Recursively scan a directory for RAW/YUV/image files, returning sorted file paths."""
+    """Recursively scan a directory for all files, returning sorted file paths."""
     results: list[str] = []
     try:
         for root, _dirs, files in os.walk(path):
             for fname in sorted(files):
-                ext = Path(fname).suffix.lower()
-                if ext in _DROP_EXTS:
-                    results.append(str(Path(root) / fname))
+                results.append(str(Path(root) / fname))
     except OSError:
         logger.warning("Failed to scan directory: %s", path)
     return results
+
+
+def handle_drop_paths(urls) -> list[str]:
+    """Extract file/directory paths from MIME urls and resolve to files (any extension)."""
+    paths: list[str] = []
+    for url in urls:
+        local_path = url.toLocalFile()
+        if not local_path:
+            continue
+        if os.path.isfile(local_path):
+            paths.append(local_path)
+        elif os.path.isdir(local_path):
+            paths.extend(_scan_directory(local_path))
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in paths:
+        norm = os.path.normcase(os.path.normpath(p))
+        if norm not in seen:
+            seen.add(norm)
+            deduped.append(p)
+    return deduped
 
 
 class MainWindow(QMainWindow):
@@ -133,7 +195,6 @@ class MainWindow(QMainWindow):
         self._loading_item = False
         self._thread: QThread | None = None
         self._worker: DecodeWorker | None = None
-        self.setAcceptDrops(True)
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -176,6 +237,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.panel)
         layout.addWidget(self.item_tabs, 1)
         self.setCentralWidget(root)
+        root.filesDropped.connect(self._on_files_dropped)
 
         self._build_menus()
         self._build_toolbar()
@@ -405,67 +467,15 @@ class MainWindow(QMainWindow):
             idx = (self.item_tabs.currentIndex() - 1 + count) % count
             self.item_tabs.setCurrentIndex(idx)
 
-    # ── Drag & drop (enhanced) ─────────────────────────────────────────
+    # ── Drag & drop (signal from DropCentralWidget) ──────────────────
 
-    def _handle_drop_paths(self, urls) -> list[str]:
-        """Extract file/directory paths from MIME urls and resolve to files."""
-        paths: list[str] = []
-        for url in urls:
-            local_path = url.toLocalFile()
-            if not local_path:
-                continue
-            if os.path.isfile(local_path):
-                ext = Path(local_path).suffix.lower()
-                if ext in _DROP_EXTS:
-                    paths.append(local_path)
-            elif os.path.isdir(local_path):
-                paths.extend(_scan_directory(local_path))
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for p in paths:
-            norm = os.path.normcase(os.path.normpath(p))
-            if norm not in seen:
-                seen.add(norm)
-                deduped.append(p)
-        return deduped
-
-    def _show_drop_highlight(self) -> None:
-        cw = self.centralWidget()
-        if isinstance(cw, DropCentralWidget):
-            cw.set_drag_hover(True)
-
-    def _hide_drop_highlight(self) -> None:
-        cw = self.centralWidget()
-        if isinstance(cw, DropCentralWidget):
-            cw.set_drag_hover(False)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):  # noqa: N802
-        if event.mimeData().hasUrls():
-            self._show_drop_highlight()
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragLeaveEvent(self, event):  # noqa: N802
-        self._hide_drop_highlight()
-        super().dragLeaveEvent(event)
-
-    def dropEvent(self, event: QDropEvent):  # noqa: N802
-        self._hide_drop_highlight()
-        urls = event.mimeData().urls()
-        if not urls:
-            return
-        paths = self._handle_drop_paths(urls)
-        if not paths:
-            super().dropEvent(event)
-            return
+    def _on_files_dropped(self, paths: list[str]) -> None:
+        """Handle files dropped via drag-and-drop (emitted by DropCentralWidget)."""
         logger.info("Drop: %d file(s) resolved from drag", len(paths))
         for path in paths:
             self._open_item(path, decode=False)
         if paths:
             self.decode_current()
-        event.acceptProposedAction()
 
     # ── File open ─────────────────────────────────────────────────────
 
@@ -515,10 +525,11 @@ class MainWindow(QMainWindow):
         if ext in IMAGE_EXTENSIONS:
             item.options.image_type = "Standard Image"
             item.options.format_name = "N/A"
-        elif ext == ".yuv":
+        elif ext in _YUV_EXTS:
             item.options.image_type = "YUV"
-            item.options.format_name = "YUYV"
+            item.options.format_name = _YUV_EXTS[ext]
         else:
+            # Default: RAW (covers .raw, .bin, no extension, unknown extension)
             item.options.image_type = "RAW"
             item.options.format_name = "RAW12"
             item.options.alignment = "msb"
