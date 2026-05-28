@@ -165,6 +165,14 @@ class ConvertDialog(QDialog):
         self.align.currentTextChanged.connect(self._update_preview)
         self.raw_source_mode.currentTextChanged.connect(self._update_preview)
         self.bayer_pattern.currentTextChanged.connect(self._update_preview)
+        # Format-aware placeholders ({format}/{bayer}/{bits}/{packed}/...)
+        # depend on these fields, so refresh the auto output path whenever
+        # any of them changes.
+        self.raw_type.currentTextChanged.connect(self._sync_default_output)
+        self.yuv_type.currentTextChanged.connect(self._sync_default_output)
+        self.align.currentTextChanged.connect(self._sync_default_output)
+        self.raw_source_mode.currentTextChanged.connect(self._sync_default_output)
+        self.bayer_pattern.currentTextChanged.connect(self._sync_default_output)
         self.output_edit.textEdited.connect(self._on_output_edited)
 
         self._sync_controls()
@@ -208,6 +216,11 @@ class ConvertDialog(QDialog):
             self.height.value(),
             target_type,
             output_dir=self._settings.default_output_dirname,
+            raw_type=self.raw_type.currentText(),
+            yuv_type=self.yuv_type.currentText(),
+            bayer_pattern=self.bayer_pattern.currentText(),
+            source_mode=self.raw_source_mode.currentText(),
+            alignment=self.align.currentText(),
         )
         current = self.output_edit.text().strip()
         if path and (not current or current == self._auto_output_path):
@@ -285,6 +298,11 @@ class ConvertDialog(QDialog):
                     self.height.value(),
                     target_type,
                     output_dir=self._settings.default_output_dirname,
+                    raw_type=self.raw_type.currentText(),
+                    yuv_type=self.yuv_type.currentText(),
+                    bayer_pattern=self.bayer_pattern.currentText(),
+                    source_mode=self.raw_source_mode.currentText(),
+                    alignment=self.align.currentText(),
                 )
             if not input_path:
                 raise ValueError("input path is required")

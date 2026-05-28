@@ -29,7 +29,11 @@ class SettingsDialog(QDialog):
         self.output_dir_edit = QLineEdit(settings.default_output_dirname)
         self.template_edit = QLineEdit(settings.output_template)
         self._template_defaults = QLabel(
-            "Placeholders: {date} {time} {input_stem} {width} {height} {ext}"
+            "Placeholders: {input_stem} {width} {height} {ext} | {format} "
+            "{bayer} {bits} {packed} {raw_type} {yuv_type} | "
+            "{alignment} {endianness} | {date} {time}\n"
+            "Default: {input_stem}_{width}x{height}_{format}{ext}  "
+            "(e.g. image_2560x1440_BGGR10P.raw)"
         )
         self._template_defaults.setWordWrap(True)
         self._template_defaults.setStyleSheet("font-size: 11px; color: gray;")

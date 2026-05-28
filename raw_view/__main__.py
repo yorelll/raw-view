@@ -225,10 +225,16 @@ def _run_view_decode(
 
     if not output_path:
         output_path = format_output_template(
-            "{input_stem}_{width}x{height}{ext}",
+            "{input_stem}_{width}x{height}_{format}{ext}",
             input_path, width, height, target,
             output_dir=VIEW_OUT_DIR,
             output_ext=".png",
+            raw_type=raw_type if target == "RAW" else "",
+            yuv_type=yuv_type if target == "YUV" else "",
+            bayer_pattern=bayer_pattern if target == "RAW" else "",
+            source_mode="bayer" if (target == "RAW" and preview_mode.startswith("Bayer")) else "gray",
+            alignment=alignment,
+            endianness=endianness,
         )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -295,9 +301,15 @@ def _run_convert(args: argparse.Namespace) -> None:
     output_path = args.output
     if not output_path:
         output_path = format_output_template(
-            "{input_stem}_{width}x{height}{ext}",
+            "{input_stem}_{width}x{height}_{format}{ext}",
             args.input, args.width, args.height, args.target,
             output_dir=CONVERT_OUT_DIR,
+            raw_type=getattr(args, "raw_type", "") if args.target == "RAW" else "",
+            yuv_type=getattr(args, "yuv_type", "") if args.target == "YUV" else "",
+            bayer_pattern=getattr(args, "bayer_pattern", "") if args.target == "RAW" else "",
+            source_mode=getattr(args, "source_mode", ""),
+            alignment=getattr(args, "alignment", ""),
+            endianness=getattr(args, "endianness", ""),
         )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -418,10 +430,16 @@ def _run_batch(args: argparse.Namespace) -> None:
             else:
                 out_ext = ".png"
             output_path = format_output_template(
-                "{input_stem}_{width}x{height}{ext}",
+                "{input_stem}_{width}x{height}_{format}{ext}",
                 input_path, width, height, target,
                 output_dir=output_dir,
                 output_ext=out_ext,
+                raw_type=params.get("raw_type", "") if target == "RAW" else "",
+                yuv_type=params.get("yuv_type", "") if target == "YUV" else "",
+                bayer_pattern=params.get("bayer_pattern", "") if target == "RAW" else "",
+                source_mode=params.get("source_mode", ""),
+                alignment=params.get("alignment", ""),
+                endianness=params.get("endianness", ""),
             )
             # Place next to input when no explicit output dir was set
             if not entry.get("output"):

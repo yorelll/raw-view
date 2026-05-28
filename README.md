@@ -10,7 +10,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
 - **转换预览**：Convert 对话框中显示原图缩略图及目标格式帧大小信息
-- **输出模板命名**：支持 `{date}_{time}_{input_stem}_{width}x{height}{ext}` 模板，可在 Settings 中自定义
+- **输出模板命名**：支持丰富占位符（`{format}` `{bayer}` `{bits}` `{packed}` `{raw_type}` `{yuv_type}` `{alignment}` `{endianness}` 等），默认 `{input_stem}_{width}x{height}_{format}{ext}` → 例如 `image_2560x1440_BGGR10P.raw` / `image_1920x1080_YUYV.yuv`，可在 Settings 中自定义（详见 *输出文件名模板* 小节）
 - **CLI 模式**：支持命令行解码 RAW/YUV→PNG/JPEG（`python -m raw_view view`）、编码 image→RAW/YUV（`convert`）、批量模式（`batch`）、启动 GUI 并打开文件
 - 支持主界面拖拽打开文件、拖拽文件夹自动扫描 RAW/YUV 文件、拖入时高亮窗口边框视觉反馈
 - 支持转换输入拖拽
@@ -178,6 +178,47 @@ python -m raw_view --batch-help   # 查看 JSON 格式说明
 - `UI theme`：界面主题（`Light` / `Dark`，基于 QDarkStyle + 自定义样式）
 - `Manage sensor presets`：打开 Sensor 预设管理对话框（详见下文 *Sensor 预设*）
 - 工具栏图标：基于 QtAwesome Font Awesome 图标集（PyQt5 兼容）
+
+## 输出文件名模板
+
+Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串保存在 Settings 的 `Output filename template` 字段（QSettings key `convert/output_template`），默认值：
+
+```
+{input_stem}_{width}x{height}_{format}{ext}
+```
+
+### 占位符全集
+
+| 占位符 | 含义 | 何时为空 |
+|---|---|---|
+| `{input_stem}` | 输入文件名（不含扩展名） | 几乎不为空 |
+| `{width}` | 输出图像宽度 | — |
+| `{height}` | 输出图像高度 | — |
+| `{ext}` | 输出文件扩展名（`.raw` / `.yuv` / `.png` / …） | — |
+| `{date}` | 当前日期 `YYYYMMDD` | — |
+| `{time}` | 当前时间 `HHMMSS` | — |
+| `{format}` | **简短综合标签**：RAW Bayer 源 → `{bayer}{bits}{packed}`，例 `BGGR10P`；RAW 灰度源 → `{raw_type}`，例 `RAW12`；YUV → `{yuv_type}`，例 `YUYV` | 未指定 target 时 |
+| `{bayer}` | Bayer 排列大写 `RGGB` / `BGGR` / `GRBG` / `GBRG` | RAW 灰度源 / YUV / 未指定时为空 |
+| `{bits}` | 位深度 `8` / `10` / `12` / `14` / `16` | YUV / 未知 RAW 类型时为空 |
+| `{packed}` | RAW packed 标记 `P` | 非 packed 格式时为空 |
+| `{raw_type}` | 原 RAW 类型去空格，例 `RAW10Packed` | YUV / 未指定时为空 |
+| `{yuv_type}` | YUV 子格式大写，例 `YUYV` / `NV12` | RAW / 未指定时为空 |
+| `{alignment}` | `lsb` / `msb` | 未传时为空 |
+| `{endianness}` | `little` / `big` | 未传时为空 |
+
+> 占位符大小写敏感；未识别的占位符会原样保留。`{bayer}` 仅在源是 Bayer 模式（`source_mode = bayer`）时输出，灰度源不会写入误导性的 Bayer 名称。
+
+### 常用样例
+
+| 想要的文件名 | 模板 |
+|---|---|
+| `image_2560x1440_BGGR10P.raw`（默认） | `{input_stem}_{width}x{height}_{format}{ext}` |
+| `image_2560x1440_BGGR_10P_msb.raw`（含对齐） | `{input_stem}_{width}x{height}_{bayer}_{bits}{packed}_{alignment}{ext}` |
+| `image_BGGR10P_msb_little_2560x1440.raw`（全细节） | `{input_stem}_{bayer}{bits}{packed}_{alignment}_{endianness}_{width}x{height}{ext}` |
+| `20260601_142500_image_RAW12.raw`（保留时间戳） | `{date}_{time}_{input_stem}_{format}{ext}` |
+| `image_1920x1080_YUYV.yuv` | `{input_stem}_{width}x{height}_{format}{ext}`（同默认） |
+
+> Tip：默认模板有意把 `{alignment}` / `{endianness}` 排除——大多数同事一眼想看的是"分辨率 + Bayer + bit 位 + 是否 packed"。如果你的工作流需要在文件名中区分大小端 / 对齐，按需把这两个占位符加进自定义模板即可。
 
 ## Sensor 预设（一键 apply）
 

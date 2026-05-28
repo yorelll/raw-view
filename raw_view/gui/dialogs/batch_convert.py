@@ -266,6 +266,11 @@ class BatchConvertDialog(QDialog):
 
                 output_path = format_output_template(
                     template, input_path, out_w, out_h, target_type,
+                    raw_type=self.raw_type.currentText(),
+                    yuv_type=self.yuv_type.currentText(),
+                    bayer_pattern=self.bayer_pattern.currentText(),
+                    source_mode=self.raw_source_mode.currentText(),
+                    alignment=self.align.currentText(),
                 )
                 if self._same_dir_cb.isChecked():
                     # Use same directory as input instead of "out/"

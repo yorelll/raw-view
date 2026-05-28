@@ -606,15 +606,43 @@ def load_qdarkstyle_stylesheet(theme: str) -> str:
     return qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
 
 
-# Default output filename template
-# Supported placeholders:
-#   {date}       — current date as YYYYMMDD (e.g. 20260506)
-#   {time}       — current time as HHMMSS (e.g. 143021)
+# Default output filename template.
+#
+# Supported placeholders (see ``format_output_template`` for details):
+#
+#   ── Always available ──
 #   {input_stem} — input file name without extension
 #   {width}      — output image width
 #   {height}     — output image height
-#   {ext}        — output file extension (.raw / .yuv)
-DEFAULT_OUTPUT_TEMPLATE = "{date}_{time}_{input_stem}_{width}x{height}{ext}"
+#   {ext}        — output file extension (.raw / .yuv / .png / .jpg …)
+#   {date}       — current date as YYYYMMDD (e.g. 20260506)
+#   {time}       — current time as HHMMSS (e.g. 143021)
+#
+#   ── Format-aware (RAW only) ──
+#   {bayer}      — Bayer pattern (RGGB / BGGR / GRBG / GBRG); empty for
+#                  gray source mode or YUV
+#   {bits}       — bit depth as a number (8/10/12/14/16); empty for YUV
+#   {packed}     — "P" when the RAW format is MIPI packed, else empty
+#   {raw_type}   — the raw type with spaces removed, e.g. "RAW10Packed"
+#
+#   ── Format-aware (YUV only) ──
+#   {yuv_type}   — YUV subformat in upper case (YUYV / NV12 / I420 / ...)
+#
+#   ── Combined short tag ──
+#   {format}     — for RAW with Bayer source: "{bayer}{bits}{packed}",
+#                  e.g. "BGGR10P"; for RAW gray source: "{raw_type}",
+#                  e.g. "RAW12"; for YUV: "{yuv_type}", e.g. "YUYV"
+#
+#   ── Optional, off by default ──
+#   {alignment}  — "lsb" / "msb" (RAW)
+#   {endianness} — "little" / "big" (RAW)
+#
+# The default template intentionally embeds Bayer + bit-depth + packed
+# flag so that converting one source image with different RAW formats
+# produces distinct output files (e.g. ``image_2560x1440_BGGR10P.raw``
+# vs ``image_2560x1440_RGGB12.raw``). Earlier defaults only included
+# ``{date}`` / ``{time}`` and were prone to collisions.
+DEFAULT_OUTPUT_TEMPLATE = "{input_stem}_{width}x{height}_{format}{ext}"
 
 
 def format_output_template(
@@ -625,17 +653,41 @@ def format_output_template(
     target_type: str,
     output_dir: str | None = None,
     output_ext: str | None = None,
+    *,
+    raw_type: str = "",
+    yuv_type: str = "",
+    bayer_pattern: str = "",
+    source_mode: str = "",
+    alignment: str = "",
+    endianness: str = "",
 ) -> str:
     """Build an output filename from a template string.
 
-    When *output_ext* is provided (e.g. ``.png``) it is used as-is;
-    otherwise it is derived from *target_type* (``.raw`` / ``.yuv``).
+    Parameters
+    ----------
+    template
+        The user-configurable template, e.g. ``{input_stem}_{format}{ext}``.
+        See :data:`DEFAULT_OUTPUT_TEMPLATE` for the full placeholder list.
+    input_path, width, height, target_type
+        Core inputs that drive the basic placeholders.
+    output_dir, output_ext
+        Override the directory and extension; otherwise derived from
+        ``target_type`` (``.raw`` / ``.yuv``).
+    raw_type, yuv_type, bayer_pattern, source_mode, alignment, endianness
+        Optional; consumed by the format-aware placeholders. Unknown
+        values resolve to empty strings, so unused placeholders just
+        disappear without raising.
 
-    Returns a full file path.  When *output_dir* is given the file is
-    placed there; otherwise it goes into a sub-directory named after
-    the target mode (``convert_out`` / ``view_out``) beside the input.
+    Returns
+    -------
+    str
+        A full file path. When *output_dir* is given the file is placed
+        there; otherwise it goes into a sub-directory beside the input.
     """
     from datetime import datetime
+
+    # Local import avoids a top-level cycle between models <-> formats.
+    from raw_view.formats import RAW_BITS
 
     src = Path(input_path)
     now = datetime.now()
@@ -648,12 +700,56 @@ def format_output_template(
     else:
         out_dir = Path(output_dir) if Path(output_dir).is_absolute() else src.parent / output_dir
 
-    name = template.replace("{date}", now.strftime("%Y%m%d"))
+    # ── Format-aware placeholders ────────────────────────────────────
+    # All values default to "" so a template can omit any of them and
+    # still render cleanly even when the caller didn't pass info.
+    bits_str = ""
+    packed_flag = ""
+    if raw_type:
+        bits_val = RAW_BITS.get(raw_type)
+        bits_str = str(bits_val) if bits_val is not None else ""
+        packed_flag = "P" if "Packed" in raw_type else ""
+
+    raw_token = raw_type.replace(" ", "") if raw_type else ""
+    yuv_token = (yuv_type or "").upper()
+
+    # {bayer} only renders when the source is actually a Bayer pattern.
+    # Gray source images don't have a colour mosaic, so emitting the
+    # combo's last value would be misleading.
+    is_bayer_source = (
+        target_type == "RAW"
+        and bayer_pattern
+        and (source_mode or "bayer").lower() == "bayer"
+    )
+    bayer_token = bayer_pattern.upper() if is_bayer_source else ""
+
+    if target_type == "RAW":
+        if bayer_token:
+            format_tag = f"{bayer_token}{bits_str}{packed_flag}"
+        else:
+            # Gray source / no Bayer info: fall back to the raw-type token
+            # so the filename still reflects bit depth and packed flag.
+            format_tag = raw_token or "RAW"
+    elif target_type == "YUV":
+        format_tag = yuv_token or "YUV"
+    else:
+        format_tag = ""
+
+    name = template
+    name = name.replace("{date}", now.strftime("%Y%m%d"))
     name = name.replace("{time}", now.strftime("%H%M%S"))
     name = name.replace("{input_stem}", src.stem)
     name = name.replace("{width}", str(width))
     name = name.replace("{height}", str(height))
     name = name.replace("{ext}", ext)
+    name = name.replace("{format}", format_tag)
+    name = name.replace("{bayer}", bayer_token)
+    name = name.replace("{bits}", bits_str)
+    name = name.replace("{packed}", packed_flag)
+    name = name.replace("{raw_type}", raw_token)
+    name = name.replace("{yuv_type}", yuv_token)
+    name = name.replace("{alignment}", (alignment or "").lower())
+    name = name.replace("{endianness}", (endianness or "").lower())
 
     return str(out_dir / name)
 
