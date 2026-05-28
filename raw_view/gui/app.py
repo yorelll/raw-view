@@ -1099,7 +1099,7 @@ class MainWindow(QMainWindow):
             bayer_pattern=preset.bayer_pattern,
         )
         # One-click apply: only meaningful if a file is actually loaded.
-        if self.current_item() is not None:
+        if self._current_item() is not None:
             self.decode_current()
         self.state_status.setText(f"Preset '{name}' applied")
 

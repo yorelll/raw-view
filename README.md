@@ -26,6 +26,8 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **标签页切换**：Ctrl+Tab / Ctrl+Shift+Tab 或右键菜单切换多文件标签页
 - **现代主题**：卡片式设计（圆角 12px、阴影）、Material Design 色系、Light/Dark 双主题、选项卡与菜单圆角风格
 - **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
+- **Sensor 预设（一键 apply）**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时只需在面板顶部下拉框中选中，即可自动填充所有字段并立刻渲染。支持在 Settings → *Manage sensor presets* 或主面板的 *Manage* 按钮中新增 / 重命名 / 编辑 / 删除
+- **RAW Packed 标准布局**：RAW10P / RAW12P / RAW14P 的解码与编码均遵循 MIPI CSI-2 标准布局（B0..Bn-1 = 高 8bit，末字节 = LSBs，MSB-first），与真实 sensor 数据互通
 
 ## 安装
 
@@ -174,7 +176,22 @@ python -m raw_view --batch-help   # 查看 JSON 格式说明
 - `Saved image DPI`：导出 PNG/JPEG 的目标 DPI（默认 300）
 - `UI font size`：主界面字体大小（默认 13）
 - `UI theme`：界面主题（`Light` / `Dark`，基于 QDarkStyle + 自定义样式）
+- `Manage sensor presets`：打开 Sensor 预设管理对话框（详见下文 *Sensor 预设*）
 - 工具栏图标：基于 QtAwesome Font Awesome 图标集（PyQt5 兼容）
+
+## Sensor 预设（一键 apply）
+
+为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部提供了 **Preset** 行：
+
+- **下拉框**：列出所有已保存的预设；选中后立即把所有字段写入面板并自动 Apply（如果当前已打开文件）。
+- **Save 按钮**：把面板当前的所有字段（type、format、alignment、endianness、RAW preview、Bayer pattern、width、height、offset）保存为命名预设；同名时会询问是否覆盖。
+- **Manage 按钮**：打开预设管理对话框，可新增 / 重命名 / 编辑 / 删除任意预设。
+
+未打开文件时也可以通过 **Settings → Manage sensor presets** 进入相同的管理对话框。
+
+预设以 JSON 形式存储在 QSettings（注册表 / `~/.config/yorelll/raw-view`，键 `presets/sensors`），跨会话保留。
+
+> 示例：创建 `401ai`：Type=RAW、Format=RAW10 Packed、Alignment=msb、Endianness=little、RAW preview=Bayer Color、Bayer pattern=BGGR、Width=2560、Height=1440、Offset=0。
 
 ## 默认参数
 

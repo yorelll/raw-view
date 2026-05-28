@@ -61,7 +61,7 @@ class SettingsDialog(QDialog):
 
         # Sensor preset management entry-point — opens a dedicated dialog so
         # this Settings window stays small.
-        self.manage_presets_btn = QPushButton("Manage sensor presets...")
+        self.manage_presets_btn = QPushButton("Manage sensor presets")
         self.manage_presets_btn.setToolTip(
             "Add, edit, rename, or delete saved sensor presets."
         )

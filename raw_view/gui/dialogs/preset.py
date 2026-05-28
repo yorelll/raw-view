@@ -51,9 +51,11 @@ class PresetManagerDialog(QDialog):
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
 
-        self.add_btn = QPushButton("Add...")
+        self.add_btn = QPushButton("Add")
         self.delete_btn = QPushButton("Delete")
-        self.rename_btn = QPushButton("Rename...")
+        self.rename_btn = QPushButton("Rename")
+        for btn in (self.add_btn, self.rename_btn, self.delete_btn):
+            btn.setMinimumWidth(72)
         self.add_btn.clicked.connect(self._on_add)
         self.delete_btn.clicked.connect(self._on_delete)
         self.rename_btn.clicked.connect(self._on_rename)
@@ -144,8 +146,10 @@ class PresetManagerDialog(QDialog):
         elif isinstance(widget, QSpinBox):
             widget.valueChanged.connect(self._on_field_changed)
 
-    def _on_type_changed(self, image_type: str) -> None:
-        # Match what ControlPanel exposes so saved presets remain compatible.
+    def _populate_format_combo(self, image_type: str) -> None:
+        """Refill format_combo for the given image type. Signals are blocked
+        to keep this side-effect-free — callers decide when to fire updates.
+        """
         self.format_combo.blockSignals(True)
         self.format_combo.clear()
         if image_type == "RAW":
@@ -155,6 +159,10 @@ class PresetManagerDialog(QDialog):
         else:
             self.format_combo.addItems(["N/A"])
         self.format_combo.blockSignals(False)
+
+    def _on_type_changed(self, image_type: str) -> None:
+        # Match what ControlPanel exposes so saved presets remain compatible.
+        self._populate_format_combo(image_type)
         self._on_field_changed()
 
     # ── List management ─────────────────────────────────────────────────
@@ -192,7 +200,12 @@ class PresetManagerDialog(QDialog):
         self._loading = True
         try:
             self.type_combo.setCurrentText(preset.image_type)
-            # _on_type_changed already refreshed format_combo entries.
+            # Always repopulate format_combo explicitly: setCurrentText above
+            # is a no-op when the combo is already on that type (e.g. the
+            # default "RAW"), so currentTextChanged never fires and
+            # format_combo stays empty — which used to leave Format blank
+            # after re-opening the dialog.
+            self._populate_format_combo(preset.image_type)
             idx = self.format_combo.findText(preset.format_name)
             if idx >= 0:
                 self.format_combo.setCurrentIndex(idx)

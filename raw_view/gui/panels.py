@@ -85,20 +85,26 @@ class ControlPanel(QWidget):
             "applies it immediately."
         )
 
-        self.preset_save_btn = QPushButton("Save as...")
+        self.preset_save_btn = QPushButton("Save")
         self.preset_save_btn.setToolTip(
             "Save the current panel values as a named sensor preset for reuse."
         )
-        self.preset_manage_btn = QPushButton("Manage...")
+        self.preset_manage_btn = QPushButton("Manage")
         self.preset_manage_btn.setToolTip("Rename or delete saved presets.")
+        # Reserve enough horizontal space for the labels — the panel is
+        # narrow, and without an explicit minimum the combo crowds the
+        # buttons and the labels get cropped to "Sa..." / "Mana...".
+        for btn in (self.preset_save_btn, self.preset_manage_btn):
+            btn.setMinimumWidth(72)
 
         preset_row = QWidget()
         preset_layout = QHBoxLayout(preset_row)
         preset_layout.setContentsMargins(0, 0, 0, 0)
         preset_layout.setSpacing(6)
+        # The combo gets the stretch; the buttons keep their natural width.
         preset_layout.addWidget(self.preset_combo, 1)
-        preset_layout.addWidget(self.preset_save_btn)
-        preset_layout.addWidget(self.preset_manage_btn)
+        preset_layout.addWidget(self.preset_save_btn, 0)
+        preset_layout.addWidget(self.preset_manage_btn, 0)
 
         # ── Format parameters ──
         self.type_combo = QComboBox()
