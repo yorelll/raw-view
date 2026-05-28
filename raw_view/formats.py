@@ -129,36 +129,44 @@ def decode_raw(
         return arr.reshape(spec.height, spec.width)
 
     if raw_type == "RAW10 Packed":
+        # MIPI CSI-2 RAW10: 4 pixels in 5 bytes.
+        # B0..B3 hold the high 8 bits (P[9:2]) of P0..P3.
+        # B4 holds the 2 LSBs of each pixel: P0[1:0]@bit7:6, P1[1:0]@bit5:4,
+        # P2[1:0]@bit3:2, P3[1:0]@bit1:0.
         b = np.frombuffer(frame, dtype=np.uint8).reshape(-1, 5).astype(np.uint16)
         out = np.empty(b.shape[0] * 4, dtype=np.uint16)
-        out[0::4] = b[:, 0] | ((b[:, 4] & 0x03) << 8)
-        out[1::4] = b[:, 1] | (((b[:, 4] >> 2) & 0x03) << 8)
-        out[2::4] = b[:, 2] | (((b[:, 4] >> 4) & 0x03) << 8)
-        out[3::4] = b[:, 3] | (((b[:, 4] >> 6) & 0x03) << 8)
-        if alignment == "msb":
-            out = out << 6
+        out[0::4] = (b[:, 0] << 2) | ((b[:, 4] >> 6) & 0x03)
+        out[1::4] = (b[:, 1] << 2) | ((b[:, 4] >> 4) & 0x03)
+        out[2::4] = (b[:, 2] << 2) | ((b[:, 4] >> 2) & 0x03)
+        out[3::4] = (b[:, 3] << 2) | (b[:, 4] & 0x03)
+        # Packed pixels are already at native 10-bit range (0..1023);
+        # raw_to_display_gray normalizes by the format's bit depth, so no
+        # MSB shift is applied here (alignment is meaningful only for the
+        # 16-bit-stored RAW10 path).
         return out[:pixels].reshape(spec.height, spec.width)
 
     if raw_type == "RAW12 Packed":
+        # MIPI CSI-2 RAW12: 2 pixels in 3 bytes.
+        # B0 = P0[11:4], B1 = P1[11:4],
+        # B2 carries the LSBs: P0[3:0]@bit7:4, P1[3:0]@bit3:0.
         b = np.frombuffer(frame, dtype=np.uint8).reshape(-1, 3).astype(np.uint16)
         out = np.empty(b.shape[0] * 2, dtype=np.uint16)
-        out[0::2] = b[:, 0] | ((b[:, 1] & 0x0F) << 8)
-        out[1::2] = (b[:, 2] << 4) | ((b[:, 1] >> 4) & 0x0F)
-        if alignment == "msb":
-            out = out << 4
+        out[0::2] = (b[:, 0] << 4) | ((b[:, 2] >> 4) & 0x0F)
+        out[1::2] = (b[:, 1] << 4) | (b[:, 2] & 0x0F)
         return out[:pixels].reshape(spec.height, spec.width)
 
     if raw_type == "RAW14 Packed":
+        # MIPI CSI-2 RAW14: 4 pixels in 7 bytes.
+        # B0..B3 hold the high 8 bits (P[13:6]) of P0..P3.
+        # B4 = P0[5:0]@bit7:2 | P1[5:4]@bit1:0
+        # B5 = P1[3:0]@bit7:4 | P2[5:2]@bit3:0
+        # B6 = P2[1:0]@bit7:6 | P3[5:0]@bit5:0
         b = np.frombuffer(frame, dtype=np.uint8).reshape(-1, 7).astype(np.uint16)
         out = np.empty(b.shape[0] * 4, dtype=np.uint16)
-        out[0::4] = b[:, 0] | ((b[:, 4] & 0x3F) << 8)
-        out[1::4] = b[:, 1] | (((b[:, 4] >> 6) & 0x03) << 8) | (((b[:, 5] >> 4) & 0x0F) << 10)
-        # P2: low 8 bits from B2, then bits[9:8] from B6[7:6], then bits[13:10] from B5[3:0].
-        out[2::4] = b[:, 2] | (((b[:, 6] >> 6) & 0x03) << 8) | ((b[:, 5] & 0x0F) << 10)
-        # P3: low 8 bits from B3 and high 6 bits from B6[5:0] => 14-bit value.
-        out[3::4] = b[:, 3] | ((b[:, 6] & 0x3F) << 8)
-        if alignment == "msb":
-            out = out << 2
+        out[0::4] = (b[:, 0] << 6) | ((b[:, 4] >> 2) & 0x3F)
+        out[1::4] = (b[:, 1] << 6) | ((b[:, 4] & 0x03) << 4) | ((b[:, 5] >> 4) & 0x0F)
+        out[2::4] = (b[:, 2] << 6) | ((b[:, 5] & 0x0F) << 2) | ((b[:, 6] >> 6) & 0x03)
+        out[3::4] = (b[:, 3] << 6) | (b[:, 6] & 0x3F)
         return out[:pixels].reshape(spec.height, spec.width)
 
     raise FormatError(f"unsupported RAW type: {raw_type}")
@@ -244,47 +252,50 @@ def decode_yuv(data: bytes, spec: ImageSpec, subformat: str) -> np.ndarray:
 
 
 def _pack_raw10(values_10: np.ndarray) -> bytes:
+    """Pack 10-bit pixels into MIPI CSI-2 RAW10 (4 pixels per 5 bytes)."""
     v = values_10.astype(np.uint16).reshape(-1)
     if len(v) % 4 != 0:
         raise FormatError("RAW10 Packed requires total pixels divisible by 4")
     p = v.reshape(-1, 4)
-    b0 = (p[:, 0] & 0xFF).astype(np.uint8)
-    b1 = (p[:, 1] & 0xFF).astype(np.uint8)
-    b2 = (p[:, 2] & 0xFF).astype(np.uint8)
-    b3 = (p[:, 3] & 0xFF).astype(np.uint8)
+    b0 = ((p[:, 0] >> 2) & 0xFF).astype(np.uint8)
+    b1 = ((p[:, 1] >> 2) & 0xFF).astype(np.uint8)
+    b2 = ((p[:, 2] >> 2) & 0xFF).astype(np.uint8)
+    b3 = ((p[:, 3] >> 2) & 0xFF).astype(np.uint8)
     b4 = (
-        ((p[:, 0] >> 8) & 0x03)
-        | (((p[:, 1] >> 8) & 0x03) << 2)
-        | (((p[:, 2] >> 8) & 0x03) << 4)
-        | (((p[:, 3] >> 8) & 0x03) << 6)
+        ((p[:, 0] & 0x03) << 6)
+        | ((p[:, 1] & 0x03) << 4)
+        | ((p[:, 2] & 0x03) << 2)
+        | (p[:, 3] & 0x03)
     ).astype(np.uint8)
     out = np.stack([b0, b1, b2, b3, b4], axis=1)
     return out.tobytes()
 
 
 def _pack_raw12(values_12: np.ndarray) -> bytes:
+    """Pack 12-bit pixels into MIPI CSI-2 RAW12 (2 pixels per 3 bytes)."""
     v = values_12.astype(np.uint16).reshape(-1)
     if len(v) % 2 != 0:
         raise FormatError("RAW12 Packed requires total pixels divisible by 2")
     p = v.reshape(-1, 2)
-    b0 = (p[:, 0] & 0xFF).astype(np.uint8)
-    b1 = (((p[:, 0] >> 8) & 0x0F) | ((p[:, 1] & 0x0F) << 4)).astype(np.uint8)
-    b2 = ((p[:, 1] >> 4) & 0xFF).astype(np.uint8)
+    b0 = ((p[:, 0] >> 4) & 0xFF).astype(np.uint8)
+    b1 = ((p[:, 1] >> 4) & 0xFF).astype(np.uint8)
+    b2 = (((p[:, 0] & 0x0F) << 4) | (p[:, 1] & 0x0F)).astype(np.uint8)
     return np.stack([b0, b1, b2], axis=1).tobytes()
 
 
 def _pack_raw14(values_14: np.ndarray) -> bytes:
+    """Pack 14-bit pixels into MIPI CSI-2 RAW14 (4 pixels per 7 bytes)."""
     v = values_14.astype(np.uint16).reshape(-1)
     if len(v) % 4 != 0:
         raise FormatError("RAW14 Packed requires total pixels divisible by 4")
     p = v.reshape(-1, 4)
-    b0 = (p[:, 0] & 0xFF).astype(np.uint8)
-    b1 = (p[:, 1] & 0xFF).astype(np.uint8)
-    b2 = (p[:, 2] & 0xFF).astype(np.uint8)
-    b3 = (p[:, 3] & 0xFF).astype(np.uint8)
-    b4 = (((p[:, 0] >> 8) & 0x3F) | (((p[:, 1] >> 8) & 0x03) << 6)).astype(np.uint8)
-    b5 = ((((p[:, 1] >> 10) & 0x0F) << 4) | ((p[:, 2] >> 10) & 0x0F)).astype(np.uint8)
-    b6 = ((((p[:, 2] >> 8) & 0x03) << 6) | ((p[:, 3] >> 8) & 0x3F)).astype(np.uint8)
+    b0 = ((p[:, 0] >> 6) & 0xFF).astype(np.uint8)
+    b1 = ((p[:, 1] >> 6) & 0xFF).astype(np.uint8)
+    b2 = ((p[:, 2] >> 6) & 0xFF).astype(np.uint8)
+    b3 = ((p[:, 3] >> 6) & 0xFF).astype(np.uint8)
+    b4 = (((p[:, 0] & 0x3F) << 2) | ((p[:, 1] >> 4) & 0x03)).astype(np.uint8)
+    b5 = (((p[:, 1] & 0x0F) << 4) | ((p[:, 2] >> 2) & 0x0F)).astype(np.uint8)
+    b6 = (((p[:, 2] & 0x03) << 6) | (p[:, 3] & 0x3F)).astype(np.uint8)
     return np.stack([b0, b1, b2, b3, b4, b5, b6], axis=1).tobytes()
 
 

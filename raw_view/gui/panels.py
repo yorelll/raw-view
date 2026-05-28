@@ -134,12 +134,23 @@ class ControlPanel(QWidget):
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
         form.addRow("Zoom", zoom_row)
-        form.addRow(self.apply_btn)
+
+        # Make Apply visually prominent and tall enough that it never gets
+        # half-clipped on small/maximized window heights.
+        self.apply_btn.setMinimumHeight(36)
+        self.apply_btn.setSizePolicy(
+            self.apply_btn.sizePolicy().horizontalPolicy(),
+            self.apply_btn.sizePolicy().Fixed,
+        )
 
         scroll.setWidget(content)
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.addWidget(scroll)
+        root_layout.setContentsMargins(0, 0, 0, 8)
+        root_layout.setSpacing(6)
+        root_layout.addWidget(scroll, 1)
+        # Apply button lives outside the scroll area so it is always fully
+        # visible regardless of the scroll-area's content height.
+        root_layout.addWidget(self.apply_btn, 0)
 
         # ── Signals ──
         self.apply_btn.clicked.connect(self.applyClicked)
