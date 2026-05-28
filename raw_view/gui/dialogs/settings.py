@@ -59,6 +59,15 @@ class SettingsDialog(QDialog):
         form.addRow("UI font size", self.font_size_spin)
         form.addRow("UI theme", self.theme_combo)
 
+        # Sensor preset management entry-point — opens a dedicated dialog so
+        # this Settings window stays small.
+        self.manage_presets_btn = QPushButton("Manage sensor presets...")
+        self.manage_presets_btn.setToolTip(
+            "Add, edit, rename, or delete saved sensor presets."
+        )
+        self.manage_presets_btn.clicked.connect(self._open_preset_manager)
+        form.addRow("Sensor presets", self.manage_presets_btn)
+
         save_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
         save_btn.clicked.connect(self._save)
@@ -72,6 +81,15 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(row)
+
+    def _open_preset_manager(self) -> None:
+        # Local import to avoid a circular dependency at module load time
+        # (preset.py imports from raw_view.gui.panels which is fine, but
+        # keeping it local makes the dependency chain explicit).
+        from .preset import PresetManagerDialog
+
+        dlg = PresetManagerDialog(self._settings, self)
+        dlg.exec_()
 
     def _save(self) -> None:
         self._settings.default_output_dirname = self.output_dir_edit.text()

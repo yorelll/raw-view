@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QFileDialog,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -38,6 +39,7 @@ from raw_view.models import (
     ACTION_ICON_NAMES,
     IMAGE_EXTENSIONS,
     DecodeOptions,
+    SensorPreset,
     ViewerItem,
     build_ui_stylesheet,
     dpi_to_dots_per_meter,
@@ -48,7 +50,13 @@ logger = get_logger(__name__)
 from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
-from raw_view.gui.dialogs import BatchConvertDialog, ConvertDialog, SettingsDialog, HelpDialog
+from raw_view.gui.dialogs import (
+    BatchConvertDialog,
+    ConvertDialog,
+    HelpDialog,
+    PresetManagerDialog,
+    SettingsDialog,
+)
 from raw_view.gui.worker import DecodeWorker
 
 
@@ -222,6 +230,10 @@ class MainWindow(QMainWindow):
         self.panel.typeChanged.connect(self._on_panel_type_changed)
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
         self.panel.zoomChanged.connect(self._on_panel_zoom_changed)
+        self.panel.presetSelected.connect(self._on_preset_selected)
+        self.panel.savePresetRequested.connect(self._on_save_preset_clicked)
+        self.panel.managePresetsRequested.connect(self._open_preset_manager_dialog)
+        self._refresh_preset_combo()
 
         # Tab widget
         self.item_tabs = QTabWidget()
@@ -1055,6 +1067,95 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_():
             self._apply_theme()
+        # Presets may have been edited inside the Settings dialog — keep the
+        # panel combo in sync regardless of accept/reject so deletions show up.
+        self._refresh_preset_combo()
+
+    # ── Sensor presets ───────────────────────────────────────────────
+
+    def _refresh_preset_combo(self, current: str | None = None) -> None:
+        """Reload the preset combo from persisted settings."""
+        names = [p.name for p in self.settings.sensor_presets]
+        self.panel.set_preset_names(names, current=current)
+
+    def _on_preset_selected(self, name: str) -> None:
+        """User picked a preset — populate the panel and trigger Apply."""
+        preset = self.settings.get_sensor_preset(name)
+        if preset is None:
+            logger.warning("Preset '%s' not found in settings", name)
+            self._refresh_preset_combo()
+            return
+        # Push every value from the preset onto the panel. set_values follows
+        # the same key names as the preset dataclass, so we can splat directly.
+        self.panel.set_values(
+            image_type=preset.image_type,
+            format_name=preset.format_name,
+            width=preset.width,
+            height=preset.height,
+            alignment=preset.alignment,
+            endianness=preset.endianness,
+            offset=preset.offset,
+            preview_mode=preset.preview_mode,
+            bayer_pattern=preset.bayer_pattern,
+        )
+        # One-click apply: only meaningful if a file is actually loaded.
+        if self.current_item() is not None:
+            self.decode_current()
+        self.state_status.setText(f"Preset '{name}' applied")
+
+    def _on_save_preset_clicked(self) -> None:
+        """Persist the panel's current values as a named preset."""
+        existing = [p.name for p in self.settings.sensor_presets]
+        default_name = ""
+        name, ok = QInputDialog.getText(
+            self,
+            "Save sensor preset",
+            "Preset name:",
+            text=default_name,
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "Save preset", "Preset name must not be empty.")
+            return
+        if name in existing:
+            confirm = QMessageBox.question(
+                self,
+                "Overwrite preset",
+                f"Preset '{name}' already exists. Overwrite?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+        vals = self.panel.get_values()
+        preset = SensorPreset(
+            name=name,
+            image_type=vals["image_type"],
+            format_name=vals["format_name"],
+            width=int(vals["width"]),
+            height=int(vals["height"]),
+            alignment=vals["alignment"],
+            endianness=vals["endianness"],
+            offset=int(vals["offset"]),
+            preview_mode=vals["preview_mode"],
+            bayer_pattern=vals["bayer_pattern"],
+        )
+        try:
+            self.settings.save_sensor_preset(preset)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save preset", str(exc))
+            return
+        self._refresh_preset_combo(current=name)
+        self.state_status.setText(f"Preset '{name}' saved")
+
+    def _open_preset_manager_dialog(self) -> None:
+        dlg = PresetManagerDialog(self.settings, self)
+        dlg.exec_()
+        # Re-read regardless of dialog result — the dialog only persists on
+        # Save anyway, but this also picks up any external edits.
+        self._refresh_preset_combo()
 
 
 def run(files: list[str] | None = None) -> None:

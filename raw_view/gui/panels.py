@@ -38,6 +38,12 @@ class ControlPanel(QWidget):
     typeChanged = pyqtSignal(str)
     rawPreviewChanged = pyqtSignal(str)
     zoomChanged = pyqtSignal(int)
+    presetSelected = pyqtSignal(str)        # emitted when user picks a saved preset
+    savePresetRequested = pyqtSignal()      # user clicked the "Save as..." button
+    managePresetsRequested = pyqtSignal()   # user clicked the "Manage..." button
+
+    # Sentinel item shown at index 0 of the preset combo.
+    _PRESET_PLACEHOLDER = "(Select a preset)"
 
     RAW_FORMATS = [
         "RAW8",
@@ -70,6 +76,29 @@ class ControlPanel(QWidget):
         scroll.setFrameShape(0)  # no border
         content = QWidget()
         content.setObjectName("controlPanelContent")
+
+        # ── Sensor preset row (shown at the very top) ──
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
+        self.preset_combo.setToolTip(
+            "Saved sensor presets. Selecting one fills the form below and "
+            "applies it immediately."
+        )
+
+        self.preset_save_btn = QPushButton("Save as...")
+        self.preset_save_btn.setToolTip(
+            "Save the current panel values as a named sensor preset for reuse."
+        )
+        self.preset_manage_btn = QPushButton("Manage...")
+        self.preset_manage_btn.setToolTip("Rename or delete saved presets.")
+
+        preset_row = QWidget()
+        preset_layout = QHBoxLayout(preset_row)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        preset_layout.setSpacing(6)
+        preset_layout.addWidget(self.preset_combo, 1)
+        preset_layout.addWidget(self.preset_save_btn)
+        preset_layout.addWidget(self.preset_manage_btn)
 
         # ── Format parameters ──
         self.type_combo = QComboBox()
@@ -124,6 +153,7 @@ class ControlPanel(QWidget):
         # ── Layout ──
         form = QFormLayout(content)
         form.setVerticalSpacing(10)
+        form.addRow("Preset", preset_row)
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
         form.addRow("Alignment", self.align_combo)
@@ -157,6 +187,9 @@ class ControlPanel(QWidget):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
         self.raw_preview_combo.currentTextChanged.connect(self._on_raw_preview_changed)
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
+        self.preset_combo.activated.connect(self._on_preset_activated)
+        self.preset_save_btn.clicked.connect(self.savePresetRequested)
+        self.preset_manage_btn.clicked.connect(self.managePresetsRequested)
 
         self._on_type_changed(self.type_combo.currentText())
 
@@ -208,6 +241,9 @@ class ControlPanel(QWidget):
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable all controls in the panel."""
         for widget in [
+            self.preset_combo,
+            self.preset_save_btn,
+            self.preset_manage_btn,
             self.type_combo,
             self.format_combo,
             self.align_combo,
@@ -220,6 +256,33 @@ class ControlPanel(QWidget):
             self.apply_btn,
         ]:
             widget.setEnabled(enabled)
+
+    def set_preset_names(self, names: list[str], current: str | None = None) -> None:
+        """Repopulate the preset combo. Pass current=None to leave selection unchanged.
+
+        The first item is always the placeholder; selecting it has no effect.
+        """
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
+        for name in names:
+            if name:
+                self.preset_combo.addItem(name)
+        if current:
+            idx = self.preset_combo.findText(current)
+            if idx > 0:
+                self.preset_combo.setCurrentIndex(idx)
+            else:
+                self.preset_combo.setCurrentIndex(0)
+        else:
+            self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
+
+    def reset_preset_selection(self) -> None:
+        """Move the preset combo back to the placeholder without emitting signals."""
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and label without emitting zoomChanged."""
@@ -254,6 +317,14 @@ class ControlPanel(QWidget):
             self.bayer_pattern_combo.setEnabled(False)
 
     # ── internal slots ───────────────────────────────────────────────
+
+    def _on_preset_activated(self, index: int) -> None:
+        """Forward a preset selection. Index 0 is the placeholder — ignore it."""
+        if index <= 0:
+            return
+        name = self.preset_combo.itemText(index)
+        if name:
+            self.presetSelected.emit(name)
 
     def _on_slider_zoom(self, value: int) -> None:
         self.zoom_label.setText(f"{value}%")

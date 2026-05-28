@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -78,6 +79,43 @@ class DecodeOptions:
     alignment: str = "msb"
     endianness: str = "little"
     offset: int = 0
+
+
+@dataclass
+class SensorPreset:
+    """A named sensor configuration that can be one-click applied.
+
+    Stores every panel field needed to decode a RAW/YUV file. ``name`` is the
+    user-visible identifier and is used as the key for save/load/delete.
+    """
+
+    name: str = ""
+    image_type: str = "RAW"           # "RAW" / "YUV" / "Standard Image"
+    format_name: str = "RAW12"        # depends on image_type
+    width: int = 2560
+    height: int = 1440
+    alignment: str = "msb"            # "lsb" / "msb"   (RAW only)
+    endianness: str = "little"        # "little" / "big" (RAW only)
+    offset: int = 0
+    preview_mode: str = "Bayer Color"  # "Bayer Color" / "Grayscale" (RAW only)
+    bayer_pattern: str = "BGGR"       # one of BAYER_PATTERNS (RAW only)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SensorPreset":
+        """Build a preset from a (possibly partial) dict, falling back to defaults."""
+        defaults = cls()
+        merged = {f: data.get(f, getattr(defaults, f)) for f in defaults.__dataclass_fields__}
+        # Sanity-coerce numeric fields.
+        for k in ("width", "height", "offset"):
+            try:
+                merged[k] = int(merged[k])
+            except (TypeError, ValueError):
+                merged[k] = getattr(defaults, k)
+        merged["name"] = str(merged.get("name", "")).strip()
+        return cls(**merged)
 
 
 @dataclass
@@ -167,6 +205,79 @@ class AppSettings:
 
     def clear_recent_files(self) -> None:
         self._store.setValue("recent/files", [])
+
+    # ── Sensor presets ──────────────────────────────────────────────
+    #
+    # Stored as a single JSON-encoded array under "presets/sensors". Using
+    # JSON keeps the list atomic (no half-written entries on crash) and
+    # avoids QSettings type-coercion quirks across platforms.
+
+    def _load_presets_raw(self) -> list[dict]:
+        raw = self._store.value("presets/sensors", "")
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [d for d in data if isinstance(d, dict)]
+
+    def _save_presets_raw(self, items: list[dict]) -> None:
+        self._store.setValue("presets/sensors", json.dumps(items, ensure_ascii=False))
+
+    @property
+    def sensor_presets(self) -> list[SensorPreset]:
+        """All saved sensor presets, in insertion order."""
+        return [SensorPreset.from_dict(d) for d in self._load_presets_raw() if d.get("name")]
+
+    def get_sensor_preset(self, name: str) -> SensorPreset | None:
+        target = (name or "").strip()
+        if not target:
+            return None
+        for p in self.sensor_presets:
+            if p.name == target:
+                return p
+        return None
+
+    def save_sensor_preset(self, preset: SensorPreset) -> None:
+        """Insert or update a preset by name. Empty name is rejected."""
+        name = (preset.name or "").strip()
+        if not name:
+            raise ValueError("preset name must not be empty")
+        preset = SensorPreset.from_dict({**preset.to_dict(), "name": name})
+        items = self._load_presets_raw()
+        for i, existing in enumerate(items):
+            if str(existing.get("name", "")).strip() == name:
+                items[i] = preset.to_dict()
+                break
+        else:
+            items.append(preset.to_dict())
+        self._save_presets_raw(items)
+
+    def delete_sensor_preset(self, name: str) -> bool:
+        target = (name or "").strip()
+        if not target:
+            return False
+        items = self._load_presets_raw()
+        new_items = [d for d in items if str(d.get("name", "")).strip() != target]
+        if len(new_items) == len(items):
+            return False
+        self._save_presets_raw(new_items)
+        return True
+
+    def replace_sensor_presets(self, presets: list[SensorPreset]) -> None:
+        """Persist the given list as the full preset set (used by the manage dialog)."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for p in presets:
+            name = (p.name or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(SensorPreset.from_dict({**p.to_dict(), "name": name}).to_dict())
+        self._save_presets_raw(out)
 
 
 # ── Helper functions ─────────────────────────────────────────────────────

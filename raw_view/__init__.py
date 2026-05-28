@@ -12,6 +12,7 @@ from .formats import (
 )
 
 from . import models
+from .models import SensorPreset
 from . import gui
 
 # Initialise the root logger on first import
