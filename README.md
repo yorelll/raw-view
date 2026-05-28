@@ -189,7 +189,29 @@ python -m raw_view --batch-help   # 查看 JSON 格式说明
 
 未打开文件时也可以通过 **Settings → Manage sensor presets** 进入相同的管理对话框。
 
-预设以 JSON 形式存储在 QSettings（注册表 / `~/.config/yorelll/raw-view`，键 `presets/sensors`），跨会话保留。
+### 存储位置
+
+预设以 JSON 形式存储在 **QSettings**（不在仓库 / 不在 exe 内部）：
+
+| 平台 | 位置 |
+|---|---|
+| Windows | 注册表 `HKEY_CURRENT_USER\Software\yorelll\raw-view`，键 `presets\sensors` |
+| macOS | `~/Library/Preferences/com.yorelll.raw-view.plist` |
+| Linux | `~/.config/yorelll/raw-view.conf` |
+
+跨会话自动保留，重启 / 升级 exe 后仍然存在；卸载 / 删除注册表键后会丢失。
+
+### Import / Export（团队共享）
+
+Preset 管理对话框底部提供 **Import** 与 **Export** 两个按钮：
+
+- **Export**：把当前所有预设序列化为 JSON 文件（默认文件名 `raw-view-presets.json`），可发给同事或随 exe 一起分发；导出包含尚未保存的对话框内编辑。
+- **Import**：选择 JSON 文件后，逐条合并到本机预设。若发现重名，弹窗询问 **Overwrite** / **Skip duplicates** / **Cancel**。导入完成后还需要点 **Save** 才会真正写入注册表/配置文件。
+
+**只需要导入一次**：写入注册表后跟用户自己手动 Save 出来的预设没有区别，下次打开 exe 仍在；用户也可以继续新增、修改自己的预设。
+重新导入只在换电脑、重装系统、或想恢复"团队标准版本"时才需要。
+
+> 注意：导出的 `*.json` 文件已经加入 `.gitignore`（`raw-view-presets*.json` / `*sensor-presets*.json` 等），默认不会被 commit。打包发布的 exe 也**不会**带上这个 JSON——团队预设需要单独分发，详见 `docs/release_exe.md`。
 
 > 示例：创建 `401ai`：Type=RAW、Format=RAW10 Packed、Alignment=msb、Endianness=little、RAW preview=Bayer Color、Bayer pattern=BGGR、Width=2560、Height=1440、Offset=0。
 

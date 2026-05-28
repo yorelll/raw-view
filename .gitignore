@@ -18,3 +18,10 @@ dist/
 
 # claude
 .claude/
+
+# Sensor preset exports — shared/distributed manually, never auto-committed.
+# Match common names users pick when exporting from the Preset Manager.
+raw-view-presets*.json
+*sensor-presets*.json
+*sensor_presets*.json
+presets*.json

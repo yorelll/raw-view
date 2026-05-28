@@ -6,10 +6,13 @@ writes through :class:`~raw_view.models.AppSettings`.
 
 from __future__ import annotations
 
+import os
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
@@ -54,21 +57,41 @@ class PresetManagerDialog(QDialog):
         self.add_btn = QPushButton("Add")
         self.delete_btn = QPushButton("Delete")
         self.rename_btn = QPushButton("Rename")
-        for btn in (self.add_btn, self.rename_btn, self.delete_btn):
+        self.import_btn = QPushButton("Import")
+        self.import_btn.setToolTip(
+            "Import presets from a JSON file. Existing presets are kept; "
+            "duplicates can be overwritten or skipped."
+        )
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setToolTip(
+            "Export all current presets to a JSON file for sharing or backup."
+        )
+        for btn in (
+            self.add_btn, self.rename_btn, self.delete_btn,
+            self.import_btn, self.export_btn,
+        ):
             btn.setMinimumWidth(72)
         self.add_btn.clicked.connect(self._on_add)
         self.delete_btn.clicked.connect(self._on_delete)
         self.rename_btn.clicked.connect(self._on_rename)
+        self.import_btn.clicked.connect(self._on_import)
+        self.export_btn.clicked.connect(self._on_export)
 
         list_btn_row = QHBoxLayout()
         list_btn_row.addWidget(self.add_btn)
         list_btn_row.addWidget(self.rename_btn)
         list_btn_row.addWidget(self.delete_btn)
 
+        share_btn_row = QHBoxLayout()
+        share_btn_row.addWidget(self.import_btn)
+        share_btn_row.addWidget(self.export_btn)
+        share_btn_row.addStretch(1)
+
         left = QVBoxLayout()
         left.addWidget(QLabel("Presets"))
         left.addWidget(self.list_widget, 1)
         left.addLayout(list_btn_row)
+        left.addLayout(share_btn_row)
 
         # ── Right side: editable parameter form ───────────────────────
         self.type_combo = QComboBox()
@@ -288,6 +311,150 @@ class PresetManagerDialog(QDialog):
         del self._presets[self._current_index]
         next_idx = min(self._current_index, len(self._presets) - 1)
         self._refresh_list(select_index=next_idx)
+
+    # ── Import / Export ─────────────────────────────────────────────────
+    #
+    # Both operate on the dialog's in-memory preset list (``self._presets``)
+    # so that unsaved edits made in the form are preserved. Persistence to
+    # QSettings still only happens when the user clicks Save.
+
+    def _on_export(self) -> None:
+        if not self._presets:
+            QMessageBox.information(
+                self, "Export presets", "There are no presets to export."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export presets",
+            "raw-view-presets.json",
+            "JSON files (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            import json
+            from pathlib import Path
+
+            data = [p.to_dict() for p in self._presets]
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export presets",
+            f"Exported {len(self._presets)} preset(s) to:\n{path}",
+        )
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import presets",
+            "",
+            "JSON files (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            import json
+
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Import failed", f"Cannot read JSON:\n{exc}")
+            return
+        if not isinstance(raw, list):
+            QMessageBox.critical(
+                self, "Import failed",
+                "Preset JSON must be a list of preset objects.",
+            )
+            return
+
+        incoming = [
+            SensorPreset.from_dict(d) for d in raw
+            if isinstance(d, dict) and str(d.get("name", "")).strip()
+        ]
+        if not incoming:
+            QMessageBox.information(
+                self, "Import presets",
+                "No valid presets found in the file.",
+            )
+            return
+
+        existing_names = {p.name for p in self._presets}
+        conflicts = [p.name for p in incoming if p.name in existing_names]
+
+        on_conflict = "overwrite"
+        if conflicts:
+            preview = ", ".join(conflicts[:5]) + ("..." if len(conflicts) > 5 else "")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Conflict")
+            box.setText(
+                f"{len(conflicts)} preset name(s) already exist:\n  {preview}\n\n"
+                "How would you like to handle them?"
+            )
+            overwrite_btn = box.addButton("Overwrite", QMessageBox.AcceptRole)
+            skip_btn = box.addButton("Skip duplicates", QMessageBox.AcceptRole)
+            cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+            box.setDefaultButton(overwrite_btn)
+            box.exec_()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                return
+            on_conflict = "skip" if clicked is skip_btn else "overwrite"
+
+        # Apply merge in-place. Existing-order presets stay first; truly new
+        # presets are appended in the order they appear in the JSON file.
+        by_name = {p.name: p for p in self._presets}
+        added = overwritten = skipped = 0
+        for p in incoming:
+            if p.name in by_name:
+                if on_conflict == "skip":
+                    skipped += 1
+                    continue
+                by_name[p.name] = p
+                overwritten += 1
+            else:
+                by_name[p.name] = p
+                added += 1
+        # Rebuild list preserving prior order, then append new names.
+        prior_order = [p.name for p in self._presets]
+        new_order: list[str] = list(prior_order)
+        for p in incoming:
+            if p.name not in prior_order and p.name in by_name:
+                new_order.append(p.name)
+        # Deduplicate (paranoid; merge logic should already prevent this).
+        seen: set[str] = set()
+        ordered: list[SensorPreset] = []
+        for name in new_order:
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(by_name[name])
+        self._presets = ordered
+
+        # Pick a sensible row to highlight after refresh.
+        target_index = 0
+        if incoming:
+            try:
+                target_index = next(
+                    i for i, p in enumerate(self._presets) if p.name == incoming[-1].name
+                )
+            except StopIteration:
+                target_index = 0
+        self._refresh_list(select_index=target_index)
+
+        QMessageBox.information(
+            self,
+            "Import presets",
+            f"Imported {added + overwritten} preset(s) "
+            f"(added {added}, overwritten {overwritten}, skipped {skipped}).\n\n"
+            "Click Save to persist the changes.",
+        )
 
     # ── Save ────────────────────────────────────────────────────────────
 

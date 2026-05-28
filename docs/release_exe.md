@@ -89,7 +89,43 @@ dist\raw-view.exe
 | 图标与版本信息 | 使用 `--icon your.ico` 和 `--version-file` |
 | onefile 打包后运行报错 | 目标电脑安装 Visual C++ Redistributable |
 
-## 5. 建议发布内容
+## 5. Sensor 预设与发布
+
+### 预设是否会随 exe 一起打包？
+
+**不会**。预设通过 `QSettings` 存储在每台机器的注册表 / 用户配置目录里，与 `dist/` 下的可执行文件完全分离：
+
+| 平台 | 预设位置 |
+|---|---|
+| Windows | `HKEY_CURRENT_USER\Software\yorelll\raw-view`，键 `presets\sensors` |
+| macOS | `~/Library/Preferences/com.yorelll.raw-view.plist` |
+| Linux | `~/.config/yorelll/raw-view.conf` |
+
+PyInstaller 不会扫描这些位置；exe 启动后第一次读取 `presets/sensors` 时若键不存在，下拉框就是空的。**这是有意为之**——exe 不夹带任何用户私有数据，任何人在自己机器上保存的预设也只留在他那台机器。
+
+### 如何把团队预设随 exe 一起分发？
+
+推荐方式：**JSON 旁路分发，不打进 exe**。
+
+1. 在某台已经配置好预设的机器上，打开 *Manage sensor presets → Export*，把全部预设导出为 `team-presets.json`（默认文件名 `raw-view-presets.json`）。
+2. 把 `team-presets.json` 放进发布目录，告诉同事：首次启动后通过 *Manage sensor presets → Import* 选择该文件 → 处理重名（一般选 *Overwrite*）→ Save。
+3. 此后预设直接进入对方注册表/配置文件，**只需导入一次**——重启、升级 exe、新增自己的预设都不会丢。
+
+> 已在 `.gitignore` 中 ignore 了 `raw-view-presets*.json` / `*sensor-presets*.json` / `presets*.json`，避免不小心把团队配置或个人导出文件提交到代码仓库。
+
+发布目录推荐结构：
+
+```
+发布目录/
+├── raw-view.exe              # 主程序
+├── README.md
+└── presets/
+    └── team-presets.json     # 由用户首次启动后手动 Import
+```
+
+如果未来希望"开箱即用"（首次启动自动导入），可以扩展为：把 `team-presets.json` 用 `--add-data "presets/team-presets.json;presets"` 打进 exe，并在 `MainWindow` 启动时检测 `AppSettings.sensor_presets` 为空时自动调用 `import_sensor_presets(path, mode="merge", on_conflict="skip")`。当前默认实现没有内置此自动导入，保留对用户个人预设的"零干扰"。
+
+## 6. 建议发布内容
 
 ### 方式一（单文件）发布
 ```
@@ -109,7 +145,7 @@ dist\raw-view.exe
 └── README.md
 ```
 
-## 6. 完整参数说明
+## 7. 完整参数说明
 
 | 参数 | 说明 |
 |------|------|

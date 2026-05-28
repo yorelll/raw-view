@@ -119,6 +119,20 @@ class SensorPreset:
 
 
 @dataclass
+class ImportResult:
+    """Summary returned by :meth:`AppSettings.import_sensor_presets`."""
+
+    added: int = 0
+    overwritten: int = 0
+    skipped: int = 0
+    conflicts: list[str] = field(default_factory=list)
+
+    @property
+    def total_changed(self) -> int:
+        return self.added + self.overwritten
+
+
+@dataclass
 class ViewerItem:
     """State container for one opened file tab and its decode/view configuration."""
 
@@ -266,6 +280,83 @@ class AppSettings:
             return False
         self._save_presets_raw(new_items)
         return True
+
+    def export_sensor_presets(self, path: str) -> int:
+        """Write all current sensor presets to *path* as pretty JSON.
+
+        Returns the number of presets exported. Overwrites the target file.
+        """
+        items = [p.to_dict() for p in self.sensor_presets]
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+        return len(items)
+
+    def import_sensor_presets(
+        self, path: str, mode: str = "merge", on_conflict: str = "overwrite"
+    ) -> "ImportResult":
+        """Read presets from *path* and merge them into settings.
+
+        Parameters
+        ----------
+        path : str
+            JSON file produced by ``export_sensor_presets`` (an array of
+            preset dicts) or any compatible structure.
+        mode : {"merge", "replace"}
+            ``merge`` keeps existing presets and adds/overwrites by name.
+            ``replace`` discards all existing presets first.
+        on_conflict : {"overwrite", "skip"}
+            Only consulted when ``mode == "merge"`` and the imported list
+            contains a name that already exists locally.
+
+        Returns
+        -------
+        ImportResult
+            Counters describing what was added / overwritten / skipped, plus
+            a list of conflicting names (useful for UI confirmation flows).
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, list):
+            raise ValueError("preset JSON must be a list of preset objects")
+        incoming = [
+            SensorPreset.from_dict(d) for d in raw
+            if isinstance(d, dict) and str(d.get("name", "")).strip()
+        ]
+
+        if mode == "replace":
+            self.replace_sensor_presets(incoming)
+            return ImportResult(
+                added=len(incoming), overwritten=0, skipped=0, conflicts=[],
+            )
+
+        if mode != "merge":
+            raise ValueError(f"unknown import mode: {mode!r}")
+
+        existing = {p.name: p for p in self.sensor_presets}
+        added = overwritten = skipped = 0
+        conflicts: list[str] = []
+        merged: dict[str, SensorPreset] = dict(existing)
+        for p in incoming:
+            if p.name in existing:
+                conflicts.append(p.name)
+                if on_conflict == "skip":
+                    skipped += 1
+                    continue
+                if on_conflict != "overwrite":
+                    raise ValueError(f"unknown on_conflict: {on_conflict!r}")
+                overwritten += 1
+                merged[p.name] = p
+            else:
+                added += 1
+                merged[p.name] = p
+        # Preserve original ordering of existing presets, then append new ones.
+        ordered = [merged[name] for name in existing if name in merged]
+        ordered.extend(merged[name] for name in (p.name for p in incoming) if name not in existing)
+        self.replace_sensor_presets(ordered)
+        return ImportResult(
+            added=added, overwritten=overwritten, skipped=skipped, conflicts=conflicts,
+        )
 
     def replace_sensor_presets(self, presets: list[SensorPreset]) -> None:
         """Persist the given list as the full preset set (used by the manage dialog)."""
