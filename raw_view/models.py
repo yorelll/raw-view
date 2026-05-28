@@ -169,11 +169,27 @@ class AppSettings:
 
     @property
     def output_template(self) -> str:
-        return str(self._store.value("convert/output_template", DEFAULT_OUTPUT_TEMPLATE))
+        stored = self._store.value("convert/output_template", DEFAULT_OUTPUT_TEMPLATE)
+        text = str(stored) if stored is not None else ""
+        # One-shot migration: users who launched an older build still have
+        # the previous default stored in QSettings, so simply changing
+        # DEFAULT_OUTPUT_TEMPLATE in code wouldn't take effect for them.
+        # Detect any of the known legacy defaults and rewrite to the new
+        # default in place, so existing installs pick up the new naming
+        # automatically without losing custom user templates.
+        if text.strip() in LEGACY_OUTPUT_TEMPLATES:
+            text = DEFAULT_OUTPUT_TEMPLATE
+            self._store.setValue("convert/output_template", text)
+        return text
 
     @output_template.setter
     def output_template(self, value: str) -> None:
         self._store.setValue("convert/output_template", value.strip() or DEFAULT_OUTPUT_TEMPLATE)
+
+    def reset_output_template(self) -> str:
+        """Force the template back to :data:`DEFAULT_OUTPUT_TEMPLATE`."""
+        self._store.setValue("convert/output_template", DEFAULT_OUTPUT_TEMPLATE)
+        return DEFAULT_OUTPUT_TEMPLATE
 
     @property
     def save_dpi(self) -> int:
@@ -643,6 +659,16 @@ def load_qdarkstyle_stylesheet(theme: str) -> str:
 # vs ``image_2560x1440_RGGB12.raw``). Earlier defaults only included
 # ``{date}`` / ``{time}`` and were prone to collisions.
 DEFAULT_OUTPUT_TEMPLATE = "{input_stem}_{width}x{height}_{format}{ext}"
+
+# Templates that earlier versions of raw-view shipped as their default.
+# When ``output_template`` is read and the stored value matches one of
+# these, AppSettings silently rewrites it to ``DEFAULT_OUTPUT_TEMPLATE``
+# so existing installs pick up the new naming without losing any
+# *user-customised* template (those won't be in this set).
+LEGACY_OUTPUT_TEMPLATES = frozenset({
+    "{date}_{time}_{input_stem}_{width}x{height}{ext}",
+    "{input_stem}_{width}x{height}{ext}",
+})
 
 
 def format_output_template(

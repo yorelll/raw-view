@@ -220,6 +220,15 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 
 > Tip：默认模板有意把 `{alignment}` / `{endianness}` 排除——大多数同事一眼想看的是"分辨率 + Bayer + bit 位 + 是否 packed"。如果你的工作流需要在文件名中区分大小端 / 对齐，按需把这两个占位符加进自定义模板即可。
 
+### 升级行为：默认模板自动迁移
+
+修改 `DEFAULT_OUTPUT_TEMPLATE` 不会自动覆盖已经写入 QSettings 的旧值（QSettings 的 `value(key, default)` 只在 key 不存在时才用默认值），所以**老用户首次升级后，Settings → Output filename template 仍会显示旧默认**。raw-view 在 `AppSettings.output_template` 读取时做了一次性迁移：
+
+- 如果存储值正好等于历史默认（`{date}_{time}_{input_stem}_{width}x{height}{ext}` 等），自动改写为当前 `DEFAULT_OUTPUT_TEMPLATE` 并回写注册表。
+- 如果是用户自定义的模板，**不会**被改写——你的个性化设置一定会保留。
+
+如果你想立刻强制回到默认，在 Settings 对话框里点 **Reset** 按钮（紧挨着模板输入框），保存后即可生效。
+
 ## Sensor 预设（一键 apply）
 
 为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部提供了 **Preset** 行：

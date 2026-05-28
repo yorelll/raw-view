@@ -28,6 +28,15 @@ class SettingsDialog(QDialog):
 
         self.output_dir_edit = QLineEdit(settings.default_output_dirname)
         self.template_edit = QLineEdit(settings.output_template)
+        # "Reset" snaps the template field back to the current built-in
+        # default. Useful for users who upgraded from an older build and
+        # never noticed their stored template was a stale earlier default.
+        self.template_reset_btn = QPushButton("Reset")
+        self.template_reset_btn.setToolTip(
+            f"Reset to the built-in default:\n{DEFAULT_OUTPUT_TEMPLATE}"
+        )
+        self.template_reset_btn.setMinimumWidth(72)
+        self.template_reset_btn.clicked.connect(self._reset_template)
         self._template_defaults = QLabel(
             "Placeholders: {input_stem} {width} {height} {ext} | {format} "
             "{bayer} {bits} {packed} {raw_type} {yuv_type} | "
@@ -56,7 +65,13 @@ class SettingsDialog(QDialog):
         template_layout = QVBoxLayout(template_widget)
         template_layout.setContentsMargins(0, 0, 0, 0)
         template_layout.setSpacing(2)
-        template_layout.addWidget(self.template_edit)
+        # First row: line-edit + Reset button on the right.
+        template_input_row = QHBoxLayout()
+        template_input_row.setContentsMargins(0, 0, 0, 0)
+        template_input_row.setSpacing(6)
+        template_input_row.addWidget(self.template_edit, 1)
+        template_input_row.addWidget(self.template_reset_btn, 0)
+        template_layout.addLayout(template_input_row)
         template_layout.addWidget(self._template_defaults)
         form.addRow("Output filename template", template_widget)
         form.addRow("Saved image DPI", self.dpi_spin)
@@ -85,6 +100,14 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(row)
+
+    def _reset_template(self) -> None:
+        """Replace the template field's text with the current built-in default.
+
+        The change is only persisted when the user clicks Save (consistent
+        with how the rest of the dialog works).
+        """
+        self.template_edit.setText(DEFAULT_OUTPUT_TEMPLATE)
 
     def _open_preset_manager(self) -> None:
         # Local import to avoid a circular dependency at module load time
