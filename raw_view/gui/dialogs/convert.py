@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -17,19 +18,36 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from raw_view.converter import image_file_to_raw, image_file_to_yuv, load_bgr_image
+from raw_view.converter import (
+    generate_image_variants,
+    image_file_to_raw,
+    image_file_to_yuv,
+    load_bgr_image,
+    plan_image_variants,
+)
 from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
     format_output_template,
 )
-from raw_view.gui.widgets import FileDropLineEdit
+from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+
+
+def _human_size(num_bytes: int) -> str:
+    """Format a byte count as a human-readable string (e.g. 14.5 MB)."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 class ConvertDialog(QDialog):
@@ -40,9 +58,12 @@ class ConvertDialog(QDialog):
         self._settings = settings
         self.setWindowTitle("Convert Image")
         self.setMinimumWidth(520)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self.input_edit = FileDropLineEdit()
+        self.input_edit.setPlaceholderText("Select an input image (PNG/JPG/BMP), or drag one here...")
         self.output_edit = QLineEdit()
+        self.output_edit.setPlaceholderText("Output path — auto-filled from the template if left blank")
 
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
@@ -53,7 +74,9 @@ class ConvertDialog(QDialog):
         )
 
         self.yuv_type = QComboBox()
-        self.yuv_type.addItems(["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"])
+        self.yuv_type.addItems(
+            ["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "YVYU", "VYUY", "NV16", "NV61"]
+        )
 
         self.align = QComboBox()
         self.align.addItems(["lsb", "msb"])
@@ -83,25 +106,21 @@ class ConvertDialog(QDialog):
 
         # ── Preview area ─────────────────────────────────────────────
         preview_group = QFrame()
+        preview_group.setObjectName("card")
         preview_group.setFrameShape(QFrame.StyledPanel)
-        preview_group.setStyleSheet(
-            "QFrame { border: 1px solid palette(mid); border-radius: 6px; }"
-        )
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(8, 8, 8, 8)
         preview_layout.setSpacing(6)
 
         preview_title = QLabel("Preview")
-        preview_title.setStyleSheet("font-weight: bold; font-size: 12px; border: none;")
+        preview_title.setStyleSheet("font-weight: bold; font-size: 12px;")
         preview_title.setAlignment(Qt.AlignLeft)
 
         preview_content = QHBoxLayout()
-        self._preview_thumb = QLabel("(no image loaded)")
+        self._preview_thumb = QLabel("Drop an image\nor click Browse")
+        self._preview_thumb.setObjectName("previewThumb")
         self._preview_thumb.setFixedSize(160, 120)
         self._preview_thumb.setAlignment(Qt.AlignCenter)
-        self._preview_thumb.setStyleSheet(
-            "background: palette(window); border: 1px solid palette(mid); border-radius: 4px;"
-        )
 
         self._preview_info = QLabel(
             "Source: -\n"
@@ -116,10 +135,38 @@ class ConvertDialog(QDialog):
         preview_layout.addWidget(preview_title)
         preview_layout.addLayout(preview_content)
 
+        # ── Browse buttons live inline next to their fields ───────────
+        # Match the field height so the inline buttons align cleanly.
+        field_h = self.input_edit.sizeHint().height()
+        btn_in = QPushButton("Browse...")
+        btn_in.setObjectName("secondaryButton")
+        btn_in.setFixedHeight(field_h)
+        btn_out = QPushButton("Browse...")
+        btn_out.setObjectName("secondaryButton")
+        btn_out.setFixedHeight(field_h)
+        btn_in.clicked.connect(self._browse_input)
+        btn_out.clicked.connect(self._browse_output)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(6)
+        input_row.addWidget(self.input_edit, 1)
+        input_row.addWidget(btn_in, 0)
+        input_row_w = QWidget()
+        input_row_w.setLayout(input_row)
+
+        output_row = QHBoxLayout()
+        output_row.setContentsMargins(0, 0, 0, 0)
+        output_row.setSpacing(6)
+        output_row.addWidget(self.output_edit, 1)
+        output_row.addWidget(btn_out, 0)
+        output_row_w = QWidget()
+        output_row_w.setLayout(output_row)
+
         # ── Layout construction ───────────────────────────────────────
         form = QFormLayout()
-        form.addRow("Input image", self.input_edit)
-        form.addRow("Output file", self.output_edit)
+        form.addRow("Input image", input_row_w)
+        form.addRow("Output file", output_row_w)
         form.addRow("Target", self.target_type)
         form.addRow("RAW type", self.raw_type)
         form.addRow("YUV format", self.yuv_type)
@@ -130,22 +177,70 @@ class ConvertDialog(QDialog):
         form.addRow("Height", self.height)
         form.addRow("", self._yuv_note)
 
-        btn_in = QPushButton("Browse Input")
-        btn_out = QPushButton("Browse Output")
+        # CONVERT is the primary action; disabled until an input is chosen.
         btn_run = QPushButton("Convert")
-        btn_in.clicked.connect(self._browse_input)
-        btn_out.clicked.connect(self._browse_output)
+        btn_run.setObjectName("accentButton")
         btn_run.clicked.connect(self._convert)
+        btn_run.setEnabled(bool(self.input_edit.text().strip()))
+        self._btn_run = btn_run
+        self.input_edit.textChanged.connect(
+            lambda t: btn_run.setEnabled(bool(t.strip()))
+        )
 
+        # ── Scrollable content ────────────────────────────────────────
+        # Wrap the form + preview + (optional) variant selector in a scroll
+        # area so the dialog never grows past the screen. The action buttons
+        # live outside the scroll area and stay pinned at the bottom.
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addLayout(form)
+        content_layout.addWidget(preview_group)
+
+        # ── Multi-variant generator (opt-in via Settings) ────────────────
+        self._variant_selector: VariantSelector | None = None
+        btn_variants: QPushButton | None = None
+        if self._settings.multi_variant_enabled:
+            variant_group = QFrame()
+            variant_group.setObjectName("card")
+            variant_group.setFrameShape(QFrame.StyledPanel)
+            variant_layout = QVBoxLayout(variant_group)
+            variant_layout.setContentsMargins(8, 8, 8, 8)
+            self._variant_selector = VariantSelector()
+            variant_layout.addWidget(self._variant_selector)
+            self.setMinimumWidth(620)
+            content_layout.addWidget(variant_group)
+            btn_variants = QPushButton("Generate Variants")
+            btn_variants.setObjectName("secondaryButton")
+            btn_variants.clicked.connect(self._generate_variants)
+            self._btn_variants = btn_variants
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+
+        # ── Pinned action buttons ─────────────────────────────────────
         row = QHBoxLayout()
-        row.addWidget(btn_in)
-        row.addWidget(btn_out)
+        row.addStretch(1)
+        if btn_variants is not None:
+            row.addWidget(btn_variants)
         row.addWidget(btn_run)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(preview_group)
+        layout.addWidget(scroll, 1)
         layout.addLayout(row)
+
+        # Cap the dialog height to the available screen so the buttons never
+        # get pushed off-screen, then size to the content within that cap.
+        # NB: self.width / self.height are QSpinBox attributes on this dialog,
+        # so QWidget.width()/height() are shadowed — use sizeHint() instead.
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            max_h = int(screen.availableGeometry().height() * 0.9)
+            self.setMaximumHeight(max_h)
+            hint = self.sizeHint()
+            self.resize(hint.width(), min(hint.height(), max_h))
 
         # Signals
         self.input_edit.fileDropped.connect(self._sync_default_output)
@@ -236,7 +331,7 @@ class ConvertDialog(QDialog):
 
         input_path = self.input_edit.text().strip()
         if not input_path or not Path(input_path).is_file():
-            self._preview_thumb.setText("(no image loaded)")
+            self._preview_thumb.setText("Drop an image\nor click Browse")
             self._preview_info.setText("Source: -\nOutput size: -\nFrame size: -")
             return
 
@@ -285,6 +380,18 @@ class ConvertDialog(QDialog):
             self._preview_info.setText("Source: -\nOutput size: -\nFrame size: -")
 
     def _convert(self) -> None:
+        # Busy feedback: disable the button and show progress text so the user
+        # knows work is happening (conversion is synchronous).
+        self._btn_run.setEnabled(False)
+        self._btn_run.setText("Converting…")
+        QApplication.processEvents()
+        try:
+            self._do_convert()
+        finally:
+            self._btn_run.setText("Convert")
+            self._btn_run.setEnabled(bool(self.input_edit.text().strip()))
+
+    def _do_convert(self) -> None:
         try:
             input_path = self.input_edit.text().strip()
             target_type = self.target_type.currentText()
@@ -330,6 +437,73 @@ class ConvertDialog(QDialog):
                     self.height.value(),
                 )
             self.output_edit.setText(output_path)
-            QMessageBox.information(self, "Convert", "Conversion completed")
+            try:
+                size = Path(output_path).stat().st_size
+                size_str = f" ({_human_size(size)})"
+            except OSError:
+                size_str = ""
+            QMessageBox.information(
+                self, "Convert",
+                f"\u2705 Converted:\n{output_path}{size_str}",
+            )
         except Exception as exc:
-            QMessageBox.critical(self, "Convert Failed", str(exc))
+            QMessageBox.critical(self, "Convert Failed", f"\u274c {exc}")
+
+    def _generate_variants(self) -> None:
+        """Generate every selected format/bayer/size combination from the input."""
+        if self._variant_selector is None:
+            return
+        input_path = self.input_edit.text().strip()
+        if not input_path or not Path(input_path).is_file():
+            QMessageBox.warning(self, "Generate Variants", "Please choose a valid input image.")
+            return
+        formats = self._variant_selector.selected_formats()
+        sizes = self._variant_selector.selected_sizes()
+        bayer = self._variant_selector.selected_bayer()
+        if not formats:
+            QMessageBox.warning(self, "Generate Variants", "Select at least one format.")
+            return
+        if not sizes:
+            QMessageBox.warning(self, "Generate Variants", "Select at least one size.")
+            return
+        source_mode = self.raw_source_mode.currentText()
+        alignment = self.align.currentText()
+        plans = plan_image_variants(
+            input_path, formats, sizes, bayer,
+            source_mode=source_mode, alignment=alignment,
+            output_dir=self._settings.default_output_dirname,
+            template=self._settings.output_template,
+        )
+        self._btn_variants.setEnabled(False)
+        self._btn_variants.setText(f"Generating 0/{len(plans)}…")
+        QApplication.processEvents()
+
+        written: list[str] = []
+        done = {"n": 0}
+
+        def _progress(_path: str) -> None:
+            done["n"] += 1
+            self._btn_variants.setText(f"Generating {done['n']}/{len(plans)}…")
+            QApplication.processEvents()
+
+        try:
+            written = generate_image_variants(
+                input_path, formats, sizes, bayer,
+                source_mode=source_mode, alignment=alignment,
+                output_dir=self._settings.default_output_dirname,
+                template=self._settings.output_template,
+                on_output=_progress,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Generate Variants Failed", f"\u274c {exc}")
+            return
+        finally:
+            self._btn_variants.setText("Generate Variants")
+            self._btn_variants.setEnabled(True)
+        out_dir = str(Path(written[0]).parent) if written else "-"
+        QMessageBox.information(
+            self,
+            "Generate Variants",
+            f"\u2705 Generated {len(written)} file(s) from {len(plans)} planned variant(s).\n"
+            f"Output folder:\n{out_dir}",
+        )

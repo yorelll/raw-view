@@ -169,6 +169,120 @@ def image_file_to_yuv(
     return len(yuv_bytes)
 
 
+# ── Multi-variant generation (one image → many outputs) ───────────────
+
+
+def plan_image_variants(
+    input_path: str,
+    formats: list[str],
+    sizes: list[tuple[int, int]],
+    bayer_patterns: list[str],
+    *,
+    source_mode: str = "bayer",
+    alignment: str = "lsb",
+    output_dir: str | None = None,
+    template: str | None = None,
+) -> list[dict]:
+    """Expand the selected formats/sizes/bayer patterns into a flat list of
+    variant descriptors without writing any files.
+
+    Each descriptor is a dict with keys: ``target_type`` ("RAW"/"YUV"),
+    ``format``, ``width``, ``height``, ``bayer`` (may be ""), and
+    ``output_path``. Bayer patterns are only fanned out for RAW formats with
+    ``source_mode == "bayer"``; YUV and gray-source RAW produce a single
+    entry per (format, size).
+    """
+    from raw_view.formats import RAW_BITS
+    from raw_view.models import DEFAULT_OUTPUT_TEMPLATE, format_output_template
+
+    raw_set = set(RAW_BITS.keys())
+    tmpl = template or DEFAULT_OUTPUT_TEMPLATE
+    plans: list[dict] = []
+    for fmt in formats:
+        is_raw = fmt in raw_set
+        target_type = "RAW" if is_raw else "YUV"
+        for (w, h) in sizes:
+            if is_raw and source_mode.lower() == "bayer":
+                patterns = bayer_patterns or ["RGGB"]
+            else:
+                patterns = [""]
+            for pat in patterns:
+                out = format_output_template(
+                    tmpl,
+                    input_path,
+                    w,
+                    h,
+                    target_type,
+                    output_dir=output_dir,
+                    raw_type=fmt if is_raw else "",
+                    yuv_type="" if is_raw else fmt,
+                    bayer_pattern=pat,
+                    source_mode=source_mode,
+                    alignment=alignment,
+                )
+                plans.append({
+                    "target_type": target_type,
+                    "format": fmt,
+                    "width": w,
+                    "height": h,
+                    "bayer": pat,
+                    "output_path": out,
+                })
+    return plans
+
+
+def generate_image_variants(
+    input_path: str,
+    formats: list[str],
+    sizes: list[tuple[int, int]],
+    bayer_patterns: list[str],
+    *,
+    source_mode: str = "bayer",
+    alignment: str = "lsb",
+    endianness: str = "little",
+    output_dir: str | None = None,
+    template: str | None = None,
+    on_output=None,
+) -> list[str]:
+    """Generate every variant produced by :func:`plan_image_variants`.
+
+    Returns the list of written output paths. ``on_output`` — if given — is
+    called with each output path as it is written (useful for progress UIs).
+    """
+    plans = plan_image_variants(
+        input_path,
+        formats,
+        sizes,
+        bayer_patterns,
+        source_mode=source_mode,
+        alignment=alignment,
+        output_dir=output_dir,
+        template=template,
+    )
+    written: list[str] = []
+    for plan in plans:
+        out = plan["output_path"]
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        if plan["target_type"] == "RAW":
+            image_file_to_raw(
+                input_path,
+                out,
+                plan["format"],
+                plan["width"],
+                plan["height"],
+                alignment=alignment,
+                endianness=endianness,
+                source_mode=source_mode,
+                bayer_pattern=plan["bayer"] or "RGGB",
+            )
+        else:
+            image_file_to_yuv(input_path, out, plan["format"], plan["width"], plan["height"])
+        written.append(out)
+        if on_output is not None:
+            on_output(out)
+    return written
+
+
 # ── Decode (RAW/YUV → viewable image) ─────────────────────────────────
 
 

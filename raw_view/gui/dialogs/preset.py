@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -27,7 +29,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from raw_view.gui.panels import ControlPanel
+from raw_view.gui.panels import ControlPanel, _qta_icon
 from raw_view.models import AppSettings, BAYER_PATTERNS, SensorPreset
 
 
@@ -48,50 +50,50 @@ class PresetManagerDialog(QDialog):
         self._loading: bool = False  # guards against edit-callback recursion
 
         self.setWindowTitle("Sensor Presets")
-        self.resize(620, 420)
+        self.resize(680, 460)
+        self.setMinimumSize(640, 440)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        # ── Left side: list + add/delete buttons ──────────────────────
+        # ── Left side: search + list + Add/Delete; everything else on right-click ──
+        header = QLabel("Presets")
+        header.setStyleSheet("font-weight: bold;")
+
+        # Search filter — only shown once the list gets long enough to warrant it.
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search presets…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._apply_filter)
+
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
+        # Double-click renames in place; right-click exposes the full menu.
+        self.list_widget.itemDoubleClicked.connect(lambda _i: self._on_rename())
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_list_menu)
 
+        # Only Add and Delete are surfaced as buttons; Rename / Import / Export
+        # live on the right-click menu to keep the panel uncluttered.
         self.add_btn = QPushButton("Add")
+        self.add_btn.setObjectName("accentButton")
+        self.add_btn.setIcon(_qta_icon("fa5s.plus"))
         self.delete_btn = QPushButton("Delete")
-        self.rename_btn = QPushButton("Rename")
-        self.import_btn = QPushButton("Import")
-        self.import_btn.setToolTip(
-            "Import presets from a JSON file. Existing presets are kept; "
-            "duplicates can be overwritten or skipped."
-        )
-        self.export_btn = QPushButton("Export")
-        self.export_btn.setToolTip(
-            "Export all current presets to a JSON file for sharing or backup."
-        )
-        for btn in (
-            self.add_btn, self.rename_btn, self.delete_btn,
-            self.import_btn, self.export_btn,
-        ):
-            btn.setMinimumWidth(72)
+        self.delete_btn.setObjectName("dangerButton")
+        self.delete_btn.setIcon(_qta_icon("fa5s.trash-alt"))
+        for btn in (self.add_btn, self.delete_btn):
+            btn.setMinimumWidth(92)
+            btn.setIconSize(QSize(13, 13))
         self.add_btn.clicked.connect(self._on_add)
         self.delete_btn.clicked.connect(self._on_delete)
-        self.rename_btn.clicked.connect(self._on_rename)
-        self.import_btn.clicked.connect(self._on_import)
-        self.export_btn.clicked.connect(self._on_export)
 
         list_btn_row = QHBoxLayout()
-        list_btn_row.addWidget(self.add_btn)
-        list_btn_row.addWidget(self.rename_btn)
-        list_btn_row.addWidget(self.delete_btn)
-
-        share_btn_row = QHBoxLayout()
-        share_btn_row.addWidget(self.import_btn)
-        share_btn_row.addWidget(self.export_btn)
-        share_btn_row.addStretch(1)
+        list_btn_row.addWidget(self.add_btn, 1)
+        list_btn_row.addWidget(self.delete_btn, 1)
 
         left = QVBoxLayout()
-        left.addWidget(QLabel("Presets"))
+        left.addWidget(header)
+        left.addWidget(self.search_edit)
         left.addWidget(self.list_widget, 1)
         left.addLayout(list_btn_row)
-        left.addLayout(share_btn_row)
 
         # ── Right side: editable parameter form ───────────────────────
         self.type_combo = QComboBox()
@@ -135,20 +137,29 @@ class PresetManagerDialog(QDialog):
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
 
+        edit_header = QLabel("Edit selected preset")
+        edit_header.setStyleSheet("font-weight: bold;")
         right = QVBoxLayout()
-        right.addWidget(QLabel("Edit selected preset"))
+        right.addWidget(edit_header)
         right.addLayout(form)
         right.addStretch(1)
 
         body = QHBoxLayout()
-        body.addLayout(left, 1)
-        body.addLayout(right, 2)
+        body.addLayout(left, 6)
+        body.addLayout(right, 4)
 
         # ── Save / Cancel ─────────────────────────────────────────────
         self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("accentButton")
         self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("secondaryButton")
         self.save_btn.clicked.connect(self._on_save_clicked)
         self.cancel_btn.clicked.connect(self.reject)
+
+        divider = QFrame()
+        divider.setObjectName("groupDivider")
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFixedHeight(1)
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
@@ -157,6 +168,7 @@ class PresetManagerDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.addLayout(body, 1)
+        root.addWidget(divider)
         root.addLayout(bottom)
 
         self._refresh_list(select_index=0 if self._presets else -1)
@@ -196,17 +208,52 @@ class PresetManagerDialog(QDialog):
         for p in self._presets:
             self.list_widget.addItem(QListWidgetItem(p.name))
         self.list_widget.blockSignals(False)
+        # Search box only appears when the list is long enough to need it.
+        self.search_edit.setVisible(len(self._presets) > 8)
+        self._apply_filter(self.search_edit.text())
         if 0 <= select_index < len(self._presets):
             self.list_widget.setCurrentRow(select_index)
         else:
             self._current_index = -1
             self._set_form_enabled(False)
 
+    def _apply_filter(self, query: str) -> None:
+        q = (query or "").strip().lower()
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            item.setHidden(bool(q) and q not in item.text().lower())
+
+    def _show_list_menu(self, pos) -> None:
+        row = self.list_widget.indexAt(pos).row()
+        has_item = 0 <= row < len(self._presets)
+        if has_item:
+            self.list_widget.setCurrentRow(row)
+        menu = QMenu(self)
+        act_add = menu.addAction(_qta_icon("fa5s.plus"), "Add…")
+        act_rename = menu.addAction(_qta_icon("fa5s.pen"), "Rename…")
+        act_delete = menu.addAction(_qta_icon("fa5s.trash-alt"), "Delete")
+        act_rename.setEnabled(has_item)
+        act_delete.setEnabled(has_item)
+        menu.addSeparator()
+        act_import = menu.addAction(_qta_icon("fa5s.file-import"), "Import…")
+        act_export = menu.addAction(_qta_icon("fa5s.file-export"), "Export…")
+        chosen = menu.exec_(self.list_widget.mapToGlobal(pos))
+        if chosen is act_add:
+            self._on_add()
+        elif chosen is act_rename:
+            self._on_rename()
+        elif chosen is act_delete:
+            self._on_delete()
+        elif chosen is act_import:
+            self._on_import()
+        elif chosen is act_export:
+            self._on_export()
+
     def _set_form_enabled(self, enabled: bool) -> None:
         for w in (
             self.type_combo, self.format_combo, self.align_combo, self.endian_combo,
             self.preview_combo, self.bayer_combo, self.width_spin, self.height_spin,
-            self.offset_spin, self.rename_btn, self.delete_btn,
+            self.offset_spin, self.delete_btn,
         ):
             w.setEnabled(enabled)
 

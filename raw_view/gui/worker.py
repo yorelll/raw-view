@@ -5,6 +5,7 @@ from __future__ import annotations
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from raw_view.formats import (
+    YUV_BYTES_PER_PIXEL,
     ImageSpec,
     decode_raw,
     decode_yuv,
@@ -82,7 +83,7 @@ class DecodeWorker(QObject):
 
             from PyQt5.QtGui import QImage
 
-            if self._format_name in ("I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "NV16"):
+            if self._format_name in YUV_BYTES_PER_PIXEL:
                 # ── YUV path ────────────────────────────────────────
                 logger.debug(
                     "Worker decoding YUV: %s, %dx%d, offset=%d",

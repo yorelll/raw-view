@@ -21,8 +21,15 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
     --hidden-import=PIL `
     --collect-all=cv2 `
     --collect-all=PyQt5 `
+    --collect-all=qt_material `
+    --collect-all=qtawesome `
+    --icon assets/raw-view.ico `
+    --add-data "assets;assets" `
     raw_view/__main__.py
 ```
+
+> 推荐直接使用现成的 `raw-view.spec`：`pyinstaller --noconfirm --clean raw-view.spec`（已内置 qt_material / qtawesome / assets / 图标）。
+> 修改 `assets/logo.svg` 后，先运行 `python scripts/make_icon.py` 重新生成 `assets/raw-view.ico` 与 `logo.png`。
 
 产物：`dist/raw-view.exe`（单文件，约 114MB）
 
@@ -40,8 +47,10 @@ pyinstaller --noconfirm --clean --windowed --name raw-view `
     --hidden-import=PIL `
     --collect-all=cv2 `
     --collect-all=PyQt5 `
-    --collect-all=qdarkstyle `
+    --collect-all=qt_material `
     --collect-all=qtawesome `
+    --icon assets/raw-view.ico `
+    --add-data "assets;assets" `
     --add-data ".venv/Lib/site-packages/PyQt5/Qt5/translations;Qt5/translations" `
     raw_view/__main__.py
 ```

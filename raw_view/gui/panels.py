@@ -6,6 +6,7 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -16,7 +17,19 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from raw_view.models import BAYER_PATTERNS
+from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS
+
+
+def _qta_icon(name: str):
+    """Build a qtawesome icon, tolerant of failures/headless envs."""
+    try:
+        import qtawesome as qta
+
+        return qta.icon(name, color=ACTION_ICON_COLOR)
+    except Exception:
+        from PyQt5.QtGui import QIcon
+
+        return QIcon()
 
 
 class ControlPanel(QWidget):
@@ -41,6 +54,7 @@ class ControlPanel(QWidget):
     presetSelected = pyqtSignal(str)        # emitted when user picks a saved preset
     savePresetRequested = pyqtSignal()      # user clicked the "Save as..." button
     managePresetsRequested = pyqtSignal()   # user clicked the "Manage..." button
+    valuesChanged = pyqtSignal()            # a decode parameter was edited
 
     # Sentinel item shown at index 0 of the preset combo.
     _PRESET_PLACEHOLDER = "(Select a preset)"
@@ -62,12 +76,15 @@ class ControlPanel(QWidget):
         "NV21",
         "YUYV",
         "UYVY",
+        "YVYU",
+        "VYUY",
         "NV16",
+        "NV61",
     ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(340)
         self.setObjectName("controlPanel")
 
         # Scrollable content
@@ -81,26 +98,35 @@ class ControlPanel(QWidget):
         self.preset_combo = QComboBox()
         self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
         self.preset_combo.setToolTip(
-            "Saved sensor presets. Selecting one fills the form below and "
-            "applies it immediately."
+            "Saved sensor presets. Selecting one fills the form below; "
+            "press Apply to render."
         )
+        # Let the combo shrink so the Save/Manage buttons are never pushed
+        # off the edge of the narrow panel; the tooltip shows the full text.
+        # Keep the box compact so both icon buttons always fit on the narrow
+        # panel; the dropdown popup still expands to show full preset names.
+        self.preset_combo.setMinimumWidth(96)
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
 
-        self.preset_save_btn = QPushButton("Save")
+        # Compact icon buttons keep the preset row readable on the narrow
+        # panel (text buttons got truncated to "MANAC" etc.).
+        self.preset_save_btn = QPushButton()
+        self.preset_save_btn.setObjectName("iconButton")
+        self.preset_save_btn.setIcon(_qta_icon("fa5s.save"))
         self.preset_save_btn.setToolTip(
             "Save the current panel values as a named sensor preset for reuse."
         )
-        self.preset_manage_btn = QPushButton("Manage")
-        self.preset_manage_btn.setToolTip("Rename or delete saved presets.")
-        # Reserve enough horizontal space for the labels — the panel is
-        # narrow, and without an explicit minimum the combo crowds the
-        # buttons and the labels get cropped to "Sa..." / "Mana...".
+        self.preset_manage_btn = QPushButton()
+        self.preset_manage_btn.setObjectName("iconButton")
+        self.preset_manage_btn.setIcon(_qta_icon("fa5s.cog"))
+        self.preset_manage_btn.setToolTip("Manage presets: rename, delete, import/export.")
         for btn in (self.preset_save_btn, self.preset_manage_btn):
-            btn.setMinimumWidth(72)
+            btn.setFixedSize(32, 30)
 
         preset_row = QWidget()
         preset_layout = QHBoxLayout(preset_row)
         preset_layout.setContentsMargins(0, 0, 0, 0)
-        preset_layout.setSpacing(6)
+        preset_layout.setSpacing(4)
         # The combo gets the stretch; the buttons keep their natural width.
         preset_layout.addWidget(self.preset_combo, 1)
         preset_layout.addWidget(self.preset_save_btn, 0)
@@ -146,20 +172,35 @@ class ControlPanel(QWidget):
         self.zoom_slider.setOrientation(1)  # Horizontal
         self.zoom_slider.setRange(10, 1000)
         self.zoom_slider.setValue(100)
-        self.zoom_slider.setTickPosition(QSlider.TicksBelow)
-        self.zoom_slider.setTickInterval(100)
-        self.zoom_label = QLabel("100%")
-        self.zoom_label.setFixedWidth(48)
+        self.zoom_slider.setTickPosition(QSlider.NoTicks)
+        # Editable spin box: slide for coarse, type for precise.
+        self.zoom_spin = QSpinBox()
+        self.zoom_spin.setRange(10, 1000)
+        self.zoom_spin.setValue(100)
+        self.zoom_spin.setSuffix("%")
+        self.zoom_spin.setFixedWidth(96)
+        self.zoom_spin.setToolTip("Zoom level (10%–1000%) — drag the slider or type a value")
         zoom_layout.addWidget(self.zoom_slider, 1)
-        zoom_layout.addWidget(self.zoom_label)
+        zoom_layout.addWidget(self.zoom_spin)
 
         # ── Apply button ──
         self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("accentButton")
 
         # ── Layout ──
         form = QFormLayout(content)
         form.setVerticalSpacing(10)
         form.addRow("Preset", preset_row)
+
+        # Separator: the Preset row is "preset management"; everything below
+        # is "parameter configuration" — divide them so the two functional
+        # areas read as distinct groups.
+        preset_divider = QFrame()
+        preset_divider.setFrameShape(QFrame.HLine)
+        preset_divider.setObjectName("groupDivider")
+        preset_divider.setFixedHeight(1)
+        form.addRow(preset_divider)
+
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
         form.addRow("Alignment", self.align_combo)
@@ -193,9 +234,21 @@ class ControlPanel(QWidget):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
         self.raw_preview_combo.currentTextChanged.connect(self._on_raw_preview_changed)
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
+        self.zoom_spin.valueChanged.connect(self._on_spin_zoom)
         self.preset_combo.activated.connect(self._on_preset_activated)
         self.preset_save_btn.clicked.connect(self.savePresetRequested)
         self.preset_manage_btn.clicked.connect(self.managePresetsRequested)
+
+        # Emit valuesChanged whenever a decode parameter is edited, so the
+        # window can flag "unapplied changes" until Apply is pressed. Zoom is
+        # a view-only control and is deliberately excluded.
+        for combo in (
+            self.type_combo, self.format_combo, self.align_combo,
+            self.endian_combo, self.raw_preview_combo, self.bayer_pattern_combo,
+        ):
+            combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
+        for spin in (self.width_spin, self.height_spin, self.offset_spin):
+            spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
 
         self._on_type_changed(self.type_combo.currentText())
 
@@ -291,12 +344,14 @@ class ControlPanel(QWidget):
         self.preset_combo.blockSignals(False)
 
     def set_zoom_percent(self, percent: int) -> None:
-        """Update zoom slider and label without emitting zoomChanged."""
+        """Update zoom slider and spin box without emitting zoomChanged."""
         percent = max(10, min(1000, percent))
         self.zoom_slider.blockSignals(True)
         self.zoom_slider.setValue(percent)
         self.zoom_slider.blockSignals(False)
-        self.zoom_label.setText(f"{percent}%")
+        self.zoom_spin.blockSignals(True)
+        self.zoom_spin.setValue(percent)
+        self.zoom_spin.blockSignals(False)
 
     def _sync_type_enabled(self) -> None:
         """Re-apply type-specific enabled states without changing formats.
@@ -333,7 +388,15 @@ class ControlPanel(QWidget):
             self.presetSelected.emit(name)
 
     def _on_slider_zoom(self, value: int) -> None:
-        self.zoom_label.setText(f"{value}%")
+        self.zoom_spin.blockSignals(True)
+        self.zoom_spin.setValue(value)
+        self.zoom_spin.blockSignals(False)
+        self.zoomChanged.emit(value)
+
+    def _on_spin_zoom(self, value: int) -> None:
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(value)
+        self.zoom_slider.blockSignals(False)
         self.zoomChanged.emit(value)
 
     def _on_type_changed(self, image_type: str) -> None:

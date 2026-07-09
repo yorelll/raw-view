@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,10 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -38,15 +43,36 @@ from raw_view.models import (
     ACTION_ICON_DISABLED_COLOR,
     ACTION_ICON_NAMES,
     IMAGE_EXTENSIONS,
+    MATERIAL_EXTRA,
+    THEME_XML,
     DecodeOptions,
     SensorPreset,
     ViewerItem,
     build_ui_stylesheet,
     dpi_to_dots_per_meter,
-    load_qdarkstyle_stylesheet,
 )
 
 logger = get_logger(__name__)
+
+
+def resource_path(relative: str) -> str:
+    """Resolve a bundled resource path in both dev and PyInstaller runs."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base is None:
+        # raw_view/gui/app.py -> project root is two levels up.
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, relative)
+
+
+def app_icon() -> QIcon:
+    """Return the application window/taskbar icon (SVG, falls back gracefully)."""
+    svg = resource_path(os.path.join("assets", "logo.svg"))
+    if os.path.isfile(svg):
+        return QIcon(svg)
+    png = resource_path(os.path.join("assets", "logo.png"))
+    return QIcon(png) if os.path.isfile(png) else QIcon()
+
+
 from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
@@ -153,7 +179,10 @@ _YUV_EXTS: dict[str, str] = {
     ".yv12": "YV12",
     ".yuyv": "YUYV",
     ".uyvy": "UYVY",
+    ".yvyu": "YVYU",
+    ".vyuy": "VYUY",
     ".nv16": "NV16",
+    ".nv61": "NV61",
 }
 
 
@@ -197,6 +226,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("RAW/YUV Viewer")
+        self.setWindowIcon(app_icon())
         self.settings = AppSettings()
         self.items: list[ViewerItem] = []
         self._active_item_index = -1
@@ -217,7 +247,8 @@ class MainWindow(QMainWindow):
         self.image_status = QLabel("Image: -")
         self.zoom_status = QLabel("Zoom: 100%")
         self.frame_status = QLabel("Frame: -")
-        self.state_status = QLabel("Ready")
+        self.state_status = QLabel()
+        self._set_state("Ready", "ok")
         self.status.addPermanentWidget(self.file_status, 2)
         self.status.addPermanentWidget(self.image_status, 2)
         self.status.addPermanentWidget(self.frame_status, 1)
@@ -226,13 +257,14 @@ class MainWindow(QMainWindow):
 
         # Control panel
         self.panel = ControlPanel()
-        self.panel.applyClicked.connect(self.decode_current)
+        self.panel.applyClicked.connect(self._on_apply_clicked)
         self.panel.typeChanged.connect(self._on_panel_type_changed)
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
         self.panel.zoomChanged.connect(self._on_panel_zoom_changed)
         self.panel.presetSelected.connect(self._on_preset_selected)
         self.panel.savePresetRequested.connect(self._on_save_preset_clicked)
         self.panel.managePresetsRequested.connect(self._open_preset_manager_dialog)
+        self.panel.valuesChanged.connect(self._on_panel_values_changed)
         self._refresh_preset_combo()
 
         # Tab widget
@@ -241,13 +273,33 @@ class MainWindow(QMainWindow):
         self.item_tabs.tabCloseRequested.connect(self.close_item)
         self.item_tabs.currentChanged.connect(self._on_tab_changed)
 
+        # Right side: a stack that shows an empty-state placeholder until the
+        # first file is opened, then swaps to the tabbed image views.
+        self.empty_state = self._build_empty_state()
+        self.center_stack = QStackedWidget()
+        self.center_stack.addWidget(self.empty_state)   # index 0
+        self.center_stack.addWidget(self.item_tabs)     # index 1
+        self.center_stack.setCurrentIndex(0)
+
         # Central layout — DropCentralWidget handles drag-highlight painting
         root = DropCentralWidget()
+        root.setObjectName("centralRoot")
         layout = QHBoxLayout(root)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
-        layout.addWidget(self.panel)
-        layout.addWidget(self.item_tabs, 1)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(0)
+        # A draggable splitter lets the user resize the control panel vs the
+        # image area. The panel keeps its width when the window resizes; the
+        # image area absorbs the extra space.
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(8)
+        self.splitter.addWidget(self.panel)
+        self.splitter.addWidget(self.center_stack)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([360, 880])
+        layout.addWidget(self.splitter)
         self.setCentralWidget(root)
         root.filesDropped.connect(self._on_files_dropped)
 
@@ -255,6 +307,66 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._refresh_recent_files_menu()
         self.panel.set_enabled(False)
+
+    def _build_empty_state(self) -> QWidget:
+        """Placeholder shown in the viewer area before any file is opened."""
+        widget = QWidget()
+        widget.setObjectName("emptyState")
+        vbox = QVBoxLayout(widget)
+        vbox.setAlignment(Qt.AlignCenter)
+        vbox.setSpacing(14)
+
+        icon_label = QLabel()
+        icon_label.setAlignment(Qt.AlignCenter)
+        try:
+            import qtawesome as qta
+
+            pix = qta.icon("fa5s.image", color="#B9B4D0").pixmap(72, 72)
+            icon_label.setPixmap(pix)
+        except Exception:
+            icon_label.setText("🖼")
+
+        title = QLabel("No image loaded")
+        title.setAlignment(Qt.AlignCenter)
+        title.setObjectName("emptyStateTitle")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+
+        hint = QLabel("Open a RAW / YUV / image file, or drag and drop it here")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setObjectName("statusPlaceholder")
+
+        open_btn = QPushButton("Open File...")
+        open_btn.setObjectName("accentButton")
+        open_btn.setMinimumWidth(200)
+        open_btn.clicked.connect(self.open_file)
+
+        vbox.addStretch(1)
+        vbox.addWidget(icon_label)
+        vbox.addWidget(title)
+        vbox.addWidget(hint)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch(1)
+        vbox.addLayout(btn_row)
+        vbox.addStretch(1)
+        return widget
+
+    def _update_center_stack(self) -> None:
+        """Show the tabbed views when items exist, else the empty state."""
+        self.center_stack.setCurrentIndex(1 if self.items else 0)
+
+    _STATE_DOT_COLORS = {
+        "idle": "#9E9E9E",
+        "busy": "#F59E0B",
+        "ok": "#2E7D32",
+        "error": "#D32F2F",
+    }
+
+    def _set_state(self, text: str, kind: str = "idle") -> None:
+        """Update the status-bar state label with a colored status dot."""
+        dot = self._STATE_DOT_COLORS.get(kind, "#9E9E9E")
+        self.state_status.setText(f'<span style="color:{dot};">&#9679;</span> {text}')
 
     def _build_menus(self) -> None:
         menu = self.menuBar()
@@ -298,50 +410,64 @@ class MainWindow(QMainWindow):
         prev_tab.triggered.connect(self._prev_tab)
         nav_menu.addActions([next_tab, prev_tab])
 
-        # ── View ──
+        # ── View ── (grouped: zoom / display mode / transform)
         view_menu = menu.addMenu("View")
-        zoom_in = QAction("Zoom In", self)
+
+        # Zoom group
+        zoom_in = QAction(self._menu_icon("fa5s.search-plus"), "Zoom In", self)
         zoom_in.setShortcut(QKeySequence.ZoomIn)
         zoom_in.triggered.connect(self._zoom_in_current)
-        zoom_out = QAction("Zoom Out", self)
+        zoom_out = QAction(self._menu_icon("fa5s.search-minus"), "Zoom Out", self)
         zoom_out.setShortcut(QKeySequence.ZoomOut)
         zoom_out.triggered.connect(self._zoom_out_current)
-        fit = QAction("Fit to Window", self)
+        fit = QAction(self._menu_icon("fa5s.expand-arrows-alt"), "Fit to Window", self)
         fit.setShortcut("Ctrl+0")
         fit.triggered.connect(self._fit_image)
-        reset_zoom = QAction("Reset Zoom (1:1)", self)
+        reset_zoom = QAction(self._menu_icon("fa5s.compress"), "Actual Size", self)
+        reset_zoom.setShortcut("Ctrl+1")
+        reset_zoom.setToolTip("Reset zoom to 100% (1:1)")
         reset_zoom.triggered.connect(self._reset_zoom_current)
+        view_menu.addActions([zoom_in, zoom_out, fit, reset_zoom])
 
-        self.fullscreen_action = QAction("Fullscreen", self)
+        view_menu.addSeparator()
+
+        # Display-mode group
+        self.fullscreen_action = QAction(self._menu_icon("fa5s.expand"), "Fullscreen", self)
         self.fullscreen_action.setShortcut("F11")
         self.fullscreen_action.setCheckable(True)
         self.fullscreen_action.triggered.connect(self._toggle_fullscreen)
-
-        view_menu.addActions([zoom_in, zoom_out, fit, reset_zoom])
-        view_menu.addSeparator()
         view_menu.addAction(self.fullscreen_action)
+
         view_menu.addSeparator()
 
-        # ── Rotate / Flip ──
-        rotate_cw = QAction("Rotate Clockwise", self)
+        # Transform group
+        rotate_cw = QAction(self._menu_icon("fa5s.redo"), "Rotate CW", self)
         rotate_cw.setShortcut("Ctrl+R")
         rotate_cw.triggered.connect(self._rotate_cw_current)
-        rotate_ccw = QAction("Rotate Counter-clockwise", self)
+        rotate_ccw = QAction(self._menu_icon("fa5s.undo"), "Rotate CCW", self)
         rotate_ccw.setShortcut("Ctrl+Shift+R")
         rotate_ccw.triggered.connect(self._rotate_ccw_current)
-        flip_h = QAction("Flip Horizontal", self)
+        flip_h = QAction(self._menu_icon("fa5s.arrows-alt-h"), "Flip Horizontal", self)
+        flip_h.setShortcut("Ctrl+H")
         flip_h.triggered.connect(self._flip_h_current)
-        flip_v = QAction("Flip Vertical", self)
+        flip_v = QAction(self._menu_icon("fa5s.arrows-alt-v"), "Flip Vertical", self)
+        flip_v.setShortcut("Ctrl+Shift+V")
         flip_v.triggered.connect(self._flip_v_current)
         view_menu.addActions([rotate_cw, rotate_ccw, flip_h, flip_v])
 
         # ── Tools ──
         tools_menu = menu.addMenu("Tools")
-        self.convert_action = QAction("Convert Image...", self)
+        self.convert_action = QAction(
+            self._menu_icon(ACTION_ICON_NAMES["convert"]), "Convert Image...", self
+        )
         self.convert_action.triggered.connect(self.open_convert_dialog)
-        self.batch_convert_action = QAction("Batch Convert...", self)
+        self.batch_convert_action = QAction(
+            self._menu_icon("fa5s.layer-group"), "Batch Convert...", self
+        )
         self.batch_convert_action.triggered.connect(self.open_batch_convert_dialog)
-        settings_action = QAction("Settings...", self)
+        settings_action = QAction(
+            self._menu_icon(ACTION_ICON_NAMES["settings"]), "Settings...", self
+        )
         settings_action.triggered.connect(self.open_settings_dialog)
         tools_menu.addActions([self.convert_action, self.batch_convert_action, settings_action])
 
@@ -355,11 +481,26 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setObjectName("mainToolbar")
+
+        # ── Brand mark (logo only — the window title already says the name) ──
+        logo_label = QLabel()
+        logo_label.setPixmap(app_icon().pixmap(22, 22))
+        logo_label.setContentsMargins(8, 0, 10, 0)
+        logo_label.setToolTip("RAW/YUV Viewer")
+        toolbar.addWidget(logo_label)
+        toolbar.addSeparator()
+
+        # Distinct icons + tooltips so single-image vs multi-image convert
+        # are easy to tell apart.
+        self.open_action.setToolTip("Open file (Ctrl+O)")
+        self.save_action.setToolTip("Save current view as image (Ctrl+S)")
+        self.convert_action.setToolTip("Convert one image to RAW/YUV")
+        self.batch_convert_action.setToolTip("Batch convert multiple images")
         for action, icon_name in [
             (self.open_action, ACTION_ICON_NAMES["open"]),
             (self.save_action, ACTION_ICON_NAMES["save"]),
-            (self.convert_action, ACTION_ICON_NAMES["convert"]),
-            (self.batch_convert_action, ACTION_ICON_NAMES["convert"]),
+            (self.convert_action, "fa5s.exchange-alt"),
+            (self.batch_convert_action, "fa5s.layer-group"),
         ]:
             action.setIcon(self._build_action_icon(icon_name))
             toolbar.addAction(action)
@@ -376,13 +517,69 @@ class MainWindow(QMainWindow):
 
     # ── Theme & icons ────────────────────────────────────────────────
 
+    def _apply_titlebar_theme(self) -> None:
+        """Match the native Windows title bar to the app theme (dark/light).
+
+        Uses DWM's immersive-dark-mode attribute so the title bar isn't a
+        bright white strip above the dark toolbar. No-op off Windows or if the
+        attribute isn't supported (older Windows 10 builds).
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            dark = ctypes.c_int(1 if self.settings.ui_theme == "dark" else 0)
+            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 20H1+); 19 = older.
+            for attr in (20, 19):
+                res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(dark), ctypes.sizeof(dark)
+                )
+                if res == 0:
+                    break
+        except Exception:
+            logger.debug("Could not set title bar theme", exc_info=True)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._apply_titlebar_theme()
+
     def _apply_theme(self) -> None:
         font_size = self.settings.ui_font_size
         selected_theme = self.settings.ui_theme
         app = QApplication.instance()
         if app is not None:
-            base = load_qdarkstyle_stylesheet(selected_theme)
-            app.setStyleSheet(f"{base}\n{build_ui_stylesheet(selected_theme, font_size)}")
+            # qt-material base (custom indigo theme) + our thin card overlay.
+            from qt_material import apply_stylesheet
+
+            theme_file = resource_path(
+                os.path.join("assets", THEME_XML.get(selected_theme, THEME_XML["dark"]))
+            )
+            apply_stylesheet(
+                app,
+                theme=theme_file,
+                invert_secondary=False,
+                extra=MATERIAL_EXTRA,
+            )
+            # Image-based decorations (tick, dropdown arrow, tab close) need
+            # runtime-resolved paths (PyInstaller/dev) with forward slashes.
+            def _asset(name: str) -> str:
+                return resource_path(os.path.join("assets", name)).replace("\\", "/")
+
+            image_qss = (
+                "QCheckBox::indicator:checked, QRadioButton::indicator:checked {"
+                f" image: url('{_asset('check.png')}'); }}\n"
+                "QComboBox::down-arrow {"
+                f" image: url('{_asset('chevron_down.png')}'); width: 12px; height: 12px; }}\n"
+                "QTabBar::close-button {"
+                f" image: url('{_asset('close.png')}'); }}\n"
+                "QTabBar::close-button:hover {"
+                f" image: url('{_asset('close_hover.png')}'); }}"
+            )
+            app.setStyleSheet(
+                f"{app.styleSheet()}\n{build_ui_stylesheet(selected_theme, font_size)}\n{image_qss}"
+            )
         else:
             self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
 
@@ -393,6 +590,10 @@ class MainWindow(QMainWindow):
             return qta.icon(icon_name, color=ACTION_ICON_COLOR, color_disabled=ACTION_ICON_DISABLED_COLOR)
         except (KeyError, TypeError, ValueError):
             return QIcon()
+
+    def _menu_icon(self, icon_name: str) -> QIcon:
+        """Icon for a menu action (same style as toolbar icons)."""
+        return self._build_action_icon(icon_name)
 
     # ── Image helpers ─────────────────────────────────────────────────
 
@@ -556,6 +757,7 @@ class MainWindow(QMainWindow):
         index = self.item_tabs.addTab(container, os.path.basename(path))
         self.item_tabs.setCurrentIndex(index)
         self.panel.set_enabled(True)
+        self._update_center_stack()
 
         if decode:
             self.decode_current()
@@ -595,10 +797,11 @@ class MainWindow(QMainWindow):
             self.image_status.setText("Image: -")
             self.zoom_status.setText("Zoom: 100%")
             self.frame_status.setText("Frame: -")
-            self.state_status.setText("No item")
+            self._set_state("No item", "idle")
             self.panel.set_enabled(False)
         else:
             self._on_tab_changed(self.item_tabs.currentIndex())
+        self._update_center_stack()
 
     def _current_item(self) -> ViewerItem | None:
         idx = self.item_tabs.currentIndex()
@@ -622,6 +825,11 @@ class MainWindow(QMainWindow):
 
     def _load_item_to_panel(self, item: ViewerItem) -> None:
         self._loading_item = True
+        # Return the preset combo to its placeholder: the panel now reflects
+        # this item's own options, which may differ from any saved preset.
+        # Leaving a stale preset name selected is what made the combo appear
+        # inconsistent with the actual decode parameters.
+        self.panel.reset_preset_selection()
         opts = item.options
         self.panel.set_values(
             image_type=opts.image_type,
@@ -663,6 +871,13 @@ class MainWindow(QMainWindow):
 
     # ── Panel signal handlers ────────────────────────────────────────
 
+    def _on_panel_values_changed(self) -> None:
+        """A decode parameter was edited — flag that Apply is needed."""
+        if self._loading_item:
+            return
+        if self._current_item() is not None:
+            self._set_state("Unapplied changes — click Apply", "busy")
+
     def _on_panel_type_changed(self, image_type: str) -> None:
         pass
 
@@ -699,7 +914,17 @@ class MainWindow(QMainWindow):
 
     # ── Decode (async) ───────────────────────────────────────────────
 
-    def decode_current(self) -> None:
+    def _on_apply_clicked(self) -> None:
+        """Apply button — decode with size-mismatch warnings enabled.
+
+        Only an explicit Apply validates the file size against the current
+        parameters. Opening/dropping a file (or picking a preset) never warns,
+        since the default parameters won't match arbitrary inputs until the
+        user has actually configured them and pressed Apply.
+        """
+        self.decode_current(warn_mismatch=True)
+
+    def decode_current(self, warn_mismatch: bool = False) -> None:
         item = self._current_item()
         if item is None:
             return
@@ -745,7 +970,7 @@ class MainWindow(QMainWindow):
         except Exception:
             expected = -1
 
-        if expected > 0:
+        if warn_mismatch and expected > 0:
             remaining = len(data) - effective_offset
             # Only warn if remaining data is less than one frame (truncated).
             # Multi-frame files naturally have remaining > expected, which is fine.
@@ -779,7 +1004,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.exception("Failed to decode standard image: %s", opts.file_path)
             QMessageBox.critical(self, "Decode Failed", str(exc))
-            self.state_status.setText("Decode failed")
+            self._set_state("Decode failed", "error")
 
     def _start_async_decode(self, data: bytes, item: ViewerItem, opts: DecodeOptions, effective_offset: int) -> None:
         self._cancel_async_decode()
@@ -807,7 +1032,7 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._cleanup_thread)
         self._worker.error.connect(self._cleanup_thread)
 
-        self.state_status.setText("Decoding...")
+        self._set_state("Decoding...", "busy")
         self._thread.start()
 
     def _cancel_async_decode(self) -> None:
@@ -843,12 +1068,12 @@ class MainWindow(QMainWindow):
             )
         else:
             self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
-        self.state_status.setText("Decoded")
+        self._set_state("Decoded", "ok")
         self._update_frame_display(item)
 
     def _on_decode_error(self, message: str) -> None:
         QMessageBox.critical(self, "Decode Failed", message)
-        self.state_status.setText("Decode failed")
+        self._set_state("Decode failed", "error")
 
     def _cleanup_thread(self) -> None:
         if self._thread is not None:
@@ -879,7 +1104,7 @@ class MainWindow(QMainWindow):
         qimg.setDotsPerMeterX(dpm)
         qimg.setDotsPerMeterY(dpm)
         qimg.save(path)
-        self.state_status.setText(f"Saved: {os.path.basename(path)} @ {dpi} DPI")
+        self._set_state(f"Saved: {os.path.basename(path)} @ {dpi} DPI", "ok")
 
     # ── Zoom ─────────────────────────────────────────────────────────
 
@@ -957,6 +1182,8 @@ class MainWindow(QMainWindow):
             tb = self.findChild(QWidget, "mainToolbar")
             if tb:
                 tb.show()
+        # Reflect the toggle state in the menu label (checkmark shows too).
+        self.fullscreen_action.setText("Exit Fullscreen" if checked else "Fullscreen")
 
     def keyPressEvent(self, event):  # noqa: N802
         """Handle keyboard: Up/Down for frame nav, Escape exits fullscreen."""
@@ -965,16 +1192,34 @@ class MainWindow(QMainWindow):
             self._toggle_fullscreen(False)
             event.accept()
             return
-        if event.key() == Qt.Key_Up:
+        if event.key() in (Qt.Key_Up, Qt.Key_Left):
             item = self._current_item()
             if item:
                 self._nav_frame(item, -1)
             event.accept()
             return
-        if event.key() == Qt.Key_Down:
+        if event.key() in (Qt.Key_Down, Qt.Key_Right):
             item = self._current_item()
             if item:
                 self._nav_frame(item, 1)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Home:
+            item = self._current_item()
+            if item and item.total_frames > 1 and item.current_frame != 0:
+                item.current_frame = 0
+                if item.frame_nav is not None:
+                    item.frame_nav.set_frame_index(0)
+                self.decode_current()
+            event.accept()
+            return
+        if event.key() == Qt.Key_End:
+            item = self._current_item()
+            if item and item.total_frames > 1 and item.current_frame != item.total_frames - 1:
+                item.current_frame = item.total_frames - 1
+                if item.frame_nav is not None:
+                    item.frame_nav.set_frame_index(item.current_frame)
+                self.decode_current()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1067,6 +1312,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_():
             self._apply_theme()
+            self._apply_titlebar_theme()
         # Presets may have been edited inside the Settings dialog — keep the
         # panel combo in sync regardless of accept/reject so deletions show up.
         self._refresh_preset_combo()
@@ -1098,10 +1344,15 @@ class MainWindow(QMainWindow):
             preview_mode=preset.preview_mode,
             bayer_pattern=preset.bayer_pattern,
         )
-        # One-click apply: only meaningful if a file is actually loaded.
-        if self._current_item() is not None:
-            self.decode_current()
-        self.state_status.setText(f"Preset '{name}' applied")
+        # Selecting a preset only populates the panel — the user must press
+        # Apply for it to take effect. Persist the values onto the current
+        # item so the panel and the item stay in sync (and so switching tabs
+        # back and forth doesn't silently revert the just-picked preset),
+        # but do NOT decode here.
+        item = self._current_item()
+        if item is not None:
+            self._save_panel_to_item(item)
+        self._set_state(f"Preset '{name}' loaded — click Apply", "busy")
 
     def _on_save_preset_clicked(self) -> None:
         """Persist the panel's current values as a named preset."""
@@ -1148,7 +1399,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save preset", str(exc))
             return
         self._refresh_preset_combo(current=name)
-        self.state_status.setText(f"Preset '{name}' saved")
+        self._set_state(f"Preset '{name}' saved", "ok")
 
     def _open_preset_manager_dialog(self) -> None:
         dlg = PresetManagerDialog(self.settings, self)
@@ -1167,6 +1418,7 @@ def run(files: list[str] | None = None) -> None:
         File paths to open on startup (from CLI arguments).
     """
     app = QApplication.instance() or QApplication([])
+    app.setWindowIcon(app_icon())
     w = MainWindow()
     w.resize(1200, 700)
     w.show()

@@ -47,8 +47,18 @@ YUV_BYTES_PER_PIXEL = {
     "NV21": 1.5,
     "YUYV": 2.0,
     "UYVY": 2.0,
+    "YVYU": 2.0,
+    "VYUY": 2.0,
     "NV16": 2.0,
+    "NV61": 2.0,
 }
+
+# YUV 4:2:2 sub-formats (2.0 bytes/pixel, horizontal 2:1 chroma). Packed
+# variants interleave Y/U/V per macropixel; NVxx are Y-plane + interleaved
+# chroma plane. Grouped here so the even-width rule and encode/decode paths
+# can reference one set.
+_YUV422_PACKED = {"YUYV", "UYVY", "YVYU", "VYUY"}
+_YUV422_SEMIPLANAR = {"NV16", "NV61"}
 
 
 def _dtype_u16(endianness: Endianness) -> np.dtype:
@@ -87,7 +97,7 @@ def expected_frame_size_yuv(subformat: str, width: int, height: int) -> int:
         raise FormatError(f"unsupported YUV subformat: {subformat}")
     if subformat in {"I420", "YV12", "NV12", "NV21"} and (width % 2 or height % 2):
         raise FormatError(f"{subformat} requires even width/height")
-    if subformat in {"YUYV", "UYVY", "NV16"} and (width % 2):
+    if subformat in (_YUV422_PACKED | _YUV422_SEMIPLANAR) and (width % 2):
         raise FormatError(f"{subformat} requires even width")
     return int(width * height * YUV_BYTES_PER_PIXEL[subformat])
 
@@ -225,12 +235,20 @@ def decode_yuv(data: bytes, spec: ImageSpec, subformat: str) -> np.ndarray:
         v_up = v.repeat(2, axis=0).repeat(2, axis=1)
         return _yuv_to_rgb(y, u_up, v_up)
 
-    if subformat in {"YUYV", "UYVY"}:
+    if subformat in _YUV422_PACKED:
         p = arr.reshape(h, w // 2, 4)
+        c0, c1, c2, c3 = p[:, :, 0], p[:, :, 1], p[:, :, 2], p[:, :, 3]
+        # Component order per macropixel [c0 c1 c2 c3]:
+        #   YUYV = Y0 U  Y1 V     YVYU = Y0 V  Y1 U
+        #   UYVY = U  Y0 V  Y1    VYUY = V  Y0 U  Y1
         if subformat == "YUYV":
-            y0, u, y1, v = p[:, :, 0], p[:, :, 1], p[:, :, 2], p[:, :, 3]
-        else:
-            u, y0, v, y1 = p[:, :, 0], p[:, :, 1], p[:, :, 2], p[:, :, 3]
+            y0, u, y1, v = c0, c1, c2, c3
+        elif subformat == "YVYU":
+            y0, v, y1, u = c0, c1, c2, c3
+        elif subformat == "UYVY":
+            u, y0, v, y1 = c0, c1, c2, c3
+        else:  # VYUY
+            v, y0, u, y1 = c0, c1, c2, c3
         y = np.empty((h, w), dtype=np.uint8)
         y[:, 0::2] = y0
         y[:, 1::2] = y1
@@ -238,12 +256,15 @@ def decode_yuv(data: bytes, spec: ImageSpec, subformat: str) -> np.ndarray:
         v_up = np.repeat(v, 2, axis=1)
         return _yuv_to_rgb(y, u_up, v_up)
 
-    if subformat == "NV16":
+    if subformat in _YUV422_SEMIPLANAR:
         y_size = w * h
         y = arr[:y_size].reshape(h, w)
-        uv = arr[y_size:].reshape(h, w)
-        u = uv[:, 0::2]
-        v = uv[:, 1::2]
+        c = arr[y_size:].reshape(h, w)
+        # NV16 interleaves U,V; NV61 interleaves V,U.
+        if subformat == "NV16":
+            u, v = c[:, 0::2], c[:, 1::2]
+        else:  # NV61
+            v, u = c[:, 0::2], c[:, 1::2]
         u_up = np.repeat(u, 2, axis=1)
         v_up = np.repeat(v, 2, axis=1)
         return _yuv_to_rgb(y, u_up, v_up)
@@ -361,20 +382,28 @@ def rgb_to_yuv_bytes(rgb: np.ndarray, subformat: str) -> bytes:
             inter[:, 0::2], inter[:, 1::2] = v_ds, u_ds
         return b"".join([y.tobytes(), inter.tobytes()])
 
-    if subformat in {"YUYV", "UYVY", "NV16"}:
+    if subformat in (_YUV422_PACKED | _YUV422_SEMIPLANAR):
         if w % 2:
             raise FormatError(f"{subformat} requires even width")
         u_ds = u.reshape(h, w // 2, 2).mean(axis=2).round().astype(np.uint8)
         v_ds = v.reshape(h, w // 2, 2).mean(axis=2).round().astype(np.uint8)
-        if subformat == "NV16":
-            uv = np.empty((h, w), dtype=np.uint8)
-            uv[:, 0::2], uv[:, 1::2] = u_ds, v_ds
-            return b"".join([y.tobytes(), uv.tobytes()])
+        if subformat in _YUV422_SEMIPLANAR:
+            c = np.empty((h, w), dtype=np.uint8)
+            if subformat == "NV16":
+                c[:, 0::2], c[:, 1::2] = u_ds, v_ds
+            else:  # NV61
+                c[:, 0::2], c[:, 1::2] = v_ds, u_ds
+            return b"".join([y.tobytes(), c.tobytes()])
         out = np.empty((h, w // 2, 4), dtype=np.uint8)
+        y0, y1 = y[:, 0::2], y[:, 1::2]
         if subformat == "YUYV":
-            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = y[:, 0::2], u_ds, y[:, 1::2], v_ds
-        else:
-            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = u_ds, y[:, 0::2], v_ds, y[:, 1::2]
+            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = y0, u_ds, y1, v_ds
+        elif subformat == "YVYU":
+            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = y0, v_ds, y1, u_ds
+        elif subformat == "UYVY":
+            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = u_ds, y0, v_ds, y1
+        else:  # VYUY
+            out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = v_ds, y0, u_ds, y1
         return out.tobytes()
 
     raise FormatError(f"unsupported YUV subformat: {subformat}")

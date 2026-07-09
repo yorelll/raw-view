@@ -24,7 +24,7 @@ HELP_HTML = """
 <h3>YUV Subformats</h3>
 <ul>
 <li>420: I420, YV12, NV12, NV21</li>
-<li>422: YUYV, UYVY, NV16</li>
+<li>422: YUYV, UYVY, YVYU, VYUY, NV16, NV61</li>
 </ul>
 <h3>Image Conversion Rules</h3>
 <p>PNG/JPEG/BMP are loaded as BGR and optionally resized.</p>

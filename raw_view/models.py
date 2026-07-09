@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
 from pathlib import Path
 
 from PyQt5.QtCore import QSettings
@@ -15,11 +14,21 @@ from PyQt5.QtCore import QSettings
 
 BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+
+# Common output resolutions offered as one-click checkboxes in the
+# multi-variant generator. Users can also add custom sizes.
+COMMON_SIZES = [
+    (2560, 1440),
+    (1920, 1080),
+    (1280, 720),
+    (640, 480),
+    (320, 240),
+]
 MAX_RECENT_FILES = 10
 UI_THEMES = {"light", "dark"}
 
-ACTION_ICON_COLOR = "#3B82F6"
-ACTION_ICON_DISABLED_COLOR = "#64748B"
+ACTION_ICON_COLOR = "#4A90D9"
+ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
 ACTION_ICON_NAMES = {
     "open": "fa5s.folder-open",
     "save": "fa5s.save",
@@ -28,40 +37,52 @@ ACTION_ICON_NAMES = {
     "help": "fa5s.question-circle",
 }
 
+# Indigo / violet palette, tuned to harmonize with the qt-material
+# light_purple / dark_purple base themes. These values feed the thin QSS
+# overlay in ``build_ui_stylesheet`` (cards, panels, accents) that sits on
+# top of the qt-material base.
 THEME_PALETTES = {
     "light": {
-        "main_bg": "#F1F5F9",
-        "text_color": "#1E293B",
-        "text_secondary": "#64748B",
+        "main_bg": "#F4F6FA",
+        "text_color": "#212121",
+        "text_secondary": "#6B7280",
         "panel_bg": "#FFFFFF",
-        "border_color": "#E2E8F0",
+        "border_color": "#D5D9E3",
         "input_bg": "#FFFFFF",
-        "button_bg": "#2563EB",
-        "button_hover_bg": "#1D4ED8",
+        "button_bg": "#1976D2",
+        "button_hover_bg": "#1565C0",
         "button_text_color": "#FFFFFF",
-        "accent": "#3B82F6",
-        "accent_light": "#DBEAFE",
-        "card_shadow": "rgba(0,0,0,0.06)",
-        "success": "#10B981",
+        "accent": "#1976D2",
+        "accent_light": "#E3F2FD",
+        "card_shadow": "rgba(30,27,46,0.08)",
+        "success": "#2E7D32",
         "warning": "#F59E0B",
     },
     "dark": {
-        "main_bg": "#0F172A",
-        "text_color": "#E2E8F0",
-        "text_secondary": "#94A3B8",
-        "panel_bg": "#1E293B",
-        "border_color": "#334155",
-        "input_bg": "#1F2937",
-        "button_bg": "#3B82F6",
-        "button_hover_bg": "#2563EB",
+        "main_bg": "#171A24",
+        "text_color": "#E8EAED",
+        "text_secondary": "#9AA0AC",
+        "panel_bg": "#21242F",
+        "border_color": "#3A3D4E",
+        "input_bg": "#2A2D3E",
+        "button_bg": "#1976D2",
+        "button_hover_bg": "#1E88E5",
         "button_text_color": "#FFFFFF",
-        "accent": "#60A5FA",
-        "accent_light": "#1E3A5F",
-        "card_shadow": "rgba(0,0,0,0.25)",
-        "success": "#34D399",
+        "accent": "#4A90D9",
+        "accent_light": "#26304A",
+        "card_shadow": "rgba(0,0,0,0.35)",
+        "success": "#66BB6A",
         "warning": "#FBBF24",
     },
 }
+
+# qt-material base themes mapped to our two logical themes, plus shared
+# ``extra`` options passed to ``apply_stylesheet`` (see gui/app._apply_theme).
+# These are custom Material-blue (#1976D2) themes shipped in assets/, resolved
+# to absolute paths at runtime, so the whole UI shares one professional accent
+# instead of qt-material's default magenta-purple.
+THEME_XML = {"dark": "theme_dark_blue.xml", "light": "theme_light_blue.xml"}
+MATERIAL_EXTRA = {"font_family": "Segoe UI", "density_scale": "-1"}
 
 
 # ── Data models ─────────────────────────────────────────────────────────
@@ -192,6 +213,16 @@ class AppSettings:
         return DEFAULT_OUTPUT_TEMPLATE
 
     @property
+    def multi_variant_enabled(self) -> bool:
+        """When True, the Convert / Batch dialogs expose a multi-variant
+        generator (one source image → many format/bayer/size outputs)."""
+        return bool(self._store.value("convert/multi_variant", False, type=bool))
+
+    @multi_variant_enabled.setter
+    def multi_variant_enabled(self, value: bool) -> None:
+        self._store.setValue("convert/multi_variant", bool(value))
+
+    @property
     def save_dpi(self) -> int:
         value = self._store.value("save/dpi", 300)
         try:
@@ -217,7 +248,7 @@ class AppSettings:
 
     @property
     def ui_theme(self) -> str:
-        return normalize_ui_theme(self._store.value("ui/theme", "light"))
+        return normalize_ui_theme(self._store.value("ui/theme", "dark"))
 
     @ui_theme.setter
     def ui_theme(self, value: str) -> None:
@@ -435,17 +466,21 @@ def normalize_ui_theme(theme: object) -> str:
 
 
 def build_ui_stylesheet(theme: str, font_size: int) -> str:
-    """Build the modern card-style UI stylesheet for the given theme and font size."""
+    """Build the thin card/accent overlay layered on top of the qt-material base.
+
+    qt-material styles all the standard widgets; this overlay only adds the
+    rounded-card panels, indigo/violet accents, and the font size. Rules are
+    scoped to our own containers (``#controlPanel``, ``#card``, ``#centralRoot``)
+    so they complement — rather than fight — the qt-material stylesheet.
+    """
     normalized_theme = normalize_ui_theme(theme)
     p = THEME_PALETTES[normalized_theme]
     return f"""
-        QMainWindow {{
-            background-color: {p["main_bg"]};
-            color: {p["text_color"]};
-        }}
         QWidget {{
             font-size: {font_size}px;
-            color: {p["text_color"]};
+        }}
+        QWidget#centralRoot, DropCentralWidget {{
+            background: {p["main_bg"]};
         }}
         QWidget#controlPanel {{
             background: {p["panel_bg"]};
@@ -456,112 +491,183 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: transparent;
             border: none;
         }}
-        QTabWidget::pane {{
-            border: 1px solid {p["border_color"]};
+        QFrame#card {{
             background: {p["panel_bg"]};
+            border: 1px solid {p["border_color"]};
             border-radius: 12px;
-            top: -1px;
         }}
-        QTabBar::tab {{
-            background: {p["main_bg"]};
-            color: {p["text_secondary"]};
-            border: 1px solid {p["border_color"]};
-            border-bottom: none;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            padding: 8px 16px;
-            margin-right: 2px;
+        QFrame#groupDivider {{
+            background: {p["border_color"]};
+            border: none;
+            max-height: 1px;
         }}
-        QTabBar::tab:selected {{
-            background: {p["panel_bg"]};
+        QLabel {{
             color: {p["text_color"]};
-            border-bottom: 2px solid {p["accent"]};
+            background: transparent;
         }}
-        QTabBar::tab:hover:!selected {{
-            background: {p["accent_light"]};
-            color: {p["text_color"]};
-        }}
-        QComboBox, QSpinBox, QLineEdit {{
-            border: 1px solid {p["border_color"]};
-            border-radius: 8px;
-            padding: 7px 10px;
+        QComboBox, QSpinBox, QLineEdit, QAbstractSpinBox {{
             background: {p["input_bg"]};
             color: {p["text_color"]};
-            selection-background-color: {p["accent"]};
+            border: 1px solid {p["border_color"]};
+            border-radius: 6px;
+            padding: 4px 8px;
         }}
-        QComboBox:focus, QSpinBox:focus, QLineEdit:focus {{
-            border-color: {p["accent"]};
+        QComboBox:focus, QSpinBox:focus, QLineEdit:focus, QAbstractSpinBox:focus {{
+            border: 1px solid {p["accent"]};
+        }}
+        QComboBox:disabled, QSpinBox:disabled, QLineEdit:disabled,
+        QAbstractSpinBox:disabled {{
+            color: {p["text_secondary"]};
+            background: {p["accent_light"]};
+        }}
+        QComboBox {{
+            combobox-popup: 0;
         }}
         QComboBox::drop-down {{
-            subcontrol-origin: padding;
-            subcontrol-position: top right;
-            width: 28px;
-            border: none;
-            border-top-right-radius: 8px;
-            border-bottom-right-radius: 8px;
+            width: 22px;
+            border-left: 1px solid {p["border_color"]};
         }}
-        QComboBox::down-arrow {{
-            width: 10px;
-            height: 10px;
+        QSplitter#mainSplitter::handle:horizontal {{
+            background: transparent;
         }}
-        QPushButton {{
-            border-radius: 8px;
-            padding: 9px 18px;
-            background: {p["button_bg"]};
-            color: {p["button_text_color"]};
-            border: none;
-            font-weight: 600;
+        QSplitter#mainSplitter::handle:horizontal:hover {{
+            background: {p["accent_light"]};
         }}
-        QPushButton:hover {{
-            background: {p["button_hover_bg"]};
+        QCheckBox::indicator, QRadioButton::indicator {{
+            width: 18px;
+            height: 18px;
+            border: 1px solid {p["border_color"]};
+            border-radius: 4px;
+            background: {p["input_bg"]};
         }}
-        QPushButton:pressed {{
+        QRadioButton::indicator {{
+            border-radius: 9px;
+        }}
+        QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+            border: 1px solid {p["accent"]};
+        }}
+        QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
             background: {p["accent"]};
-        }}
-        QPushButton:disabled {{
-            background: {p["border_color"]};
-            color: {p["text_secondary"]};
+            border: 1px solid {p["accent"]};
+            image: none;
         }}
         QScrollArea {{
             border: none;
             background: transparent;
         }}
         QSlider::groove:horizontal {{
-            border: none;
             height: 6px;
             background: {p["border_color"]};
             border-radius: 3px;
-        }}
-        QSlider::handle:horizontal {{
-            background: {p["accent"]};
-            border: none;
-            width: 16px;
-            height: 16px;
-            margin: -5px 0;
-            border-radius: 8px;
-        }}
-        QSlider::handle:horizontal:hover {{
-            background: {p["button_hover_bg"]};
-            width: 18px;
-            height: 18px;
-            margin: -6px 0;
         }}
         QSlider::sub-page:horizontal {{
             background: {p["accent"]};
             border-radius: 3px;
         }}
-        QStatusBar {{
-            background: {p["panel_bg"]};
-            border-top: 1px solid {p["border_color"]};
-            color: {p["text_color"]};
+        QSlider::add-page:horizontal {{
+            background: {p["border_color"]};
+            border-radius: 3px;
         }}
-        QStatusBar::item {{
+        QSlider::handle:horizontal {{
+            background: #FFFFFF;
+            border: 2px solid {p["accent"]};
+            width: 14px;
+            height: 14px;
+            margin: -5px 0;
+            border-radius: 9px;
+        }}
+        QSlider::handle:horizontal:hover {{
+            border: 2px solid {p["button_hover_bg"]};
+        }}
+        QTabWidget::pane {{
+            border: 1px solid {p["border_color"]};
+            border-radius: 12px;
+        }}
+        QTabBar::tab {{
+            padding: 10px 14px 14px 16px;
+            margin-right: 2px;
+        }}
+        QTabBar::tab:selected {{
+            color: {p["text_color"]};
+            border-bottom: 2px solid {p["accent"]};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background: {p["accent_light"]};
+        }}
+        QTabBar::close-button {{
+            subcontrol-position: right;
+        }}
+        QPushButton {{
+            text-transform: none;
+        }}
+        QPushButton#accentButton {{
+            background: {p["button_bg"]};
+            color: {p["button_text_color"]};
             border: none;
+            border-radius: 8px;
+            padding: 9px 18px;
+            font-weight: 600;
+        }}
+        QPushButton#accentButton:hover {{
+            background: {p["button_hover_bg"]};
+        }}
+        QPushButton#accentButton:disabled {{
+            background: {p["border_color"]};
+            color: {p["text_secondary"]};
+        }}
+        QPushButton#secondaryButton {{
+            background: transparent;
+            color: {p["accent"]};
+            border: 1px solid {p["accent"]};
+            border-radius: 8px;
+            padding: 8px 16px;
+            font-weight: 600;
+        }}
+        QPushButton#secondaryButton:hover {{
+            background: {p["accent_light"]};
+        }}
+        QPushButton#textButton {{
+            background: transparent;
+            color: {p["accent"]};
+            border: none;
+            padding: 8px 12px;
+            font-weight: 600;
+        }}
+        QPushButton#textButton:hover {{
+            color: {p["button_hover_bg"]};
+            text-decoration: underline;
+        }}
+        QPushButton#iconButton {{
+            background: transparent;
+            border: 1px solid {p["border_color"]};
+            border-radius: 6px;
+            padding: 4px;
+        }}
+        QPushButton#iconButton:hover {{
+            background: {p["accent_light"]};
+            border: 1px solid {p["accent"]};
+        }}
+        QPushButton#dangerButton {{
+            background: transparent;
+            color: #E53935;
+            border: 1px solid #E53935;
+            border-radius: 8px;
+            padding: 8px 16px;
+            font-weight: 600;
+        }}
+        QPushButton#dangerButton:hover {{
+            background: #E53935;
+            color: #FFFFFF;
+        }}
+        QLabel#previewThumb {{
+            background: {p["accent_light"]};
+            border: 1px solid {p["border_color"]};
+            border-radius: 6px;
+            color: {p["text_secondary"]};
         }}
         QMenuBar {{
             background: {p["panel_bg"]};
-            border-bottom: 1px solid {p["border_color"]};
-            padding: 2px;
+            color: {p["text_color"]};
         }}
         QMenuBar::item {{
             padding: 6px 12px;
@@ -569,15 +675,17 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QMenuBar::item:selected {{
             background: {p["accent_light"]};
+            color: {p["text_color"]};
         }}
         QMenu {{
             background: {p["panel_bg"]};
+            color: {p["text_color"]};
             border: 1px solid {p["border_color"]};
-            border-radius: 10px;
-            padding: 6px;
+            border-radius: 8px;
+            padding: 4px;
         }}
         QMenu::item {{
-            padding: 8px 32px 8px 16px;
+            padding: 6px 28px 6px 14px;
             border-radius: 6px;
         }}
         QMenu::item:selected {{
@@ -587,39 +695,17 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QMenu::separator {{
             height: 1px;
             background: {p["border_color"]};
-            margin: 4px 8px;
-        }}
-        QToolBar {{
-            background: {p["panel_bg"]};
-            border-bottom: 1px solid {p["border_color"]};
-            spacing: 6px;
-            padding: 4px 8px;
-        }}
-        QToolButton {{
-            border: none;
-            border-radius: 8px;
-            padding: 6px;
-        }}
-        QToolButton:hover {{
-            background: {p["accent_light"]};
+            margin: 5px 10px;
         }}
         QLabel#frameNavLabel {{
             color: {p["text_secondary"]};
             font-size: {max(font_size - 1, 10)}px;
         }}
+        QLabel#statusPlaceholder {{
+            color: {p["text_secondary"]};
+            font-style: italic;
+        }}
     """
-
-
-@lru_cache(maxsize=2)
-def load_qdarkstyle_stylesheet(theme: str) -> str:
-    """Load the QDarkStyle stylesheet for the given theme (cached)."""
-    import qdarkstyle  # lazy import for headless test compatibility
-
-    if normalize_ui_theme(theme) == "dark":
-        return qdarkstyle.load_stylesheet_pyqt5()
-    from qdarkstyle.light.palette import LightPalette
-
-    return qdarkstyle.load_stylesheet(qt_api="pyqt5", palette=LightPalette)
 
 
 # Default output filename template.

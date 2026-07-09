@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#818CF8"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App tile -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#sheen)"/>
+
+  <!-- Sensor plate -->
+  <rect x="66" y="66" width="124" height="124" rx="20" fill="#FFFFFF" fill-opacity="0.10"
+        stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="3"/>
+
+  <!-- Bayer 2x2 mosaic (RGGB) -->
+  <g>
+    <rect x="86"  y="86"  width="38" height="38" rx="8" fill="#F87171"/>
+    <rect x="132" y="86"  width="38" height="38" rx="8" fill="#4ADE80"/>
+    <rect x="86"  y="132" width="38" height="38" rx="8" fill="#4ADE80"/>
+    <rect x="132" y="132" width="38" height="38" rx="8" fill="#60A5FA"/>
+  </g>
+
+  <!-- Aperture / lens accent -->
+  <circle cx="128" cy="128" r="10" fill="#FFFFFF" fill-opacity="0.92"/>
+</svg>

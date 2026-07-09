@@ -31,48 +31,61 @@ class FrameNavBar(QWidget):
         self.setObjectName("frameNavBar")
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        # Symmetric top/bottom padding + vertical centering so the arrows and
+        # counter share one baseline.
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(8)
         layout.setAlignment(Qt.AlignCenter)
 
-        self.prev_btn = QPushButton("<")
-        self.prev_btn.setFixedWidth(28)
-        self.prev_btn.setToolTip("Previous frame (Up)")
+        # Uniform control height so the buttons and the counter line up.
+        _NAV_H = 30
+        self.first_btn = QPushButton("\u23ee")   # ⏮ first frame
+        self.first_btn.setFixedSize(30, _NAV_H)
+        self.first_btn.setToolTip("First frame (Home)")
+        self.prev_btn = QPushButton("\u2039")     # ‹ previous
+        self.prev_btn.setFixedSize(30, _NAV_H)
+        self.prev_btn.setToolTip("Previous frame (Left / Up)")
 
+        # Current frame is edited in the spin box; the total is shown as the
+        # spin-box suffix ("1 / 2") so it reads as one cohesive control rather
+        # than a small detached label.
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(1, 1_000_000)
-        self.frame_spin.setFixedWidth(80)
+        self.frame_spin.setFixedSize(96, _NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
+        self.frame_spin.setSuffix(" / 0")
         self.frame_spin.setEnabled(False)
 
-        self.next_btn = QPushButton(">")
-        self.next_btn.setFixedWidth(28)
-        self.next_btn.setToolTip("Next frame (Down)")
+        self.next_btn = QPushButton("\u203a")     # › next
+        self.next_btn.setFixedSize(30, _NAV_H)
+        self.next_btn.setToolTip("Next frame (Right / Down)")
+        self.last_btn = QPushButton("\u23ed")     # ⏭ last frame
+        self.last_btn.setFixedSize(30, _NAV_H)
+        self.last_btn.setToolTip("Last frame (End)")
 
-        self.total_label = QLabel("/ 0")
-
-        # Scoped style: only affect frame-nav-bar buttons, override global blue button style
+        # Scoped style: only affect frame-nav-bar buttons.
         self.setStyleSheet(
             "#frameNavBar QPushButton {"
-            "  background: transparent; border: 1px solid palette(mid); border-radius: 4px;"
-            "  padding: 2px 4px; font-weight: bold; color: palette(text);"
+            "  background: transparent; border: 1px solid palette(mid); border-radius: 6px;"
+            "  font-weight: bold; color: palette(text); font-size: 14px;"
             "}"
-            "#frameNavBar QPushButton:hover { background: rgba(128, 128, 128, 0.2); }"
+            "#frameNavBar QPushButton:hover { background: rgba(128, 128, 128, 0.22); }"
             "#frameNavBar QPushButton:disabled { color: palette(mid); }"
             "#frameNavBar QSpinBox { padding: 2px 4px; }"
         )
 
+        # Read as "⏮ ‹  1 / 2  › ⏭".
         layout.addStretch()
-        layout.addWidget(self.prev_btn)
-        layout.addWidget(self.frame_spin)
-        layout.addWidget(self.next_btn)
-        layout.addWidget(self.total_label)
+        for wdg in (self.first_btn, self.prev_btn, self.frame_spin, self.next_btn, self.last_btn):
+            layout.addWidget(wdg, 0, Qt.AlignVCenter)
         layout.addStretch()
 
         # Signals
         self.frame_spin.valueChanged.connect(self._on_spin_changed)
+        self.first_btn.clicked.connect(self._first)
         self.prev_btn.clicked.connect(self._prev)
         self.next_btn.clicked.connect(self._next)
+        self.last_btn.clicked.connect(self._last)
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -84,12 +97,16 @@ class FrameNavBar(QWidget):
         self.frame_spin.setRange(1, max(1, total))
         self.frame_spin.blockSignals(True)
         self.frame_spin.setValue(current + 1)
+        self.frame_spin.setSuffix(f" / {total}")
         self.frame_spin.blockSignals(False)
-        self.total_label.setText(f"/ {total}")
         has_multiple = total > 1
+        at_start = current <= 0
+        at_end = current >= total - 1
         self.frame_spin.setEnabled(has_multiple)
-        self.prev_btn.setEnabled(has_multiple and current > 0)
-        self.next_btn.setEnabled(has_multiple and current < total - 1)
+        self.first_btn.setEnabled(has_multiple and not at_start)
+        self.prev_btn.setEnabled(has_multiple and not at_start)
+        self.next_btn.setEnabled(has_multiple and not at_end)
+        self.last_btn.setEnabled(has_multiple and not at_end)
 
     def frame_index(self) -> int:
         """Return the current frame index (0-based)."""
@@ -107,6 +124,9 @@ class FrameNavBar(QWidget):
         """Emit 0-based frame index when spin box changes."""
         self.frameChanged.emit(value - 1)
 
+    def _first(self) -> None:
+        self.frame_spin.setValue(1)
+
     def _prev(self) -> None:
         if self.frame_spin.value() > 1:
             self.frame_spin.setValue(self.frame_spin.value() - 1)
@@ -115,3 +135,6 @@ class FrameNavBar(QWidget):
         max_val = self.frame_spin.maximum()
         if self.frame_spin.value() < max_val:
             self.frame_spin.setValue(self.frame_spin.value() + 1)
+
+    def _last(self) -> None:
+        self.frame_spin.setValue(self.frame_spin.maximum())

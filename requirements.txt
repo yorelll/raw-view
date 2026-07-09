@@ -1,5 +1,6 @@
 numpy>=1.24
 opencv-python>=4.8
 PyQt5>=5.15
-QDarkStyle>=3.2
+qt-material>=2.14
 qtawesome>=1.3
+Pillow>=10.0
