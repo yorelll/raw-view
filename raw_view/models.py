@@ -9,6 +9,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import QSettings
 
+from .fourcc_data import FourCCEntry
+
 
 # ── Constants ────────────────────────────────────────────────────────────
 
@@ -416,6 +418,59 @@ class AppSettings:
             seen.add(name)
             out.append(SensorPreset.from_dict({**p.to_dict(), "name": name}).to_dict())
         self._save_presets_raw(out)
+
+    # ── FourCC custom formats ──────────────────────────────────────────
+    #
+    # Stored as a single JSON-encoded array under "fourcc/custom". The
+    # same JSON-serialisation reasoning as sensor presets applies.
+
+    def _load_fourcc_raw(self) -> list[dict]:
+        raw = self._store.value("fourcc/custom", "")
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [d for d in data if isinstance(d, dict)]
+
+    def _save_fourcc_raw(self, items: list[dict]) -> None:
+        self._store.setValue("fourcc/custom", json.dumps(items, ensure_ascii=False))
+
+    @property
+    def fourcc_custom_formats(self) -> list[FourCCEntry]:
+        """User-defined custom FourCC entries, in insertion order."""
+        result: list[FourCCEntry] = []
+        for d in self._load_fourcc_raw():
+            try:
+                entry = FourCCEntry(
+                    fourcc=str(d.get("fourcc", "")),
+                    description=str(d.get("description", "")),
+                    mbus_name=str(d.get("mbus_name", "")),
+                    mbus_value=int(d.get("mbus_value", 0)),
+                    aliases=list(d.get("aliases", [])),
+                    builtin=False,
+                )
+                if entry.fourcc:
+                    result.append(entry)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def save_fourcc_custom_list(self, entries: list[FourCCEntry]) -> None:
+        """Replace the entire custom FourCC list (used by the manage dialog)."""
+        out = []
+        for e in entries:
+            out.append({
+                "fourcc": e.fourcc,
+                "description": e.description,
+                "mbus_name": e.mbus_name,
+                "mbus_value": e.mbus_value,
+                "aliases": list(e.aliases),
+            })
+        self._save_fourcc_raw(out)
 
 
 # ── Helper functions ─────────────────────────────────────────────────────

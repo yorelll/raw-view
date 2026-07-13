@@ -79,6 +79,7 @@ from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import (
     BatchConvertDialog,
     ConvertDialog,
+    FourCCDialog,
     HelpDialog,
     PresetManagerDialog,
     SettingsDialog,
@@ -469,7 +470,15 @@ class MainWindow(QMainWindow):
             self._menu_icon(ACTION_ICON_NAMES["settings"]), "Settings...", self
         )
         settings_action.triggered.connect(self.open_settings_dialog)
-        tools_menu.addActions([self.convert_action, self.batch_convert_action, settings_action])
+        tools_menu.addActions([self.convert_action, self.batch_convert_action])
+        tools_menu.addSeparator()
+        fourcc_action = QAction(
+            self._menu_icon("fa5s.search"), "FourCC Lookup...", self
+        )
+        fourcc_action.triggered.connect(self.open_fourcc_dialog)
+        tools_menu.addAction(fourcc_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(settings_action)
 
         # ── Help ──
         help_menu = menu.addMenu("Help")
@@ -943,6 +952,15 @@ class MainWindow(QMainWindow):
 
         opts = item.options
 
+        # Recompute total frames with current parameters BEFORE computing
+        # effective offset, so that the frame count is up to date when
+        # the user changes width/height/format (see #1.0).
+        self._compute_frame_info(item)
+        # Clamp current_frame — the new parameters may support fewer frames.
+        item.current_frame = max(
+            0, min(item.current_frame, max(0, item.total_frames - 1))
+        )
+
         # Compute effective offset = base offset + frame_index * frame_size
         frame_size = self._get_frame_size(opts)
         effective_offset = opts.offset
@@ -977,8 +995,6 @@ class MainWindow(QMainWindow):
             if remaining < expected and not self._warn_size_mismatch(self, remaining, expected):
                 return
 
-        # Compute and store total frames
-        self._compute_frame_info(item)
 
         # Standard Image — decode synchronously
         if opts.image_type == "Standard Image":
@@ -1306,6 +1322,10 @@ class MainWindow(QMainWindow):
 
     def open_batch_convert_dialog(self) -> None:
         dlg = BatchConvertDialog(self.settings, self)
+        dlg.exec_()
+
+    def open_fourcc_dialog(self) -> None:
+        dlg = FourCCDialog(self.settings, self)
         dlg.exec_()
 
     def open_settings_dialog(self) -> None:

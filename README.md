@@ -33,6 +33,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
 - **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部下拉框中选中即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。面板顶部 Preset 行用图标按钮 💾 保存 / ⚙ 管理。预设管理对话框仅保留 **Add / Delete** 按钮，其余 **Rename / Import / Export** 均在列表右键菜单中（右键也支持 Add / Delete，双击列表项就地重命名）；预设超过 8 条时自动出现搜索框过滤
 - **RAW Packed 标准布局**：RAW10P / RAW12P / RAW14P 的解码与编码均遵循 MIPI CSI-2 标准布局（B0..Bn-1 = 高 8bit，末字节 = LSBs，MSB-first），与真实 sensor 数据互通
+- **FourCC 查找工具**：Tools → FourCC Lookup，浏览 FourCC ↔ 描述 ↔ MBUS 名称/值的对应关系，支持实时搜索（任意字段）和自定义格式管理（添加/编辑/删除，持久化存储）
 
 ## 安装
 
@@ -292,6 +293,38 @@ Preset 管理对话框底部提供 **Import** 与 **Export** 两个按钮：
 共 10 个文件。文件命名沿用 *输出文件名模板*，默认模板已包含 `{format}`（含 Bayer + bit + packed），因此不会互相覆盖。输出目录为 Settings 中的默认转换目录（Batch 勾选 *Same directory as input* 时改为输入文件同目录）。
 
 > 关闭该设置后，Convert / Batch 恢复默认行为——每次只生成一个文件。
+
+## FourCC 查找工具
+
+Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速查询视频/图像 sensor 格式的 FourCC 编码、别名、描述、MBUS 名称和 MBUS 值之间的对应关系。
+
+### 功能
+
+- **格式列表**：以表格形式列出所有支持的格式（YUV 系列、Bayer 8/10/12/16-bit packed/unpacked、Monochrome 等），每行显示 FourCC、Alias、Description、MBUS Name、MBUS Value。
+- **实时搜索**：在搜索框中输入任意关键词（FourCC、别名、描述、MBUS 名称或 MBUS 值），表格即时过滤匹配的行。支持匹配任意字段。
+- **自定义格式管理**：用户可添加、编辑、删除自定义格式条目。自定义条目以*斜体*显示，与内置条目视觉区分。自定义格式通过 QSettings 持久化存储，重启后保留。
+- **增删改操作**：
+  - **Add Custom**：弹出表单输入 FourCC、Aliases（逗号分隔）、Description、MBUS Name、MBUS Value，保存为自定义条目。
+  - **Edit**：仅可用于自定义条目，修改已有条目的任意字段。
+  - **Delete**：删除选中的自定义条目（内置条目不可删改）。
+
+### 内置格式
+
+工具内置 40+ 常见格式，涵盖：
+
+| 类别 | 格式 |
+|---|---|
+| YUV 4:2:0 | I420, YV12, NV12, NV21, NM12 |
+| YUV 4:2:2 | YUYV, UYVY, YVYU, VYUY, NV16, NV61, NM16, NM61 |
+| Monochrome | GREY, Y10, Y12 |
+| Bayer 8-bit | BA81(BGGR8), GBRG(GBRG8), GRBG(GRBG8), RGGB(RGGB8) |
+| Bayer 10-bit Packed | pBAA(BGGR10P), pGAA(GBRG10P), pgAA(GRBG10P), pRAA(RGGB10P) |
+| Bayer 10-bit @16-bit | BG10(BGGR10), GB10(GBRG10), BA10(GRBG10), RG10(RGGB10) |
+| Bayer 12-bit Packed | pBCC(BGGR12P), pGCC(GBRG12P), pgCC(GRBG12P), pRCC(RGGB12P) |
+| Bayer 12-bit @16-bit | BG12(BGGR12), GB12(GBRG12), BA12(GRBG12), RG12(RGGB12) |
+| Bayer 16-bit | BYR2(BGGR16), GB16(GBRG16), GR16(GRBG16), RG16(RGGB16) |
+
+> 自定义格式由用户通过 Add Custom 添加，不会在此次重置或升级时丢失（存储在 QSettings 中）。常见的 Realtek FBC compressed 格式（如 FBA8/FGA8/FBC8 等）可作为自定义格式自行添加。
 
 ## 默认参数
 
