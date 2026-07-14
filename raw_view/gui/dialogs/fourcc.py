@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -162,6 +163,8 @@ class FourCCDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.horizontalHeader().setSectionResizeMode(_COL_FOURCC, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(_COL_ALIAS, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(_COL_DESC, QHeaderView.Stretch)
@@ -183,6 +186,16 @@ class FourCCDialog(QDialog):
 
         self._edit_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
+
+        # Explicit button styling: visible border in both light and dark mode.
+        for btn in (self._add_btn, self._edit_btn, self._delete_btn, close_btn):
+            btn.setStyleSheet(
+                "QPushButton {"
+                "  border: 1px solid palette(mid); border-radius: 6px;"
+                "  padding: 6px 16px;"
+                "}"
+                "QPushButton:hover { background: rgba(128, 128, 128, 0.15); }"
+            )
 
         btn_row.addWidget(self._add_btn)
         btn_row.addWidget(self._edit_btn)
@@ -275,6 +288,22 @@ class FourCCDialog(QDialog):
             return None
         return self._entry_at_row(row)
 
+    # ── Context menu ───────────────────────────────────────────────────
+
+    def _show_context_menu(self, pos) -> None:
+        entry = self._current_entry()
+        menu = QMenu(self)
+        add_action = menu.addAction("Add Custom")
+        add_action.triggered.connect(self._add_custom)
+        if entry is not None:
+            if not entry.builtin:
+                edit_action = menu.addAction("Edit")
+                edit_action.triggered.connect(self._edit_custom)
+                menu.addSeparator()
+                delete_action = menu.addAction("Delete")
+                delete_action.triggered.connect(self._delete_custom)
+        menu.exec_(self._table.mapToGlobal(pos))
+
     # ── CRUD ───────────────────────────────────────────────────────────
 
     def _add_custom(self) -> None:
@@ -283,9 +312,8 @@ class FourCCDialog(QDialog):
             return
         entry = dlg.get_entry()
 
-        # Check for duplicate FourCC
-        existing = self._store.find_by_fourcc(entry.fourcc)
-        if existing is not None:
+        # Check for duplicate FourCC (case-SENSITIVE — ABC ≠ abc)
+        if self._store.has_fourcc_exact(entry.fourcc):
             QMessageBox.warning(
                 self, "Duplicate",
                 f"FourCC '{entry.fourcc}' already exists.",

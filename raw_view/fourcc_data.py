@@ -147,11 +147,22 @@ class FourCCStore:
     # ── exact lookup ───────────────────────────────────────────────────
 
     def find_by_fourcc(self, fourcc: str) -> FourCCEntry | None:
+        """Case-insensitive lookup (used for search/display)."""
         key = fourcc.strip().upper()
         for fmt in self.all_formats:
             if fmt.fourcc.upper() == key:
                 return fmt
         return None
+
+    def has_fourcc_exact(self, fourcc: str) -> bool:
+        """Case-SENSITIVE check — treat 'ABC' and 'abc' as different."""
+        key = fourcc.strip()
+        if not key:
+            return False
+        for fmt in self.all_formats:
+            if fmt.fourcc == key:
+                return True
+        return False
 
     def find_by_alias(self, alias: str) -> FourCCEntry | None:
         key = alias.strip().upper()

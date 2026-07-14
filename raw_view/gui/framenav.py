@@ -38,12 +38,12 @@ class FrameNavBar(QWidget):
         layout.setAlignment(Qt.AlignCenter)
 
         # Uniform control height so the buttons and the counter line up.
-        _NAV_H = 30
+        _NAV_H = 32
         self.first_btn = QPushButton("\u23ee")   # ⏮ first frame
-        self.first_btn.setFixedSize(30, _NAV_H)
+        self.first_btn.setFixedSize(38, _NAV_H)
         self.first_btn.setToolTip("First frame (Home)")
         self.prev_btn = QPushButton("\u2039")     # ‹ previous
-        self.prev_btn.setFixedSize(30, _NAV_H)
+        self.prev_btn.setFixedSize(38, _NAV_H)
         self.prev_btn.setToolTip("Previous frame (Left / Up)")
 
         # Current frame is edited in the spin box; the total is shown as the
@@ -51,26 +51,26 @@ class FrameNavBar(QWidget):
         # than a small detached label.
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(1, 1_000_000)
-        self.frame_spin.setFixedSize(96, _NAV_H)
+        self.frame_spin.setFixedSize(100, _NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
         self.frame_spin.setSuffix(" / 0")
         self.frame_spin.setEnabled(False)
 
         self.next_btn = QPushButton("\u203a")     # › next
-        self.next_btn.setFixedSize(30, _NAV_H)
+        self.next_btn.setFixedSize(38, _NAV_H)
         self.next_btn.setToolTip("Next frame (Right / Down)")
         self.last_btn = QPushButton("\u23ed")     # ⏭ last frame
-        self.last_btn.setFixedSize(30, _NAV_H)
+        self.last_btn.setFixedSize(38, _NAV_H)
         self.last_btn.setToolTip("Last frame (End)")
 
-        # Scoped style: only affect frame-nav-bar buttons.
+        # Scoped style: visible in both light and dark mode.
         self.setStyleSheet(
             "#frameNavBar QPushButton {"
-            "  background: transparent; border: 1px solid palette(mid); border-radius: 6px;"
-            "  font-weight: bold; color: palette(text); font-size: 14px;"
+            "  background: palette(window); border: 1px solid palette(midlight); border-radius: 6px;"
+            "  font-weight: bold; color: palette(text); font-size: 16px;"
             "}"
-            "#frameNavBar QPushButton:hover { background: rgba(128, 128, 128, 0.22); }"
-            "#frameNavBar QPushButton:disabled { color: palette(mid); }"
+            "#frameNavBar QPushButton:hover { background: palette(highlight); color: palette(highlighted-text); }"
+            "#frameNavBar QPushButton:disabled { color: palette(mid); background: transparent; }"
             "#frameNavBar QSpinBox { padding: 2px 4px; }"
         )
 
