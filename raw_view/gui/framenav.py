@@ -13,7 +13,10 @@ from PyQt5.QtWidgets import (
 
 
 class FrameNavBar(QWidget):
-    """Horizontal bar with Prev/Next buttons and frame counter.
+    """Horizontal bar with navigation buttons and frame counter.
+
+    Layout::
+        │◀  ◀  [1] / 5  ▶  ▶│
 
     Frame numbers displayed in the bar are 1-based for user-friendliness.
     Internal frame indices (passed via signal) remain 0-based.
@@ -31,53 +34,74 @@ class FrameNavBar(QWidget):
         self.setObjectName("frameNavBar")
 
         layout = QHBoxLayout(self)
-        # Symmetric top/bottom padding + vertical centering so the arrows and
-        # counter share one baseline.
         layout.setContentsMargins(0, 6, 0, 6)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         layout.setAlignment(Qt.AlignCenter)
 
-        # Uniform control height so the buttons and the counter line up.
         _NAV_H = 32
-        self.first_btn = QPushButton("\u23ee")   # ⏮ first frame
-        self.first_btn.setFixedSize(38, _NAV_H)
+        _NAV_W = 36
+
+        # ── Buttons ────────────────────────────────────────────────────
+        # Icon mapping: │◀  ◀  ▶  ▶│
+        self.first_btn = QPushButton("\u2502\u25C0")   # │◀
+        self.first_btn.setFixedSize(_NAV_W, _NAV_H)
         self.first_btn.setToolTip("First frame (Home)")
-        self.prev_btn = QPushButton("\u2039")     # ‹ previous
-        self.prev_btn.setFixedSize(38, _NAV_H)
+        self.prev_btn = QPushButton("\u25C0")           # ◀
+        self.prev_btn.setFixedSize(_NAV_W, _NAV_H)
         self.prev_btn.setToolTip("Previous frame (Left / Up)")
 
-        # Current frame is edited in the spin box; the total is shown as the
-        # spin-box suffix ("1 / 2") so it reads as one cohesive control rather
-        # than a small detached label.
+        # Current frame / total
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(1, 1_000_000)
-        self.frame_spin.setFixedSize(100, _NAV_H)
+        self.frame_spin.setFixedWidth(52)
+        self.frame_spin.setFixedHeight(_NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
-        self.frame_spin.setSuffix(" / 0")
         self.frame_spin.setEnabled(False)
 
-        self.next_btn = QPushButton("\u203a")     # › next
-        self.next_btn.setFixedSize(38, _NAV_H)
+        self._total_label = QLabel("/ 0")
+        self._total_label.setFixedHeight(_NAV_H)
+        self._total_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.next_btn = QPushButton("\u25B6")           # ▶
+        self.next_btn.setFixedSize(_NAV_W, _NAV_H)
         self.next_btn.setToolTip("Next frame (Right / Down)")
-        self.last_btn = QPushButton("\u23ed")     # ⏭ last frame
-        self.last_btn.setFixedSize(38, _NAV_H)
+        self.last_btn = QPushButton("\u25B6\u2502")     # ▶│
+        self.last_btn.setFixedSize(_NAV_W, _NAV_H)
         self.last_btn.setToolTip("Last frame (End)")
 
-        # Scoped style: visible in both light and dark mode.
+        # ── Styling (dark-theme optimised, palette‑fallback for light) ─
         self.setStyleSheet(
             "#frameNavBar QPushButton {"
-            "  background: palette(window); border: 1px solid palette(midlight); border-radius: 6px;"
-            "  font-weight: bold; color: palette(text); font-size: 16px;"
+            "  background: #2A2D4A; border: 1px solid #3A3D5C; border-radius: 6px;"
+            "  font-weight: bold; color: #C8CCDC; font-size: 14px;"
             "}"
-            "#frameNavBar QPushButton:hover { background: palette(highlight); color: palette(highlighted-text); }"
-            "#frameNavBar QPushButton:disabled { color: palette(mid); background: transparent; }"
-            "#frameNavBar QSpinBox { padding: 2px 4px; }"
+            "#frameNavBar QPushButton:hover {"
+            "  background: #363A5E; border: 1px solid #5B6080; color: #E8EAED;"
+            "}"
+            "#frameNavBar QPushButton:pressed {"
+            "  background: #1E2035; border: 1px solid #2A2D4A; color: #FFFFFF;"
+            "}"
+            "#frameNavBar QPushButton:disabled {"
+            "  background: #1E2035; border: 1px solid #2A2D4A; color: #4A5070;"
+            "}"
+            "#frameNavBar QSpinBox {"
+            "  padding: 2px 4px;"
+            "}"
+            "#frameNavBar QLabel {"
+            "  color: palette(text); font-size: 13px;"
+            "}"
         )
 
-        # Read as "⏮ ‹  1 / 2  › ⏭".
+        # ── Layout: │◀  ◀  [1] / 5  ▶  ▶│  ───────────────────────────
         layout.addStretch()
-        for wdg in (self.first_btn, self.prev_btn, self.frame_spin, self.next_btn, self.last_btn):
+        for wdg in (self.first_btn, self.prev_btn):
             layout.addWidget(wdg, 0, Qt.AlignVCenter)
+        layout.addSpacing(8)
+        layout.addWidget(self.frame_spin, 0, Qt.AlignVCenter)
+        layout.addWidget(self._total_label, 0, Qt.AlignVCenter)
+        layout.addSpacing(8)
+        layout.addWidget(self.next_btn, 0, Qt.AlignVCenter)
+        layout.addWidget(self.last_btn, 0, Qt.AlignVCenter)
         layout.addStretch()
 
         # Signals
@@ -97,8 +121,8 @@ class FrameNavBar(QWidget):
         self.frame_spin.setRange(1, max(1, total))
         self.frame_spin.blockSignals(True)
         self.frame_spin.setValue(current + 1)
-        self.frame_spin.setSuffix(f" / {total}")
         self.frame_spin.blockSignals(False)
+        self._total_label.setText(f"/ {total}")
         has_multiple = total > 1
         at_start = current <= 0
         at_end = current >= total - 1

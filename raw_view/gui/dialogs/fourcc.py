@@ -188,13 +188,28 @@ class FourCCDialog(QDialog):
         self._delete_btn.setEnabled(False)
 
         # Explicit button styling: visible border in both light and dark mode.
-        for btn in (self._add_btn, self._edit_btn, self._delete_btn, close_btn):
+        # Disabled state uses a subtle dashed border + light colour so the
+        # button visually recedes instead of looking "greyed‑out but clickable".
+        # Add Custom is the primary action (solid blue); Edit/Delete are
+        # secondary (outlined).
+        self._add_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: palette(highlight); color: palette(highlighted-text);"
+            "  border: none; border-radius: 6px; padding: 6px 16px;"
+            "}"
+            "QPushButton:hover { background: palette(dark); }"
+        )
+        for btn in (self._edit_btn, self._delete_btn, close_btn):
             btn.setStyleSheet(
                 "QPushButton {"
                 "  border: 1px solid palette(mid); border-radius: 6px;"
                 "  padding: 6px 16px;"
                 "}"
                 "QPushButton:hover { background: rgba(128, 128, 128, 0.15); }"
+                "QPushButton:disabled {"
+                "  background: transparent; color: palette(mid);"
+                "  border: 1px dashed palette(midlight);"
+                "}"
             )
 
         btn_row.addWidget(self._add_btn)
