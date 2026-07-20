@@ -49,7 +49,7 @@ class DecodeWorker(QObject):
         self._data: bytes | None = None
         self._spec: ImageSpec | None = None
         self._format_name: str = ""
-        self._alignment: str = "lsb"
+        self._alignment: str = "msb"
         self._endianness: str = "little"
         self._preview_mode: str = "Bayer Color"
         self._bayer_pattern: str = "RGGB"
@@ -59,7 +59,7 @@ class DecodeWorker(QObject):
         data: bytes,
         spec: ImageSpec,
         format_name: str,
-        alignment: str = "lsb",
+        alignment: str = "msb",
         endianness: str = "little",
         preview_mode: str = "Bayer Color",
         bayer_pattern: str = "RGGB",

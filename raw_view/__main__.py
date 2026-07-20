@@ -67,8 +67,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="RAW sub-format (default: RAW12)")
     p.add_argument("--yuv-type", default="YUYV",
                    help="YUV sub-format (default: YUYV)")
-    p.add_argument("--alignment", choices=("lsb", "msb"), default="lsb",
-                   help="RAW alignment (default: lsb)")
+    p.add_argument("--alignment", choices=("lsb", "msb"), default="msb",
+                   help="RAW alignment (default: msb)")
     p.add_argument("--endianness", choices=("little", "big"), default="little",
                    help="RAW endianness (default: little)")
     p.add_argument("--source-mode", choices=("bayer", "gray"), default="bayer",
@@ -380,7 +380,7 @@ def _run_batch(args: argparse.Namespace) -> None:
         "yuv_type": spec.get("yuv_type", "YUYV"),
         "width": spec.get("width", 640),
         "height": spec.get("height", 480),
-        "alignment": spec.get("alignment", "lsb"),
+        "alignment": spec.get("alignment", "msb"),
         "endianness": spec.get("endianness", "little"),
         "source_mode": spec.get("source_mode", "bayer"),
         "bayer_pattern": spec.get("bayer_pattern", "RGGB"),

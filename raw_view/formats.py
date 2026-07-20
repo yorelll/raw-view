@@ -115,7 +115,7 @@ def decode_raw(
     data: bytes,
     spec: ImageSpec,
     raw_type: str,
-    alignment: Alignment = "lsb",
+    alignment: Alignment = "msb",
     endianness: Endianness = "little",
 ) -> np.ndarray:
     frame_size = expected_frame_size_raw(raw_type, spec.width, spec.height)
@@ -323,7 +323,7 @@ def _pack_raw14(values_14: np.ndarray) -> bytes:
 def gray8_to_raw_bytes(
     gray: np.ndarray,
     raw_type: str,
-    alignment: Alignment = "lsb",
+    alignment: Alignment = "msb",
     endianness: Endianness = "little",
 ) -> bytes:
     g = np.clip(gray.astype(np.float32), 0, 255)

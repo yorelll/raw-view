@@ -103,7 +103,7 @@ class BatchConvertDialog(QDialog):
         )
 
         self.align = QComboBox()
-        self.align.addItems(["lsb", "msb"])
+        self.align.addItems(["msb", "lsb"])
 
         self.raw_source_mode = QComboBox()
         self.raw_source_mode.addItems(["bayer", "gray"])
