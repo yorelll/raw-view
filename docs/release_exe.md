@@ -1,5 +1,32 @@
 # 将 raw-view 打包为 EXE（Windows）
 
+> 仓库托管在 GitHub（`github.com/yorelll/raw-view`），**推荐用 GitHub Actions 自动发布**
+> （打 tag → 自动构建 → 生成 exe + 校验和 → 发布到 Releases）。见文末《GitHub Release 版本发布》。
+> 本文件前 6 节描述本地手动打包方式，供离线/调试场景参考。
+
+## 0. 推荐：GitHub Actions 一键发布（0.x 版本正式发布路径）
+
+1. 推送代码到 `main`，确认 CI 正常（push 时仅构建，不打发布）。
+2. 打 tag 并推送：
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. GitHub Actions 工作流 `.github/workflows/build-release.yml` 自动：
+   - Windows 环境安装 Python 3.12 + 全部依赖；
+   - 运行 `python -m unittest discover -s tests -q`（**测试不过不发布**）；
+   - `pyinstaller --onefile --windowed` 打包；
+   - 生成 `raw-view.exe.sha256` 校验和；
+   - 创建/更新 Release（名称 `raw-view 0.1.0`，包含 exe + 校验和 + 版本说明）。
+4. 到仓库 **Releases** 页面即可看到并下载 `raw-view.exe`。
+
+手动触发（不打 tag）也可在 Actions 页面选 `workflow_dispatch` 构建设置。
+
+> 说明：`raw-view.spec` 因含本机绝对路径被 `.gitignore` 忽略，CI 使用等价命令行参数打包；
+> 两者产物一致。详见 `docs/summary/architecture_summary.md` §6 与 `docs/review/review_report.md` §5.7。
+
+---
+
 ## 1. 准备环境
 
 ```bash

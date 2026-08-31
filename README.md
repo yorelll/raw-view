@@ -2,6 +2,9 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
+> **当前版本：0.1.0** —— 正式发布通过 GitHub Releases 分发 Windows 单文件 exe（见下方
+> *发布与下载* 与 `docs/release_exe.md`）。
+
 ## 功能
 
 - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed，支持 LSB/MSB 对齐、大小端与 Bayer(RGGB/GRBG/GBRG/BGGR)彩色预览
@@ -336,9 +339,32 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 详见：`docs/release_exe.md`
 
+- **本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）
+- **GitHub Actions 自动发布**：推送形如 `v0.1.0` 的 tag 后自动构建并发布到 Releases（见下）。
+
+## 发布与下载
+
+发布由 GitHub Actions 自动完成（`.github/workflows/build-release.yml`）：
+
+1. 提交并推送代码；
+2. 打 tag：`git tag v0.1.0 && git push origin v0.1.0`；
+3. 工作流自动运行测试 → 打包 `raw-view.exe` → 生成 SHA-256 校验和 → 发布到 **Releases**；
+4. 到仓库 [Releases 页面](https://github.com/yorelll/raw-view/releases) 下载即可。
+
+手动触发（不打 tag）也可以在 Actions 页选择 `workflow_dispatch` 构建设置开发版。
+
+## 代码文档
+
+| 目录 | 说明 |
+|---|---|
+| `docs/review/` | 详尽代码 Review 报告（High/Medium/Low 分级问题清单与修复建议） |
+| `docs/summary/` | 代码架构 / 功能 / 实现逻辑总结 |
+| `docs/improvement/` | 功能、逻辑、UI、用户体验改进建议与路线图 |
+| `docs/future_extensions.md` | 深层次功能扩展建议 |
+
 ## 后续功能扩展建议
 
-详见：`docs/future_extensions.md`
+详见：`docs/future_extensions.md` 与 `docs/improvement/improvement_proposals.md`
 
 ## 测试
 

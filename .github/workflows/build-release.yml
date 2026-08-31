@@ -1,0 +1,135 @@
+# Build raw-view.exe on Windows and attach it to a GitHub Release.
+#
+# Triggers:
+#   - on tags like v0.1.0 (the official release path)
+#   - on demand from the Actions tab (workflow_dispatch)
+#
+# What it does:
+#   1. Runs the full test suite (so a broken release is never published)
+#   2. Installs PyInstaller and builds a single-file, windowed exe
+#   3. Runs the exe with --help (CLI smoke test) and lists the artifact
+#   4. Attaches dist/raw-view.exe + SHA-256 checksum to the release
+#
+# Version source of truth: the git tag (v0.1.0 -> product version 0.1.0).
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build exe and publish release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\pip\Cache
+            ${{ env.Python_ROOT_DIR }}\Scripts
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -q
+
+      - name: Smoke test CLI (before packaging)
+        run: python -m raw_view --batch-help
+
+      - name: Build single-file exe with PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
+            --hidden-import=cv2 `
+            --hidden-import=PIL `
+            --collect-all=cv2 `
+            --collect-all=PyQt5 `
+            --collect-all=qt_material `
+            --collect-all=qtawesome `
+            --icon assets/raw-view.ico `
+            --add-data "assets;assets" `
+            raw_view/__main__.py
+
+      - name: Verify the exe exists
+        run: |
+          if (-not (Test-Path dist\raw-view.exe)) { throw "dist\raw-view.exe not found" }
+          Get-Item dist\raw-view.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+
+      - name: Compute SHA-256 checksum
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          sha256sum dist/raw-view.exe > dist/raw-view.exe.sha256
+          cat dist/raw-view.exe.sha256
+
+      - name: Determine version from tag
+        id: version
+        shell: bash
+        run: |
+          # v0.1.0 -> 0.1.0 ; manual runs fall back to 0.1.0-dev
+          REF="${GITHUB_REF#refs/tags/}"
+          if [[ "$REF" == "refs/heads/"* || "$REF" == "$GITHUB_REF" ]]; then REF="0.1.0-dev"; fi
+          echo "tag=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: raw-view ${{ steps.version.outputs.version }}
+          body: |
+            ## raw-view ${{ steps.version.outputs.version }}
+
+            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows 单文件 exe）。
+
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建。
+
+            ### 使用方式
+            - 解压后直接运行 `raw-view.exe`，无需安装 Python。
+            - 命令行：`raw-view.exe view -i in.raw -o out.png --width 2560 --height 1440`；
+              `raw-view.exe convert -i img.png --target RAW`；
+              `raw-view.exe --batch-help` 查看批量 JSON 说明。
+            - 传感器预设保存在本机注册表/配置目录，不会随 exe 分发；团队共享可
+              *Manage sensor presets → Export / Import*。
+
+            ### 此版本内容
+            - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed（MIPI CSI-2）、LSB/MSB、
+              大小端、Bayer 彩色/灰度预览
+            - YUV 查看：I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
+            - 转换：PNG/JPG/BMP → RAW / YUV；批量转换；多变体一键生成（格式×Bayer×分辨率）
+            - 帧导航、缩放/旋转/翻转、多标签页、Sensor 预设、输出文件名模板、FourCC 查找
+            - CLI 模式（view / convert / batch）、日志系统、Light/Dark 主题
+
+            ### 文件
+            - **`raw-view.exe`** — 主程序（单文件，约 100-130 MB）
+            - **`raw-view.exe.sha256`** — SHA-256 校验和（`sha256sum -c` 校验）
+
+            ### 系统要求
+            - Windows 10 1809+（64 位）
+            - Visual C++ Redistributable 2015-2022（多数系统已自带）
+          files: |
+            dist/raw-view.exe
+            dist/raw-view.exe.sha256
+          fail_on_unmatched_files: true

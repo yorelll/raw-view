@@ -1,4 +1,6 @@
+import os
 import unittest
+from pathlib import PurePosixPath
 
 from raw_view.models import (
     THEME_PALETTES,
@@ -9,6 +11,20 @@ from raw_view.models import (
     normalize_recent_files,
     normalize_ui_theme,
 )
+
+
+def _assert_same_posix_path(test_case, actual_path, expected_posix: str):
+    """Compare a platform-native path against a POSIX-style expectation.
+
+    On Windows ``Path('/tmp/input/sample.png')`` normalises to a drive-less
+    ``\\tmp\\input\\...``, so comparing raw strings against a POSIX literal
+    fails. We normalise both sides with ``os.path.normpath`` (which maps the
+    native separator) so the comparison is structure-based and cross-platform,
+    without hard-coding forward slashes in the assertions.
+    """
+    actual_norm = os.path.normpath(os.fspath(actual_path))
+    expected_norm = os.path.normpath(expected_posix.replace("/", os.sep))
+    test_case.assertEqual(actual_norm, expected_norm)
 
 
 # Keys in THEME_PALETTES whose values should appear in the stylesheet
@@ -22,11 +38,11 @@ _STYLESHEET_PALETTE_KEYS = {
 class GuiHelperTests(unittest.TestCase):
     def test_build_default_output_path_raw(self):
         path = build_default_output_path("/tmp/input/sample.png", "RAW", "out")
-        self.assertEqual(path, "/tmp/input/out/sample.raw")
+        _assert_same_posix_path(self, path, "/tmp/input/out/sample.raw")
 
     def test_build_default_output_path_yuv(self):
         path = build_default_output_path("/tmp/input/sample.jpg", "YUV", "output")
-        self.assertEqual(path, "/tmp/input/output/sample.yuv")
+        _assert_same_posix_path(self, path, "/tmp/input/output/sample.yuv")
 
     def test_dpi_to_dots_per_meter(self):
         self.assertEqual(dpi_to_dots_per_meter(254), 10000)
@@ -38,7 +54,8 @@ class GuiHelperTests(unittest.TestCase):
 
     def test_build_default_output_path_edge_cases(self):
         self.assertEqual(build_default_output_path("", "RAW", "out"), "")
-        self.assertEqual(
+        _assert_same_posix_path(
+            self,
             build_default_output_path("/tmp/input/sample", "RAW", ""),
             "/tmp/input/out/sample.raw",
         )
