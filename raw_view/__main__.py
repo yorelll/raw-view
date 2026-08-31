@@ -29,6 +29,7 @@ import os
 import sys
 from pathlib import Path
 
+from raw_view.formats import FormatError
 from raw_view.logger import get_logger
 
 logger = get_logger(__name__)
@@ -122,6 +123,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def _show_batch_help() -> None:
     logger.debug("Showing batch JSON format help")
     print("""Batch JSON format:
+（注意：batch JSON 文件须为 UTF-8 编码，含中文/unicode 键值时可正常读取）
+
 {
   // ── Global defaults (applied to every file) ──
   "mode": "convert",              // "convert" (image→RAW/YUV) or "view" (RAW/YUV→image)
@@ -192,6 +195,38 @@ def _default_out_dir(mode: str) -> str:
     return VIEW_OUT_DIR if mode == "view" else CONVERT_OUT_DIR
 
 
+# ── 解码尺寸上限保护 ─────────────────────────────────────────────────
+
+MAX_DECODE_BYTES = 512 * 1024 * 1024  # 单帧解码字节上限：512 MB
+
+
+def _require_decode_size(width: int, height: int, frame_size: int) -> None:
+    """解码前校验帧大小，防超大宽高导致内存/堆栈崩溃。
+
+    计算 *一帧* 的字节数与上限比较，超过即抛 ``FormatError``。
+    """
+    if width <= 0 or height <= 0:
+        raise FormatError(f"invalid dimensions: {width}x{height}")
+    if width * height <= 0:
+        raise FormatError(f"overflow: {width}x{height}")
+    if frame_size > MAX_DECODE_BYTES:
+        raise FormatError(
+            f"frame too large: {frame_size} bytes ({width}x{height}) "
+            f"exceeds the {MAX_DECODE_BYTES}-byte decode limit"
+        )
+
+
+def _check_decode_args_for(type_name: str, width: int, height: int) -> None:
+    """根据 target/raw/yuv 类型计算单帧字节并做上限校验（CLI 入口统一走这里）。"""
+    from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
+
+    if type_name.startswith("RAW"):
+        frame_size = expected_frame_size_raw(type_name, width, height)
+    else:
+        frame_size = expected_frame_size_yuv(type_name, width, height)
+    _require_decode_size(width, height, frame_size)
+
+
 # ── View mode (CLI decode + GUI fallback) ─────────────────────────────
 
 def _run_view_mode(args: argparse.Namespace) -> None:
@@ -221,13 +256,6 @@ def _run_gui(files: list[str]) -> None:
     run(files)
 
 
-def _resolve_ext(raw_type: str, yuv_type: str, mode: str) -> str:
-    """Default output extension based on mode."""
-    if mode == "convert":
-        return ".raw" if raw_type != "N/A" else ".yuv"
-    return ".png"  # view/decode mode
-
-
 def _run_view_decode(
     input_path: str,
     output_path: str | None,
@@ -246,6 +274,14 @@ def _run_view_decode(
     if not os.path.isfile(input_path):
         logger.error("Input file not found: %s", input_path)
         print(f"Error: input file not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # 解码前上限校验：单帧字节超过 512MB 直接拒绝
+    try:
+        _check_decode_args_for(raw_type if target == "RAW" else yuv_type, width, height)
+    except FormatError as exc:
+        logger.error("Decode rejected: %s", exc)
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     from raw_view.converter import raw_file_to_image, yuv_file_to_image
@@ -323,6 +359,17 @@ def _run_convert(args: argparse.Namespace) -> None:
         print(f"Error: input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
+    # 编码前上限校验：输出单帧字节超过 512MB 直接拒绝
+    try:
+        _check_decode_args_for(
+            args.raw_type if args.target == "RAW" else args.yuv_type,
+            args.width, args.height,
+        )
+    except FormatError as exc:
+        logger.error("Convert rejected: %s", exc)
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     from raw_view.converter import image_file_to_raw, image_file_to_yuv
     from raw_view.models import format_output_template
 
@@ -397,7 +444,8 @@ def _run_batch(args: argparse.Namespace) -> None:
         print(f"Error: batch file not found: {args.batch_file}", file=sys.stderr)
         sys.exit(1)
 
-    with open(args.batch_file) as f:
+    # 显式 UTF-8 读取，避免中文路径/注释在 GBK/cp936 等 locale 下解码失败
+    with open(args.batch_file, encoding="utf-8") as f:
         spec = json.load(f)
 
     # ── Global defaults ──
@@ -450,6 +498,16 @@ def _run_batch(args: argparse.Namespace) -> None:
         width = params["width"]
         height = params["height"]
         output_dir = params.pop("output_dir") or _default_out_dir(mode)
+
+        # ── 解码前上限校验（防超大宽高导致 OOM/崩溃）──
+        if mode == "view":
+            view_type = params["raw_type"] if target == "RAW" else params["yuv_type"]
+            try:
+                _check_decode_args_for(view_type, width, height)
+            except FormatError as exc:
+                print(f"  FAIL: {input_path} -> {exc}")
+                failed += 1
+                continue
 
         output_path = entry.get("output")
         if not output_path:

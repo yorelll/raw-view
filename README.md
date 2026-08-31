@@ -355,19 +355,26 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 ## 代码文档
 
-| 目录 | 说明 |
+> 说明：`docs/review/`、`docs/summary/`、`docs/improvement/` 为**本地产出文档**（已加入
+> `.gitignore`，不随仓库分发），用于记录代码审查、架构总结与改进建议，随开发迭代在本地维护。
+
+| 文档 | 说明 |
 |---|---|
-| `docs/review/` | 详尽代码 Review 报告（High/Medium/Low 分级问题清单与修复建议） |
-| `docs/summary/` | 代码架构 / 功能 / 实现逻辑总结 |
-| `docs/improvement/` | 功能、逻辑、UI、用户体验改进建议与路线图 |
-| `docs/future_extensions.md` | 深层次功能扩展建议 |
+| `docs/review/review_report.md` | 详尽代码 Review 报告（H/M/L 分级问题、取舍结论与修复状态 checkbox）——本地 |
+| `docs/summary/architecture_summary.md` | 代码架构 / 功能 / 实现逻辑总结——本地 |
+| `docs/improvement/improvement_proposals.md` | 功能、逻辑、UI、用户体验改进建议与路线图——本地 |
+| `docs/future_extensions.md` | 深层次功能扩展建议（随仓库） |
+| `docs/release_exe.md` | EXE 打包与 GitHub Actions 发布说明（随仓库） |
 
 ## 后续功能扩展建议
 
-详见：`docs/future_extensions.md` 与 `docs/improvement/improvement_proposals.md`
+详见：`docs/future_extensions.md` 与本地的 `docs/improvement/improvement_proposals.md`
 
 ## 测试
 
 ```bash
 python -m unittest discover -s tests -q
 ```
+
+> 每个 push / PR 由 GitHub Actions（`.github/workflows/ci.yml`）自动跑全量测试
+> （Windows + Ubuntu × Python 3.11/3.12 矩阵），tag 则触发 `build-release.yml` 打包发布。

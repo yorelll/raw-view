@@ -6,24 +6,24 @@
 
 ## 0. 推荐：GitHub Actions 一键发布（0.x 版本正式发布路径）
 
-1. 推送代码到 `main`，确认 CI 正常（push 时仅构建，不打发布）。
-2. 打 tag 并推送：
+1. 推送代码到任意分支 / 提 PR，CI（`.github/workflows/ci.yml`）自动跑**全量测试**（Windows + Ubuntu × Python 3.11/3.12 矩阵，含 CLI 冒烟与 view/convert round-trip），确保改动无回归。
+2. 推送到 `main`、自测通过后打 tag 并推送：
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.1.1
+   git push origin v0.1.1
    ```
-3. GitHub Actions 工作流 `.github/workflows/build-release.yml` 自动：
-   - Windows 环境安装 Python 3.12 + 全部依赖；
+3. GitHub Actions 工作流 `.github/workflows/build-release.yml`（tag 触发）自动：
+   - Windows 环境安装 Python 3.12 + 全部依赖（叠加 `constraints.txt` 锁定版本）；
    - 运行 `python -m unittest discover -s tests -q`（**测试不过不发布**）；
    - `pyinstaller --onefile --windowed` 打包；
    - 生成 `raw-view.exe.sha256` 校验和；
-   - 创建/更新 Release（名称 `raw-view 0.1.0`，包含 exe + 校验和 + 版本说明）。
+   - 创建/更新 Release（名称 `raw-view <版本>`，包含 exe + 校验和 + 版本说明）。
 4. 到仓库 **Releases** 页面即可看到并下载 `raw-view.exe`。
 
 手动触发（不打 tag）也可在 Actions 页面选 `workflow_dispatch` 构建设置。
 
 > 说明：`raw-view.spec` 因含本机绝对路径被 `.gitignore` 忽略，CI 使用等价命令行参数打包；
-> 两者产物一致。详见 `docs/summary/architecture_summary.md` §6 与 `docs/review/review_report.md` §5.7。
+> 两者产物一致。相关代码文档见本地 `docs/{review,summary,improvement}`（已加入 `.gitignore`，不上传远程）。
 
 ---
 

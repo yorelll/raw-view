@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from raw_view.formats import (
@@ -35,14 +37,16 @@ class DecodeWorker(QObject):
 
     Signals
     -------
-    finished(result: DecodeResult)
-        Emitted on successful decode.
-    error(message: str)
-        Emitted when decoding fails.
+    finished(int, object)
+        Emitted on successful decode. Carries the generation counter (so the
+        main window can drop stale results) and the DecodeResult.
+    error(int, str)
+        Emitted when decoding fails. Carries the generation counter and a
+        human-readable message that includes the file/frame/parameters.
     """
 
-    finished = pyqtSignal(object)  # DecodeResult
-    error = pyqtSignal(str)
+    finished = pyqtSignal(int, object)  # generation, DecodeResult
+    error = pyqtSignal(int, str)        # generation, message
 
     def __init__(self) -> None:
         super().__init__()
@@ -53,6 +57,11 @@ class DecodeWorker(QObject):
         self._endianness: str = "little"
         self._preview_mode: str = "Bayer Color"
         self._bayer_pattern: str = "RGGB"
+        self._generation: int = 0
+        # Error-reporting context: remembered from configure() so the worker
+        # can build a precise "which file / which frame" message on failure.
+        self._file_path: str = ""
+        self._frame_index: int = 0
 
     def configure(
         self,
@@ -63,6 +72,9 @@ class DecodeWorker(QObject):
         endianness: str = "little",
         preview_mode: str = "Bayer Color",
         bayer_pattern: str = "RGGB",
+        generation: int = 0,
+        file_path: str = "",
+        frame_index: int = 0,
     ) -> None:
         """Set decode parameters before starting the thread."""
         self._data = data
@@ -72,13 +84,29 @@ class DecodeWorker(QObject):
         self._endianness = endianness
         self._preview_mode = preview_mode
         self._bayer_pattern = bayer_pattern
+        self._generation = generation
+        self._file_path = file_path
+        self._frame_index = frame_index
+
+    def _describe_source(self) -> str:
+        """Human-readable "which file / which frame" prefix for error messages."""
+        name = os.path.basename(self._file_path) if self._file_path else "?"
+        if self._spec is not None:
+            detail = (
+                f"{name} frame {self._frame_index} "
+                f"(format={self._format_name}, {self._spec.width}x{self._spec.height}, "
+                f"offset={self._spec.offset})"
+            )
+        else:
+            detail = f"{name} frame {self._frame_index}"
+        return detail
 
     def run(self) -> None:
         """Decode the image (call from QThread)."""
         try:
             if self._data is None or self._spec is None:
                 logger.error("No data configured for decode")
-                self.error.emit("No data configured for decode")
+                self.error.emit(self._generation, f"No data configured for decode ({self._describe_source()})")
                 return
 
             from PyQt5.QtGui import QImage
@@ -131,7 +159,7 @@ class DecodeWorker(QObject):
                     result = DecodeResult(raw8, qimg, w, h, self._format_name)
 
             logger.debug("Worker decode finished successfully")
-            self.finished.emit(result)
+            self.finished.emit(self._generation, result)
         except Exception as exc:
-            logger.exception("Worker decode failed")
-            self.error.emit(str(exc))
+            logger.exception("Worker decode failed: %s", self._describe_source())
+            self.error.emit(self._generation, f"{self._describe_source()}: {exc}")

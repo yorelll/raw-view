@@ -135,8 +135,11 @@ def decode_raw(
         return arr16.reshape(spec.height, spec.width)
 
     if raw_type == "RAW32":
-        arr = np.frombuffer(frame, dtype=_dtype_u32(endianness)).astype(np.uint32)
-        return arr.reshape(spec.height, spec.width)
+        # RAW32 以 32-bit 字存储，32-bit 容器内没有对齐语义（RAW10/12/16 的
+        # lsb/msb 指 16-bit 存储字内的位对齐；RAW32 整字都是有效数据位）。
+        # 因此只按 endianness 读取，忽略 alignment（与 gray8_to_raw_bytes 对称）。
+        arr = np.frombuffer(frame, dtype=_dtype_u32(endianness))
+        return arr.astype(np.uint32).reshape(spec.height, spec.width)
 
     if raw_type == "RAW10 Packed":
         # MIPI CSI-2 RAW10: 4 pixels in 5 bytes.
@@ -183,13 +186,19 @@ def decode_raw(
 
 
 def _to_8bit(values: np.ndarray, bits: int | None = None) -> np.ndarray:
-    v = values.astype(np.float32)
+    # 已知内存行为：min-max 分支对 uint16/uint32 输入存在一次 float32
+    # （4B/px）临时拷贝（相对输入为 2x/1x 峰值），大图时更占内存；但该
+    # 分支仅 RAW32（bits=None）等少数字段使用，接受此临时开销以保持正确性。
     if bits is not None and bits > 0:
         vmax = float((1 << bits) - 1)
+        v = values.astype(np.float32)
         return np.clip(np.round(v / vmax * 255.0), 0, 255).astype(np.uint8)
-    vmin, vmax = float(v.min()), float(v.max())
+    vmin, vmax = float(values.min()), float(values.max())
     if vmax <= vmin:
-        return np.zeros(v.shape, dtype=np.uint8)
+        # 数据平坦（全 0 / 恒定值）时 min-max 拉伸无意义，直接回中性灰，
+        # 避免输出全黑让用户误以为解码失败。
+        return np.full(values.shape, 128, dtype=np.uint8)
+    v = values.astype(np.float32)
     return np.clip(np.round((v - vmin) * (255.0 / (vmax - vmin))), 0, 255).astype(np.uint8)
 
 
@@ -334,6 +343,16 @@ def gray8_to_raw_bytes(
     if bits is None:
         raise FormatError(f"unsupported RAW type: {raw_type}")
 
+    if raw_type == "RAW32":
+        # RAW32 按 32-bit 刻度（8bit 0..255 → 0..0xFFFFFFFF）写盘，
+        # 与 decode_raw 的 32-bit 读取对称；不能用下面的 uint16 通用路径
+        # （会截断高 16 位导致回读数值错误）。
+        v32 = np.clip(
+            np.round(g / 255.0 * ((1 << 32) - 1)), 0, (1 << 32) - 1
+        ).astype(np.uint32)
+        dtype = _dtype_u32(endianness)
+        return v32.astype(dtype).tobytes()
+
     v = np.clip(np.round(g / 255.0 * ((1 << bits) - 1)), 0, (1 << bits) - 1).astype(np.uint16)
 
     if raw_type in {"RAW10", "RAW12", "RAW16"}:
@@ -348,10 +367,6 @@ def gray8_to_raw_bytes(
         return _pack_raw12(v)
     if raw_type == "RAW14 Packed":
         return _pack_raw14(v)
-
-    if raw_type == "RAW32":
-        dtype = _dtype_u32(endianness)
-        return v.astype(dtype).tobytes()
 
     raise FormatError(f"unsupported RAW type: {raw_type}")
 

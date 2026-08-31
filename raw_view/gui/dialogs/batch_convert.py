@@ -41,7 +41,27 @@ from raw_view.models import (
     BAYER_PATTERNS,
     format_output_template,
 )
+from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+
+
+# 与本项目主面板 (panels.py) 的默认输出分辨率保持一致（转换默认产出高清，
+# 与查看端默认对齐）。仅影响两对话框的默认值，不改动既有 CLI 默认。
+DEFAULT_CONVERT_WIDTH = 2560
+DEFAULT_CONVERT_HEIGHT = 1440
+
+
+def resolve_output_dir(same_dir: bool, input_path: str, settings_dir: str) -> str:
+    """决定单文件转换的目标输出目录。
+
+    语义与多变体分支统一：
+    勾选 “Same directory as input” → 输出到输入文件同目录；
+    未勾选 → 落到 Settings 里的默认输出目录（``settings_dir``）。
+    返回目录字符串。
+    """
+    if same_dir:
+        return str(Path(input_path).parent)
+    return settings_dir
 
 
 class BatchConvertDialog(QDialog):
@@ -93,9 +113,8 @@ class BatchConvertDialog(QDialog):
         self.target_type.addItems(["RAW", "YUV"])
 
         self.raw_type = QComboBox()
-        self.raw_type.addItems(
-            ["RAW8", "RAW10", "RAW12", "RAW10 Packed", "RAW12 Packed", "RAW14 Packed", "RAW16"]
-        )
+        # RAW 类型列表与主面板 ControlPanel.RAW_FORMATS 保持一致（含 RAW16/RAW32）。
+        self.raw_type.addItems(ControlPanel.RAW_FORMATS)
 
         self.yuv_type = QComboBox()
         self.yuv_type.addItems(
@@ -113,11 +132,11 @@ class BatchConvertDialog(QDialog):
 
         self.width = QSpinBox()
         self.width.setRange(1, 65535)
-        self.width.setValue(640)
+        self.width.setValue(DEFAULT_CONVERT_WIDTH)
 
         self.height = QSpinBox()
         self.height.setRange(1, 65535)
-        self.height.setValue(480)
+        self.height.setValue(DEFAULT_CONVERT_HEIGHT)
 
         self._same_dir_cb = QCheckBox("Same directory as input")
         self._same_dir_cb.setChecked(True)
@@ -311,8 +330,10 @@ class BatchConvertDialog(QDialog):
                     if not formats or not sizes:
                         self._file_table.item(row, 2).setText("Skipped: no variants selected")
                         continue
-                    out_dir = str(Path(input_path).parent) if self._same_dir_cb.isChecked() \
-                        else self._settings.default_output_dirname
+                    out_dir = resolve_output_dir(
+                        self._same_dir_cb.isChecked(), input_path,
+                        self._settings.default_output_dirname,
+                    )
                     try:
                         written = generate_image_variants(
                             input_path, formats, sizes, bayer,
@@ -334,17 +355,16 @@ class BatchConvertDialog(QDialog):
 
                 output_path = format_output_template(
                     template, input_path, out_w, out_h, target_type,
+                    output_dir=resolve_output_dir(
+                        self._same_dir_cb.isChecked(), input_path,
+                        self._settings.default_output_dirname,
+                    ),
                     raw_type=self.raw_type.currentText(),
                     yuv_type=self.yuv_type.currentText(),
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
                 )
-                if self._same_dir_cb.isChecked():
-                    # Use same directory as input instead of "out/"
-                    src = Path(input_path)
-                    out_name = Path(output_path).name
-                    output_path = str(src.parent / out_name)
 
                 self._file_table.item(row, 3).setText(output_path)
 

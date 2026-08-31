@@ -7,6 +7,7 @@ import os
 import numpy as np
 
 from .formats import (
+    FormatError,
     gray8_to_raw_bytes,
     rgb_to_yuv_bytes,
     decode_raw,
@@ -286,6 +287,27 @@ def generate_image_variants(
 # ── Decode (RAW/YUV → viewable image) ─────────────────────────────────
 
 
+def _read_frame(input_path: str, width: int, height: int, frame_size: int, offset: int) -> bytes:
+    """只读取 [offset, offset+frame_size) 的一帧数据，避免整读大文件（H-2/H-3）。
+
+    - 文件不足一帧时抛与旧整读路径一致的 ``FormatError``（``data too short``）。
+    - 读取失败（不存在/无权限等）直接抛 OSError，语义与原先的 open/read 一致。
+    """
+    try:
+        file_size = os.path.getsize(input_path)
+    except OSError:
+        raise
+    spec = ImageSpec(width, height, offset)
+    spec.validate()
+    need = offset + frame_size
+    if file_size < need:
+        raise FormatError(f"data too short: need {need} bytes, got {file_size}")
+    with open(input_path, "rb") as f:
+        f.seek(offset)
+        data = f.read(frame_size)
+    return data
+
+
 def raw_file_to_image(
     input_path: str,
     output_path: str,
@@ -304,13 +326,11 @@ def raw_file_to_image(
         input_path, output_path, raw_type, width, height,
         alignment, endianness, preview_mode, bayer_pattern, offset,
     )
-    try:
-        with open(input_path, "rb") as f:
-            data = f.read()
-    except OSError as exc:
-        logger.error("Failed to read input file %s: %s", input_path, exc)
-        raise
-    spec = ImageSpec(width, height, offset)
+    frame_size = expected_frame_size_raw(raw_type, width, height)
+    # offset 已在 _read_frame 里通过 seek 消费；这里给 decode 用 0 偏移，
+    # 避免 _slice_frame 对已切好的窗口二次偏移。
+    data = _read_frame(input_path, width, height, frame_size, offset)
+    spec = ImageSpec(width, height, 0)
     raw = decode_raw(data, spec, raw_type, alignment=alignment, endianness=endianness)
     raw8 = raw_to_display_gray(raw, raw_type)
 
@@ -343,9 +363,9 @@ def yuv_file_to_image(
         "yuv_file_to_image: %s -> %s (%s, %dx%d, offset=%d)",
         input_path, output_path, subformat, width, height, offset,
     )
-    with open(input_path, "rb") as f:
-        data = f.read()
-    spec = ImageSpec(width, height, offset)
+    frame_size = expected_frame_size_yuv(subformat, width, height)
+    data = _read_frame(input_path, width, height, frame_size, offset)
+    spec = ImageSpec(width, height, 0)  # offset 已在 _read_frame 里 seek 消费
     rgb = decode_yuv(data, spec, subformat)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     cv2.imwrite(output_path, bgr)

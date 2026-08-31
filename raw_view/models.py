@@ -59,6 +59,19 @@ THEME_PALETTES = {
         "card_shadow": "rgba(30,27,46,0.08)",
         "success": "#2E7D32",
         "warning": "#F59E0B",
+        # Frame navigation bar button palette (light theme).
+        "nav_button_bg": "#FFFFFF",
+        "nav_button_border": "#D5D9E3",
+        "nav_button_text": "#212121",
+        "nav_button_hover_bg": "#E3F2FD",
+        "nav_button_hover_border": "#1976D2",
+        "nav_button_hover_text": "#1565C0",
+        "nav_button_pressed_bg": "#D5D9E3",
+        "nav_button_pressed_border": "#9AA0AC",
+        "nav_button_pressed_text": "#000000",
+        "nav_button_disabled_bg": "#F1F3F8",
+        "nav_button_disabled_border": "#E5E8EF",
+        "nav_button_disabled_text": "#B0B6C4",
     },
     "dark": {
         "main_bg": "#171A24",
@@ -75,6 +88,19 @@ THEME_PALETTES = {
         "card_shadow": "rgba(0,0,0,0.35)",
         "success": "#66BB6A",
         "warning": "#FBBF24",
+        # Frame navigation bar button palette (dark theme).
+        "nav_button_bg": "#2A2D4A",
+        "nav_button_border": "#3A3D5C",
+        "nav_button_text": "#C8CCDC",
+        "nav_button_hover_bg": "#363A5E",
+        "nav_button_hover_border": "#5B6080",
+        "nav_button_hover_text": "#E8EAED",
+        "nav_button_pressed_bg": "#1E2035",
+        "nav_button_pressed_border": "#2A2D4A",
+        "nav_button_pressed_text": "#FFFFFF",
+        "nav_button_disabled_bg": "#1E2035",
+        "nav_button_disabled_border": "#2A2D4A",
+        "nav_button_disabled_text": "#4A5070",
     },
 }
 
@@ -102,6 +128,8 @@ class DecodeOptions:
     alignment: str = "msb"
     endianness: str = "little"
     offset: int = 0
+    preview_mode: str = "Bayer Color"  # "Bayer Color" / "Grayscale" (RAW only)
+    bayer_pattern: str = "RGGB"        # one of BAYER_PATTERNS (RAW only)
 
 
 @dataclass
@@ -166,7 +194,6 @@ class ViewerItem:
     zoom_percent: int = 100
     current_frame: int = 0
     total_frames: int = 0
-    rotation_angle: int = 0  # cumulative rotation in degrees
 
 
 # ── Settings ─────────────────────────────────────────────────────────────
@@ -755,6 +782,39 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QLabel#frameNavLabel {{
             color: {p["text_secondary"]};
             font-size: {max(font_size - 1, 10)}px;
+        }}
+        QWidget#frameNavBar {{
+            background: transparent;
+        }}
+        QWidget#frameNavBar QPushButton {{
+            background: {p["nav_button_bg"]};
+            border: 1px solid {p["nav_button_border"]};
+            border-radius: 6px;
+            font-weight: bold;
+            color: {p["nav_button_text"]};
+            font-size: 14px;
+        }}
+        QWidget#frameNavBar QPushButton:hover {{
+            background: {p["nav_button_hover_bg"]};
+            border: 1px solid {p["nav_button_hover_border"]};
+            color: {p["nav_button_hover_text"]};
+        }}
+        QWidget#frameNavBar QPushButton:pressed {{
+            background: {p["nav_button_pressed_bg"]};
+            border: 1px solid {p["nav_button_pressed_border"]};
+            color: {p["nav_button_pressed_text"]};
+        }}
+        QWidget#frameNavBar QPushButton:disabled {{
+            background: {p["nav_button_disabled_bg"]};
+            border: 1px solid {p["nav_button_disabled_border"]};
+            color: {p["nav_button_disabled_text"]};
+        }}
+        QWidget#frameNavBar QSpinBox {{
+            padding: 2px 4px;
+        }}
+        QWidget#frameNavBar QLabel {{
+            color: {p["text_secondary"]};
+            font-size: 13px;
         }}
         QLabel#statusPlaceholder {{
             color: {p["text_secondary"]};

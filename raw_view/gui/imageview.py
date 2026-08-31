@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -10,6 +10,27 @@ from PyQt5.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
 )
+
+
+def _clamp_zoom_percent(percent: float) -> int:
+    """把缩放百分比夹到合法显示范围 (10–1000) 并取整。"""
+    return max(10, min(1000, int(round(percent))))
+
+
+def _fit_scale_percent(scene_rect: QRectF, view_size: tuple[int, int]) -> int:
+    """根据场景矩形与视图可用像素尺寸，数学上计算 Fit 的实际缩放百分比。
+
+    返回以 1% 为下界的整数百分比。直接从矩形尺寸推导，不依赖 QTransform
+    的 m11 —— m11 在旋转/翻转后不再等于纯比例，会导致滚动区和双击
+    Fit/1:1 切换误判。
+    """
+    if scene_rect.isNull() or scene_rect.width() <= 0 or scene_rect.height() <= 0:
+        return 100
+    vw, vh = view_size
+    if vw <= 0 or vh <= 0:
+        return 100
+    fit_scale = min(vw / scene_rect.width(), vh / scene_rect.height())
+    return max(1, int(round(fit_scale * 100)))
 
 
 class ImageView(QGraphicsView):
@@ -31,6 +52,9 @@ class ImageView(QGraphicsView):
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self._img_width = 0
         self._img_height = 0
+        # 当前生效的旋转角度（90° 的整数倍），与 QTransform 一起维护，
+        # 保证 fit/reset/zoom_to 重建变换时旋转不被丢失。
+        self._rotation = 0
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -51,25 +75,31 @@ class ImageView(QGraphicsView):
         self._apply_zoom_step(0.8)
 
     def reset_zoom(self) -> None:
-        self._reset_full_transform()
+        """重置为 1:1 —— 只清掉缩放，保留用户已设置的旋转方向。"""
+        self._apply_rotation_then_scale(1.0)
         self._zoom_percent = 100
         self.zoomChanged.emit(self._zoom_percent)
 
     def fit_image(self) -> None:
         if self.sceneRect().isNull():
             return
-        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
-        self._zoom_percent = max(1, int(round(self.transform().m11() * 100)))
+        # 先用 Fit 的目标视图区与场景矩形数学算出缩放比例（不受旋转影响），
+        # 再整体重建变换：应用已有旋转后直接按该比例缩放，避免 fitInView
+        # 在旋转变换上叠加 m11 语义错乱。viewport 尺寸不含滚动条。
+        percent = _fit_scale_percent(
+            self.sceneRect(),
+            (self.viewport().contentsRect().width(), self.viewport().contentsRect().height()),
+        )
+        self._rotation = self._rotation % 360
+        self._apply_rotation_then_scale(percent / 100.0)
+        self._zoom_percent = _clamp_zoom_percent(percent)
         self.zoomChanged.emit(self._zoom_percent)
 
     def zoom_to(self, percent: int) -> None:
         """Zoom to a specific percentage (clamped 10–1000)."""
-        percent = max(10, min(1000, percent))
-        self._reset_full_transform()
+        percent = _clamp_zoom_percent(percent)
+        self._apply_rotation_then_scale(percent / 100.0)
         self._zoom_percent = percent
-        if percent != 100:
-            factor = percent / 100.0
-            self.scale(factor, factor)
         self.zoomChanged.emit(self._zoom_percent)
 
     def has_image(self) -> bool:
@@ -113,16 +143,26 @@ class ImageView(QGraphicsView):
 
     def _apply_zoom_step(self, factor: float, *, emit: bool = True) -> None:
         old_pct = self._zoom_percent
-        new_pct = max(10, min(1000, int(round(old_pct * factor))))
+        new_pct = _clamp_zoom_percent(old_pct * factor)
         actual_factor = new_pct / old_pct
         self.scale(actual_factor, actual_factor)
         self._zoom_percent = new_pct
         if emit:
             self.zoomChanged.emit(self._zoom_percent)
 
-    def _reset_full_transform(self) -> None:
-        """Reset transform, preserving nothing (used by zoom_to / reset_zoom)."""
+    def _apply_rotation_then_scale(self, factor: float) -> None:
+        """重建变换：先复位，再应用已跟踪的旋转，最后按 *factor* 等比缩放。
+
+        统一绘制冻结期间（QGraphicsView 的 ``transform()`` 在视图未显示时
+        可能仍是恒等变换）的做法：旋转先于缩放，保证旋转角度始终生效、
+        且等比缩放叠加在旋转上的比例是纯数值（与是否旋转无关）。
+        供 fit_image / zoom_to / reset_zoom 重建完整变换时使用。
+        """
         self.resetTransform()
+        if self._rotation:
+            self.rotate(self._rotation)
+        if factor != 1.0:
+            self.scale(factor, factor)
 
     # ── Qt event overrides ───────────────────────────────────────────
 
@@ -135,10 +175,9 @@ class ImageView(QGraphicsView):
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         """Double-click toggles between Fit to Window and 1:1 zoom."""
         if self.has_image():
-            current = self._zoom_percent
-            # If within 5% of fit, go to 1:1; otherwise fit
-            estimated_fit = max(1, int(round(self.transform().m11() * 100))) if self.sceneRect().isNull() else current
-            if estimated_fit < 110:  # close to fit view
+            # 依据当前记录的缩放百分比判断（不再读 transform().m11()，
+            # 它在旋转后不代表纯比例）。接近 Fit 就切到 1:1，否则 Fit。
+            if self._zoom_percent < 110:  # close to fit view
                 self.reset_zoom()
             else:
                 self.fit_image()

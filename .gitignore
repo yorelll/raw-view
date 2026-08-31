@@ -21,6 +21,11 @@ dist/
 
 raw_pic/
 
+# 本地代码审查 / 总结 / 改进文档（本地维护，不上传到远程仓库）
+docs/review/
+docs/summary/
+docs/improvement/
+
 # Sensor preset exports — shared/distributed manually, never auto-committed.
 # Match common names users pick when exporting from the Preset Manager.
 raw-view-presets*.json

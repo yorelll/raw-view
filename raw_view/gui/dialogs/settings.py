@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -249,6 +251,10 @@ class SettingsDialog(QDialog):
     def _browse_output_dir(self) -> None:
         """Pick a default output folder via the system dialog."""
         start = self.output_dir_edit.text().strip() or ""
+        # 相对目录名（如 "convert_out"/"out"）在对话框起始路径里会随 CWD 变化，
+        # 统一先解析成绝对路径作为起始目录；保存值仍用用户输入，不受影响。
+        if start and not os.path.isabs(start):
+            start = os.path.abspath(start)
         chosen = QFileDialog.getExistingDirectory(self, "Select output folder", start)
         if chosen:
             self.output_dir_edit.setText(chosen)

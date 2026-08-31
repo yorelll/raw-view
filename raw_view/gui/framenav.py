@@ -69,28 +69,10 @@ class FrameNavBar(QWidget):
         self.last_btn.setFixedSize(_NAV_W, _NAV_H)
         self.last_btn.setToolTip("Last frame (End)")
 
-        # ── Styling (dark-theme optimised, palette‑fallback for light) ─
-        self.setStyleSheet(
-            "#frameNavBar QPushButton {"
-            "  background: #2A2D4A; border: 1px solid #3A3D5C; border-radius: 6px;"
-            "  font-weight: bold; color: #C8CCDC; font-size: 14px;"
-            "}"
-            "#frameNavBar QPushButton:hover {"
-            "  background: #363A5E; border: 1px solid #5B6080; color: #E8EAED;"
-            "}"
-            "#frameNavBar QPushButton:pressed {"
-            "  background: #1E2035; border: 1px solid #2A2D4A; color: #FFFFFF;"
-            "}"
-            "#frameNavBar QPushButton:disabled {"
-            "  background: #1E2035; border: 1px solid #2A2D4A; color: #4A5070;"
-            "}"
-            "#frameNavBar QSpinBox {"
-            "  padding: 2px 4px;"
-            "}"
-            "#frameNavBar QLabel {"
-            "  color: palette(text); font-size: 13px;"
-            "}"
-        )
+        # Note: button/spin/label colours are themed globally via
+        # ``build_ui_stylesheet`` (#frameNavBar …) in models.py, so they
+        # follow the active light/dark theme instead of being hard-coded
+        # here. Only the layout/metrics live in this widget.
 
         # ── Layout: │◀  ◀  [1] / 5  ▶  ▶│  ───────────────────────────
         layout.addStretch()

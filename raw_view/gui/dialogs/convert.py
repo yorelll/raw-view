@@ -37,7 +37,14 @@ from raw_view.models import (
     BAYER_PATTERNS,
     format_output_template,
 )
+from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+
+
+# 与本项目主面板 (panels.py) 的默认输出分辨率保持一致（转换默认产出高清，
+# 与查看端默认对齐）。仅影响对话框默认值，不改动既有 CLI 默认。
+DEFAULT_CONVERT_WIDTH = 2560
+DEFAULT_CONVERT_HEIGHT = 1440
 
 
 def _human_size(num_bytes: int) -> str:
@@ -69,9 +76,8 @@ class ConvertDialog(QDialog):
         self.target_type.addItems(["RAW", "YUV"])
 
         self.raw_type = QComboBox()
-        self.raw_type.addItems(
-            ["RAW8", "RAW10", "RAW12", "RAW10 Packed", "RAW12 Packed", "RAW14 Packed", "RAW16"]
-        )
+        # RAW 类型列表与主面板 ControlPanel.RAW_FORMATS 保持一致（含 RAW16/RAW32）。
+        self.raw_type.addItems(ControlPanel.RAW_FORMATS)
 
         self.yuv_type = QComboBox()
         self.yuv_type.addItems(
@@ -89,11 +95,11 @@ class ConvertDialog(QDialog):
 
         self.width = QSpinBox()
         self.width.setRange(1, 65535)
-        self.width.setValue(640)
+        self.width.setValue(DEFAULT_CONVERT_WIDTH)
 
         self.height = QSpinBox()
         self.height.setRange(1, 65535)
-        self.height.setValue(480)
+        self.height.setValue(DEFAULT_CONVERT_HEIGHT)
 
         self._auto_output_path = ""
 

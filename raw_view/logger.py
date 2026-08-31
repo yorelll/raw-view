@@ -25,6 +25,32 @@ _LOG_FILE = _LOG_DIR / "raw-view.log"
 
 _initialized = False
 
+#: 环境变量名：以数字或级别名（DEBUG/INFO/WARNING/...）控制全局 logger 级别，
+#: 覆盖 setup_logger 的默认 DEBUG。不设置时行为与旧版一致（DEBUG）。
+_LEVEL_ENV = "RAW_VIEW_LOG_LEVEL"
+
+
+def _parse_level(level: int | str | None) -> int:
+    """把 level 参数/RAW_VIEW_LOG_LEVEL 解析成合法的 logging 级别（int）。
+
+    - 传入数字或 None 时原样返回（None 由调用方按默认值处理）。
+    - 传入字符串时兼容 ``logging.getLevelName`` 的数字形式（"20"）与
+      级别名（"DEBUG"），大小写不敏感；解析失败（未知名字/空串）回退默认
+      ``logging.DEBUG``。
+    """
+    if level is None:
+        return logging.DEBUG
+    if isinstance(level, int):
+        return level
+    text = str(level).strip()
+    if not text:
+        return logging.DEBUG
+    # "20" / "10" 这类数字字符串由 getLevelName 直接给出 LEVELNAME 查询串，
+    # 无法用于反向解析，先按数字转换。
+    if text.isdigit():
+        return int(text)
+    return getattr(logging, text.upper(), logging.DEBUG) or logging.DEBUG
+
 
 def setup_logger(
     name: str = "raw_view",
@@ -43,7 +69,9 @@ def setup_logger(
     name : str
         Logger name (default ``raw_view``).
     level : int
-        Global logging level (default ``DEBUG``).
+        Global logging level (default ``DEBUG``). May be overridden by the
+        ``RAW_VIEW_LOG_LEVEL`` environment variable (numeric or a level name
+        such as ``DEBUG``/``INFO``/``WARNING``, case-insensitive).
     log_dir : str or None
         Directory for log files.  ``None`` ⇒ platform-appropriate default.
     max_bytes : int
@@ -58,6 +86,10 @@ def setup_logger(
     if _initialized and logger.handlers:
         return logger
 
+    # 环境变量优先：RAW_VIEW_LOG_LEVEL 覆盖全局级别（向后兼容，
+    # 未设置时保持默认 DEBUG）。
+    level = _parse_level(os.environ.get(_LEVEL_ENV, level))
+
     logger.setLevel(level)
     logger.propagate = False
 
@@ -66,12 +98,13 @@ def setup_logger(
     log_path.mkdir(parents=True, exist_ok=True)
     log_file = log_path / "raw-view.log"
 
-    # -- File handler (DEBUG) --
+    # -- File handler (loglevel 级别的文件过滤) --
+    # 文件 handler 固定不高于全局级别，避免低级别日志写满磁盘。
     try:
         fh = RotatingFileHandler(
             str(log_file), maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
         )
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(level)
         fh.setFormatter(logging.Formatter(
             "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",

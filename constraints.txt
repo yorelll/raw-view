@@ -1,0 +1,14 @@
+# 依赖版本锁定文件 —— 在 CI 里通过 `pip install -c constraints.txt` 与
+# requirements.txt 叠加使用，确保可复现的构建环境。
+#
+# 版本来自本地 .venv 中实测通过的组合（Python 3.12 / Windows）。
+# 本地安装仍只 `pip install -r requirements.txt`；constraints 完全可选。
+
+numpy==2.4.4
+opencv-python==4.13.0.92
+PyQt5==5.15.11
+qt-material==2.17
+qtawesome==1.4.2
+Pillow==12.3.0
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.4

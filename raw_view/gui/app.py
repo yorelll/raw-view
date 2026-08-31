@@ -96,7 +96,7 @@ class DropCentralWidget(QWidget):
     events transparently — no separate overlay needed.
     """
 
-    filesDropped = pyqtSignal(list)  # list[str]
+    filesDropped = pyqtSignal(list, bool)  # list[str], scanned_too_many
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -130,11 +130,11 @@ class DropCentralWidget(QWidget):
         urls = event.mimeData().urls()
         if not urls:
             return
-        paths = handle_drop_paths(urls)
+        paths, scanned_too_many = handle_drop_paths(urls)
         if not paths:
             super().dropEvent(event)
             return
-        self.filesDropped.emit(paths)
+        self.filesDropped.emit(paths, scanned_too_many)
         event.acceptProposedAction()
 
     # ── paint ────────────────────────────────────────────────────────
@@ -186,30 +186,59 @@ _YUV_EXTS: dict[str, str] = {
     ".nv61": "NV61",
 }
 
+# Extensions the viewer can actually open / decode. Directory drag-drop scans
+# are filtered to this set so we never pull in unrelated files (configs, caches).
+SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | set(_YUV_EXTS) | {".raw", ".bin"}
+
+# When a dropped directory resolves to more than this many supported files,
+# the user must confirm before they are all opened.
+DIR_DROP_MAX_FILES = 50
+
 
 def _scan_directory(path: str) -> list[str]:
-    """Recursively scan a directory for all files, returning sorted file paths."""
+    """Recursively scan a directory for supported files, returning sorted paths.
+
+    Files whose extension is not in ``SUPPORTED_EXTENSIONS`` are skipped, so a
+    dropped folder doesn't pull in unrelated files.
+    """
     results: list[str] = []
     try:
         for root, _dirs, files in os.walk(path):
             for fname in sorted(files):
+                if not _is_supported_file(fname):
+                    continue
                 results.append(str(Path(root) / fname))
     except OSError:
         logger.warning("Failed to scan directory: %s", path)
     return results
 
 
-def handle_drop_paths(urls) -> list[str]:
-    """Extract file/directory paths from MIME urls and resolve to files (any extension)."""
+def _is_supported_file(path: str) -> bool:
+    """Whether *path* looks like a file the viewer supports (by extension)."""
+    return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
+
+
+def handle_drop_paths(urls, max_files: int = DIR_DROP_MAX_FILES) -> list[str]:
+    """Extract file/directory paths from MIME urls, resolving to supported files.
+
+    Directories are scanned recursively but filtered to supported extensions;
+    if a single dropped directory expands beyond *max_files*, ``scanned_too_many``
+    is returned so the caller can ask the user before opening everything.
+    Returns ``(files, scanned_too_many)``.
+    """
     paths: list[str] = []
+    scanned_too_many = False
     for url in urls:
         local_path = url.toLocalFile()
         if not local_path:
             continue
-        if os.path.isfile(local_path):
+        if os.path.isdir(local_path):
+            scanned = _scan_directory(local_path)
+            if len(scanned) > max_files:
+                scanned_too_many = True
+            paths.extend(scanned)
+        elif os.path.isfile(local_path) and _is_supported_file(local_path):
             paths.append(local_path)
-        elif os.path.isdir(local_path):
-            paths.extend(_scan_directory(local_path))
     # Deduplicate while preserving order
     seen: set[str] = set()
     deduped: list[str] = []
@@ -218,7 +247,7 @@ def handle_drop_paths(urls) -> list[str]:
         if norm not in seen:
             seen.add(norm)
             deduped.append(p)
-    return deduped
+    return deduped, scanned_too_many
 
 
 class MainWindow(QMainWindow):
@@ -234,6 +263,14 @@ class MainWindow(QMainWindow):
         self._loading_item = False
         self._thread: QThread | None = None
         self._worker: DecodeWorker | None = None
+        # Generation counter for async decodes. Incremented on every start, so
+        # results/errors from an older (cancelled/abandoned) worker, whose
+        # ``finished`` signal still arrives late, can be recognised and dropped.
+        self._decode_generation = 0
+        # The item that the latest async decode was started for. Combined with
+        # the generation counter, this lets us drop results that belong to a
+        # different tab (item identity check in ``_should_apply_decode``).
+        self._pending_decode_item: ViewerItem | None = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -691,8 +728,23 @@ class MainWindow(QMainWindow):
 
     # ── Drag & drop (signal from DropCentralWidget) ──────────────────
 
-    def _on_files_dropped(self, paths: list[str]) -> None:
-        """Handle files dropped via drag-and-drop (emitted by DropCentralWidget)."""
+    def _on_files_dropped(self, paths: list[str], scanned_too_many: bool = False) -> None:
+        """Handle files dropped via drag-and-drop (emitted by DropCentralWidget).
+
+        When a dropped directory expanded beyond the confirmation threshold,
+        ask the user before opening everything at once.
+        """
+        if scanned_too_many and paths:
+            reply = QMessageBox.question(
+                self,
+                "Open many files",
+                f"Opening {len(paths)} files from the dropped folder(s). Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                logger.info("Drop aborted by user (%d files)", len(paths))
+                return
         logger.info("Drop: %d file(s) resolved from drag", len(paths))
         for path in paths:
             self._open_item(path, decode=False)
@@ -831,6 +883,10 @@ class MainWindow(QMainWindow):
         item.options.alignment = vals["alignment"]
         item.options.endianness = vals["endianness"]
         item.options.offset = vals["offset"]
+        # Preview/bayer are stored per-item even for non-RAW types; they are
+        # only meaningful for RAW decoding, which decides by ``image_type``.
+        item.options.preview_mode = vals["preview_mode"]
+        item.options.bayer_pattern = vals["bayer_pattern"]
 
     def _load_item_to_panel(self, item: ViewerItem) -> None:
         self._loading_item = True
@@ -848,6 +904,8 @@ class MainWindow(QMainWindow):
             alignment=opts.alignment,
             endianness=opts.endianness,
             offset=opts.offset,
+            preview_mode=opts.preview_mode,
+            bayer_pattern=opts.bayer_pattern,
         )
         self.panel.set_zoom_percent(item.zoom_percent)
         self._update_frame_display(item)
@@ -933,6 +991,54 @@ class MainWindow(QMainWindow):
         """
         self.decode_current(warn_mismatch=True)
 
+    @staticmethod
+    def _remaining_bytes(path: str, offset: int) -> int | None:
+        """Return the number of file bytes from *offset* to EOF, or None on error."""
+        try:
+            return max(0, os.path.getsize(path) - offset)
+        except OSError:
+            return None
+
+    def _read_frame_data(self, path: str, offset: int, read_len: int) -> bytes:
+        """Read only the bytes needed for one frame, starting at *offset*.
+
+        Replaces the old ``f.read()``-whole-file approach (H-2): for a huge
+        multi-frame capture we seek straight to the current frame's interval
+        and read just that slice. Returns ``b""`` if the file can't be opened.
+        """
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                return f.read(max(0, read_len))
+        except OSError:
+            return b""
+
+    def _compute_effective_offset(self, item: ViewerItem) -> tuple[int, int]:
+        """Return ``(frame_size, effective_offset)`` for *item*'s current frame.
+
+        ``effective_offset`` is the base offset plus ``frame_index * frame_size``
+        so multi-frame files seek into the right frame rather than reading from
+        the file start.
+        """
+        opts = item.options
+        frame_size = self._get_frame_size(opts)
+        effective_offset = opts.offset
+        if frame_size > 0 and item.current_frame > 0:
+            effective_offset = opts.offset + item.current_frame * frame_size
+        return frame_size, effective_offset
+
+    def _expected_frame_size(self, opts: DecodeOptions, width: int, height: int) -> int:
+        """Size of one frame for *opts*'s format, or -1 when unknown/invalid."""
+        try:
+            if opts.image_type == "RAW" or opts.format_name in (
+                "RAW8", "RAW10", "RAW12", "RAW16", "RAW32",
+                "RAW10 Packed", "RAW12 Packed", "RAW14 Packed",
+            ):
+                return expected_frame_size_raw(opts.format_name, width, height)
+            return expected_frame_size_yuv(opts.format_name, width, height)
+        except Exception:
+            return -1
+
     def decode_current(self, warn_mismatch: bool = False) -> None:
         item = self._current_item()
         if item is None:
@@ -950,8 +1056,6 @@ class MainWindow(QMainWindow):
             opts.width, opts.height, item.current_frame,
         )
 
-        opts = item.options
-
         # Recompute total frames with current parameters BEFORE computing
         # effective offset, so that the frame count is up to date when
         # the user changes width/height/format (see #1.0).
@@ -961,50 +1065,41 @@ class MainWindow(QMainWindow):
             0, min(item.current_frame, max(0, item.total_frames - 1))
         )
 
-        # Compute effective offset = base offset + frame_index * frame_size
-        frame_size = self._get_frame_size(opts)
-        effective_offset = opts.offset
-        if frame_size > 0 and item.current_frame > 0:
-            effective_offset = opts.offset + item.current_frame * frame_size
+        frame_size, effective_offset = self._compute_effective_offset(item)
+        expected = self._expected_frame_size(opts, opts.width, opts.height)
 
-        spec = ImageSpec(opts.width, opts.height, effective_offset)
-
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-        except OSError as exc:
-            QMessageBox.critical(self, "Read Error", str(exc))
+        # Standard Image — decode synchronously; load_bgr_image() reads and
+        # decodes the file itself, so we never read the raw bytes here.
+        if opts.image_type == "Standard Image":
+            self._decode_standard_image(item, opts)
             return
 
-        # Validate size
-        try:
-            if opts.image_type == "RAW" or opts.format_name in (
-                "RAW8", "RAW10", "RAW12", "RAW16", "RAW32",
-                "RAW10 Packed", "RAW12 Packed", "RAW14 Packed",
-            ):
-                expected = expected_frame_size_raw(opts.format_name, spec.width, spec.height)
-            else:
-                expected = expected_frame_size_yuv(opts.format_name, spec.width, spec.height)
-        except Exception:
-            expected = -1
+        # RAW / YUV: validate remaining bytes against one frame, then seek-read
+        # only the current frame interval instead of slurping the whole file.
+        actual = self._remaining_bytes(path, effective_offset)
+        if actual is None:
+            QMessageBox.critical(self, "Read Error", f"Failed to read file size: {path}")
+            return
 
-        if warn_mismatch and expected > 0:
-            remaining = len(data) - effective_offset
-            # Only warn if remaining data is less than one frame (truncated).
-            # Multi-frame files naturally have remaining > expected, which is fine.
-            if remaining < expected and not self._warn_size_mismatch(self, remaining, expected):
+        # Only an explicit Apply pops the size-mismatch dialog; open/drop and
+        # frame navigation never interrupt with the same question.
+        if warn_mismatch and expected > 0 and actual < expected:
+            if not self._warn_size_mismatch(self, actual, expected):
                 return
 
-
-        # Standard Image — decode synchronously
-        if opts.image_type == "Standard Image":
-            self._decode_standard_image(data, item, opts)
+        read_len = frame_size if frame_size > 0 else actual
+        data = self._read_frame_data(path, effective_offset, read_len)
+        if not data and actual > 0:
+            QMessageBox.critical(
+                self, "Read Error",
+                f"Failed to read {read_len} bytes at offset {effective_offset}: {path}",
+            )
             return
 
         # RAW/YUV — async
         self._start_async_decode(data, item, opts, effective_offset)
 
-    def _decode_standard_image(self, data: bytes, item: ViewerItem, opts: DecodeOptions) -> None:
+    def _decode_standard_image(self, item: ViewerItem, opts: DecodeOptions) -> None:
         try:
             bgr = load_bgr_image(opts.file_path)
             rgb = bgr[:, :, ::-1]
@@ -1021,13 +1116,25 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to decode standard image: %s", opts.file_path)
             QMessageBox.critical(self, "Decode Failed", str(exc))
             self._set_state("Decode failed", "error")
+        finally:
+            # A standard-image decode is synchronous and takes over the
+            # display; an in-flight async result must not clobber it later.
+            self._pending_decode_item = None
 
     def _start_async_decode(self, data: bytes, item: ViewerItem, opts: DecodeOptions, effective_offset: int) -> None:
+        # Detach from any in-flight decode, then bump the generation so its
+        # (unavoidably late) results are recognised as stale and dropped.
         self._cancel_async_decode()
+        self._decode_generation += 1
+        self._pending_decode_item = item
+
+        # Preview/bayer come from the item's own saved options — not whatever
+        # the shared panel currently shows — so tab switches can't leak values
+        # between items (M-1). They only affect RAW; YUV ignores them.
+        preview_mode = opts.preview_mode
+        bayer_pattern = opts.bayer_pattern
 
         spec = ImageSpec(opts.width, opts.height, effective_offset)
-        preview_mode = self.panel.raw_preview_combo.currentText() if hasattr(self, "panel") else "Grayscale"
-        bayer_pattern = self.panel.bayer_pattern_combo.currentText() if hasattr(self, "panel") else "RGGB"
 
         self._thread = QThread()
         self._worker = DecodeWorker()
@@ -1040,29 +1147,75 @@ class MainWindow(QMainWindow):
             endianness=opts.endianness,
             preview_mode=preview_mode,
             bayer_pattern=bayer_pattern,
+            generation=self._decode_generation,
+            file_path=opts.file_path,
+            frame_index=item.current_frame,
         )
 
+        # Lifecycle: when THIS worker finishes/errors, quit its thread's event
+        # loop and hand the worker to Qt via deleteLater (processed on the
+        # worker thread as the loop winds down); the QThread wrapper is deleted
+        # by deleteLater once the thread has stopped. Both lambdas close over
+        # the exact worker/thread objects they were created for, so a stale
+        # worker signalling late can never clean up — or deleteLater — a newer,
+        # still-active worker.
+        worker = self._worker
+        thread = self._thread
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_decode_finished)
         self._worker.error.connect(self._on_decode_error)
-        self._worker.finished.connect(self._cleanup_thread)
-        self._worker.error.connect(self._cleanup_thread)
+        # deleteLater() is queued on the worker thread BEFORE quit(), so the
+        # deferred delete is processed as the event loop unwinds; the QThread
+        # wrapper is deleteLater'd once the thread has fully stopped.
+        self._worker.finished.connect(lambda *_: worker.deleteLater())
+        self._worker.finished.connect(lambda *_: thread.quit())
+        self._worker.error.connect(lambda *_: worker.deleteLater())
+        self._worker.error.connect(lambda *_: thread.quit())
+        self._thread.finished.connect(thread.deleteLater)
 
         self._set_state("Decoding...", "busy")
         self._thread.start()
 
     def _cancel_async_decode(self) -> None:
-        if self._thread is not None:
-            if self._thread.isRunning():
-                self._thread.quit()
-                self._thread.wait(500)
-            self._thread = None
-            self._worker = None
+        """Detach from any in-flight decode without blocking the UI thread.
 
-    def _on_decode_finished(self, result) -> None:
-        item = self._current_item()
+        The worker is pure CPU code with no event loop, so ``quit()`` cannot
+        abort it — we only stop tracking it here. Its late ``finished``/``error``
+        signals are discarded on the main thread by the generation check in
+        ``_on_decode_finished`` / ``_on_decode_error``; when that stale worker
+        eventually finishes, its own bound quit/deleteLater lambdas wind its
+        thread down and Qt reclaims it.
+        """
+        if self._thread is not None:
+            logger.debug("Detached from in-flight decode thread")
+        self._thread = None
+        self._worker = None
+        self._pending_decode_item = None
+
+    def _should_apply_decode(self, generation: int, item: ViewerItem | None) -> bool:
+        """Whether a worker result/error carrying *generation* should be applied.
+
+        True only when the request that produced it is still the latest one
+        (generation matches) AND it targeted the currently displayed item
+        (identity check via ``id()``). Anything else is dropped, which is what
+        stops an abandoned (but still running) decode from overwriting the
+        visible tab (H-1).
+        """
         if item is None:
+            return False
+        if generation != self._decode_generation:
+            return False
+        return id(item) == id(self._pending_decode_item)
+
+    def _on_decode_finished(self, generation: int, result) -> None:
+        item = self._current_item()
+        if not self._should_apply_decode(generation, item):
+            logger.debug(
+                "Discarding stale decode result (gen=%d, current=%d)",
+                generation, self._decode_generation,
+            )
             return
+        self._pending_decode_item = None
         item.current_display = result.display_array
         item.options.width = result.width
         item.options.height = result.height
@@ -1087,17 +1240,17 @@ class MainWindow(QMainWindow):
         self._set_state("Decoded", "ok")
         self._update_frame_display(item)
 
-    def _on_decode_error(self, message: str) -> None:
+    def _on_decode_error(self, generation: int, message: str) -> None:
+        item = self._current_item()
+        if not self._should_apply_decode(generation, item):
+            logger.debug(
+                "Discarding stale decode error (gen=%d, current=%d)",
+                generation, self._decode_generation,
+            )
+            return
+        self._pending_decode_item = None
         QMessageBox.critical(self, "Decode Failed", message)
         self._set_state("Decode failed", "error")
-
-    def _cleanup_thread(self) -> None:
-        if self._thread is not None:
-            if self._thread.isRunning():
-                self._thread.quit()
-                self._thread.wait(500)
-            self._thread = None
-            self._worker = None
 
     # ── Save ─────────────────────────────────────────────────────────
 
@@ -1105,11 +1258,19 @@ class MainWindow(QMainWindow):
         item = self._current_item()
         if item is None or item.current_display is None:
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Image", "", "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
         if not path:
             return
+        # If the user typed a path without an extension, append one that
+        # matches the filter they picked from the dialog.
+        if not Path(path).suffix.lower():
+            if "JPEG" in (selected_filter or ""):
+                path = f"{path}.jpg"
+            else:
+                path = f"{path}.png"
+        ext = Path(path).suffix.lower()
         img = item.current_display
         if img.ndim == 2:
             qimg = self._qimage_from_gray(img)
@@ -1119,7 +1280,17 @@ class MainWindow(QMainWindow):
         dpm = dpi_to_dots_per_meter(dpi)
         qimg.setDotsPerMeterX(dpm)
         qimg.setDotsPerMeterY(dpm)
-        qimg.save(path)
+        fmt = "JPEG" if ext in (".jpg", ".jpeg") else "PNG"
+        ok = qimg.save(path, fmt.upper())
+        if not ok:
+            QMessageBox.critical(
+                self, "Save Failed",
+                f"Could not save image to:\n{path}\n\n"
+                "The file may be in use, the directory may be read-only, "
+                "or the format may be unsupported.",
+            )
+            self._set_state("Save failed", "error")
+            return
         self._set_state(f"Saved: {os.path.basename(path)} @ {dpi} DPI", "ok")
 
     # ── Zoom ─────────────────────────────────────────────────────────
