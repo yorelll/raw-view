@@ -194,8 +194,9 @@
 
 ### ENG-2 测试加固与 CI
 
-- 修复 `test_gui_helpers` 的 Windows 路径断言（review M-14）。
-- 新增：异步 worker 代数竞态测试、`format_output_template` 全面单测（含 {date}/{time}/目录/未知占位符）、批量输出目录一致性测试、GUI 冒烟（可无头跑 `MainWindow` 构造）。
+- ✅ 修复 `test_gui_helpers` 的 Windows 路径断言（原 review M-14，0.1.0 已修，92 用例全绿）。
+- ✅ 新增 CLI 编码回归测试（`CLIFixTests`：cp1252 窄编码下 `--batch-help` 不崩溃、`python -m raw_view --batch-help` 退出码为 0）。
+- 仍建议：异步 worker 代数竞态测试、`format_output_template` 全面单测（含 {date}/{time}/目录/未知占位符）、批量输出目录一致性测试、GUI 冒烟（可无头跑 `MainWindow` 构造）。
 - 常驻 CI：push/PR 上跑 `pytest`（本次 release workflow 里已含测试步骤，可拆出）。
 
 ### ENG-3 spec 相对路径化

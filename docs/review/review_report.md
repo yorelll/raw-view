@@ -93,11 +93,14 @@
 * **问题**：`#frameNavBar QPushButton` 的背景/边框硬编码为深色（`#2A2D4A` 等），在 Light 主题下按钮仍是深底，与浅色面板反差极大（也违反 README “Light/Dark 双主题” 的承诺）。
 * **建议**：跟随主题——把按钮样式改由 `models.build\_ui\_stylesheet` 注入，或在 `MainWindow.\_apply\_theme` 时按 `settings.ui\_theme` 生成对应配色，而不是 `setStyleSheet` 硬编码。
 
-### M-5 批量 CLI 模式读取 JSON 无显式 encoding
+### M-5 批量 CLI 模式读取 JSON 无显式 encoding；CLI 输出编码不跨平台
 
-* **位置**：`raw\_view/\_\_main\_\_.py:372`（`open(args.batch\_file)`）
-* **问题**：`open(...)` 默认编码依赖 locale；含中文路径/注释的 batch JSON 在非 UTF-8 系统（如中文 Windows GBK locale）下可能 `UnicodeDecodeError`。
-* **建议**：`open(args.batch\_file, encoding="utf-8")`；`--batch-help` 文档也建议注明 UTF-8。
+* **位置**：`raw\_view/\_\_main\_\_.py:372`（`open(args.batch\_file)`）；CLI 各 `print`（`--batch-help` 的箭头/CJK 文本）
+* **问题**：
+  1. `open(...)` 默认编码依赖 locale；含中文路径/注释的 batch JSON 在非 UTF-8 系统（如中文 Windows GBK locale）下可能 `UnicodeDecodeError`。
+  2. **CLI 输出编码**：`--batch-help` 等打印 `─ ◀ →` 箭头与 CJK 文本；当 stdout 绑定到窄单字节编码（GitHub Actions Windows runner 默认 `cp1252`、中文系统 `cp936/GBK`）时抛 `UnicodeEncodeError` 崩溃——**0.1.0 首次 CI 发布即因此失败**（`'charmap' codec can't encode characters ... position 28-29`）。
+* **已修复（0.1.0）**：`__main__.py` 新增 `_make_utf8_stdio()`，在 `main()` 入口把 stdin/stdout/stderr 重配置为 UTF-8（尊重 `PYTHONIOENCODING`/`PYTHONUTF8`，不覆盖用户显式选择），附回归测试。
+* **仍建议**：`open(args.batch\_file, encoding="utf-8")`；`--batch-help` 注明 batch JSON 需为 UTF-8。
 
 ### M-6 大规模解码无上限保护，可能崩溃
 

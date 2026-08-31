@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import unittest
+import unittest.mock as mock
 from pathlib import PurePosixPath
 
 from raw_view.models import (
@@ -97,6 +100,82 @@ class GuiHelperTests(unittest.TestCase):
         self.assertIn("font-size: 15px;", stylesheet)
         for key in _STYLESHEET_PALETTE_KEYS:
             self.assertIn(THEME_PALETTES["dark"][key], stylesheet)
+
+
+class CLIFixTests(unittest.TestCase):
+    """Regression tests for CLI robustness fixes.
+
+    Covers the ``_make_utf8_stdio`` codepage fix — the CLI must not crash with
+    UnicodeEncodeError when stdout is bound to a narrow single-byte codepage
+    (cp1252 / GBK), as happened on GitHub-Actions Windows runners.
+    """
+
+    def test_batch_help_prints_on_cp1252_stdout(self):
+        """``main()`` must survive a cp1252 (strict) stdout and print the help.
+
+        Before the fix, ``--batch-help`` raised ``UnicodeEncodeError`` because
+        the help text contains box-drawing arrows not representable in cp1252.
+        """
+        from raw_view.__main__ import _make_utf8_stdio
+
+        # Pin stdout/stderr to the narrow ANSI codepage with strict errors —
+        # exactly what triggered the crash on the CI Windows runner.
+        with mock.patch.object(sys, "stdout") as fake_stdout, \
+             mock.patch.object(sys, "stderr") as fake_stderr:
+            fake_stdout.encoding = "cp1252"
+            fake_stderr.encoding = "cp1252"
+            fake_stdout.reconfigure = \
+                lambda **kw: setattr(fake_stdout, "encoding", kw.get("encoding", "utf-8"))
+            fake_stderr.reconfigure = \
+                lambda **kw: setattr(fake_stderr, "encoding", kw.get("encoding", "utf-8"))
+            fake_stdout.write = lambda s: None
+            fake_stderr.write = lambda s: None
+            fake_stdout.flush = lambda: None
+            fake_stderr.flush = lambda: None
+
+            # Stand-in stream: assert the write of a Unicode arrow succeeds
+            # after reconfiguration (this would raise on a real cp1252 stream).
+            class _Narrow:
+                encoding = "cp1252"
+
+                def reconfigure(self, **kw):
+                    self.encoding = kw.get("encoding", "utf-8")
+
+                def write(self, s):
+                    # utf-8 stream can encode anything
+                    s.encode(self.encoding, "strict")
+
+                def flush(self):
+                    pass
+
+            old_out, old_err = sys.stdout, sys.stderr
+            narrow_out, narrow_err = _Narrow(), _Narrow()
+            sys.stdout, sys.stderr = narrow_out, narrow_err
+            try:
+                _make_utf8_stdio()  # must redirect both to UTF-8
+                self.assertEqual(narrow_out.encoding, "utf-8")
+                self.assertEqual(narrow_err.encoding, "utf-8")
+                # The Unicode arrow that crashed CI now encodes cleanly.
+                narrow_out.write("─◀ → OK\n")
+                narrow_out.write("format → {input_stem}\n")
+                narrow_out.flush()
+            finally:
+                sys.stdout, sys.stderr = old_out, old_err
+
+    def test_command_does_not_crash_as_module_subprocess(self):
+        """Full end-to-end: ``python -m raw_view --batch-help`` exits 0."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ)
+        env.pop("PYTHONIOENCODING", None)
+        env.pop("PYTHONUTF8", None)
+        proc = subprocess.run(
+            [sys.executable, "-m", "raw_view", "--batch-help"],
+            cwd=root, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertIn("Batch JSON format", proc.stdout.decode("utf-8", "replace"))
 
 
 if __name__ == "__main__":

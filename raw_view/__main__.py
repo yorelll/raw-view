@@ -34,6 +34,34 @@ from raw_view.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _make_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so Unicode CLI messages survive.
+
+    On Windows the default console/stdout encoding is the system ANSI codepage
+    (e.g. cp1252 on a US-locale runner, cp936/GBK on Chinese systems). The CLI
+    prints box-drawing arrows and CJK text (``--batch-help``, progress lines),
+    which raises ``UnicodeEncodeError`` when those characters have no mapping
+    in the current codepage — a hard crash on GitHub-Actions Windows runners.
+    Pin the encoding to UTF-8 and make encoding errors visible instead of
+    raising, so the help/completion always prints.
+
+    - ``PYTHONIOENCODING`` already exports a UTF-8 preference => leave alone
+      (nothing to fix, avoids overwriting the user's explicit choice).
+    - ``PYTHONUTF8=1`` (PEP 540 UTF-8 mode) already works => leave alone.
+    """
+    if sys.flags.utf8_mode or os.environ.get("PYTHONUTF8") == "1":
+        return
+    configured = os.environ.get("PYTHONIOENCODING", "").lower()
+    if configured and "utf" in configured:
+        return
+    if sys.stdin is not None:
+        sys.stdin.reconfigure(encoding="utf-8")
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m raw_view",
@@ -498,6 +526,7 @@ def _run_batch(args: argparse.Namespace) -> None:
 # ── Main dispatch ─────────────────────────────────────────────────────
 
 def main() -> None:
+    _make_utf8_stdio()
     parser = _build_parser()
     args = parser.parse_args()
 
