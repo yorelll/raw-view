@@ -55,12 +55,22 @@ def _make_utf8_stdio() -> None:
     configured = os.environ.get("PYTHONIOENCODING", "").lower()
     if configured and "utf" in configured:
         return
-    if sys.stdin is not None:
-        sys.stdin.reconfigure(encoding="utf-8")
-    if sys.stdout is not None:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if sys.stderr is not None:
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # 用 getattr 防御：某些环境（如 pytest 的 DontReadFromInput、部分嵌入宿主）
+    # 会把 sys.stdin/stdout/stderr 换成没有 reconfigure 方法的对象，直接调用
+    # 会 AttributeError。这里静默跳过无法重配置的流。
+    for stream, kwargs in (
+        (sys.stdin, {"encoding": "utf-8"}),
+        (sys.stdout, {"encoding": "utf-8", "errors": "replace"}),
+        (sys.stderr, {"encoding": "utf-8", "errors": "replace"}),
+    ):
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(**kwargs)
+            except (OSError, ValueError):
+                pass
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -271,6 +281,8 @@ def _run_view_decode(
     offset: int,
 ) -> None:
     """Decode a RAW/YUV file to a PNG/JPEG image."""
+    # 直接调用本函数（不走 main()）时也要有 UTF-8 stdout，避免打印中文路径崩溃
+    _make_utf8_stdio()
     if not os.path.isfile(input_path):
         logger.error("Input file not found: %s", input_path)
         print(f"Error: input file not found: {input_path}", file=sys.stderr)
@@ -350,6 +362,7 @@ def _run_view_decode(
 
 def _run_convert(args: argparse.Namespace) -> None:
     """Single-file encode and print all parameters."""
+    _make_utf8_stdio()
     if not args.input:
         logger.error("--input is required for convert mode")
         print("Error: --input is required for convert mode", file=sys.stderr)
@@ -434,6 +447,7 @@ def _run_convert(args: argparse.Namespace) -> None:
 
 def _run_batch(args: argparse.Namespace) -> None:
     """Batch encode/decode from a JSON file."""
+    _make_utf8_stdio()
     if args.batch_help:
         _show_batch_help()
 
