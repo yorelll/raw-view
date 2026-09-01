@@ -199,20 +199,21 @@ jobs:
             > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿。
 
             ### 🐛 修复
-            - 多帧切换失败：修复 double-offset（data 已按 effective_offset 切片，spec.offset 二次偏移）导致第 2 帧起
-              `data too short`；真实源 offset 改由 `source_offset` 传递，新增 5 帧回归测试。
-
-            ### 🆕 新功能 / 增强
-            1. **YOnly 多 bit**：`YOnly8`（1 字节/像素）+ `YOnly10/12/14/16`（16-bit 存储）；
-               **Alignment(lsb/msb) 控制有效位位置**，Endianness 可选大小端——语义与 RAW10/12/16 一致；
-               查看/转换/多变体/CLI 全链路支持。
-            2. **标签页关闭 X 按钮**：每个标签右侧显示关闭按钮，可拖入多文件也可点 X 关闭单个；与拖拽排序共存。
-            3. **控制面板分组折叠**：Alignment/Endianness/RAW preview/Bayer 收敛进可折叠 *RAW 高级参数* 组。
+            - **GUI 超大帧保护**：GUI 解码接入与 CLI/batch 一致的 512MB 单帧上限（`formats.require_decode_size`），
+              65535×65535 大帧不再 OOM/崩溃。
+            - **标签关闭/拖拽参数污染**：关闭或拖动标签页改为按对象身份（`_active_item_ref`）保存面板，
+              不再把未 Apply 参数写入相邻 item。
+            - **批量输出目录**：batch 尊重显式 `output_dir`/`output`，未显式时才放到输入文件同目录；
+              `--batch-help` 说明同步。
+            - **YOnly 多 bit 端序链路**：Convert/Batch 增加 Endianness 控件，多变体/自动命名全链路传递
+              big-endian（输出文件名与写盘字节一致）。
+            - **测试稳定性**：清除 `PYTHONIOENCODING` 对 CLI 测试的宿主环境干扰；CI translations 路径改为
+              Python 运行时查询（不再手工 Split-Path 推导）。
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
             - **单文件版**：下载 `raw-view.exe` 双击运行。
-            - 命令行示例：`raw-view.exe convert -i img.png --target YUV --yuv-type YOnly12 --width 2560 --height 1440 --alignment lsb`；`raw-view.exe --batch-help`。
+            - 命令行示例：`raw-view.exe convert -i img.png --target YUV --yuv-type YOnly12 --width 2560 --height 1440 --alignment lsb --endianness big`；`raw-view.exe --batch-help`。
             - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
             ### 功能总览
