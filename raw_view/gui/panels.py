@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -69,8 +70,16 @@ class ControlPanel(QWidget):
         "RAW16",
         "RAW32",
     ]
+    # YOnly 系列：4:0:0 全分辨率灰度。YOnly8 为 1 字节/像素（"YOnly" 是其别名）；
+    # YOnly10/12/14/16 为 16-bit 存储（2 字节/像素），由 Alignment(lsb/msb) +
+    # Endianness 决定有效位位置与大小端，语义与 RAW10/12/16 一致。
     YUV_FORMATS = [
         "YOnly",
+        "YOnly8",
+        "YOnly10",
+        "YOnly12",
+        "YOnly14",
+        "YOnly16",
         "I420",
         "YV12",
         "NV12",
@@ -82,6 +91,8 @@ class ControlPanel(QWidget):
         "NV16",
         "NV61",
     ]
+    # YOnly 多 bit（16-bit 存储）需要启用 Alignment/Endianness 控制。
+    _YONLY_16BIT = {"YOnly10", "YOnly12", "YOnly14", "YOnly16"}
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -204,10 +215,35 @@ class ControlPanel(QWidget):
 
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
-        form.addRow("Alignment", self.align_combo)
-        form.addRow("Endianness", self.endian_combo)
-        form.addRow("RAW preview", self.raw_preview_combo)
-        form.addRow("Bayer pattern", self.bayer_pattern_combo)
+
+        # ── 折叠组：RAW 高级参数（位对齐/大小端/预览/Bayer）────────────
+        # UI-2：高频用的是 Type/Format/Width/Height/Offset/Zoom；位对齐等仅在
+        # RAW（及 YOnly 多 bit）时有意义，收敛进一个可折叠组，减少面板占用。
+        # 用 QToolButton + 箭头指示展开/收起。
+        self.adv_btn = QToolButton()
+        self.adv_btn.setObjectName("advToggle")
+        self.adv_btn.setCheckable(True)
+        self.adv_btn.setChecked(True)
+        self.adv_btn.setArrowType(Qt.DownArrow)
+        self.adv_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.adv_btn.setText("RAW 高级参数")
+        self.adv_btn.setStyleSheet(
+            "QToolButton { border: none; text-align: left; font-weight: 600; padding: 2px; }"
+            "QToolButton:hover { color: #4A90D9; }"
+        )
+        adv_form = QFormLayout()
+        adv_form.setContentsMargins(0, 0, 0, 0)
+        adv_form.setVerticalSpacing(10)
+        adv_form.addRow("Alignment", self.align_combo)
+        adv_form.addRow("Endianness", self.endian_combo)
+        adv_form.addRow("RAW preview", self.raw_preview_combo)
+        adv_form.addRow("Bayer pattern", self.bayer_pattern_combo)
+        self.adv_container = QWidget()
+        self.adv_container.setLayout(adv_form)
+        form.addRow(self.adv_btn)
+        form.addRow(self.adv_container)
+        self.adv_btn.toggled.connect(self._on_adv_toggled)
+
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
@@ -248,6 +284,8 @@ class ControlPanel(QWidget):
             self.endian_combo, self.raw_preview_combo, self.bayer_pattern_combo,
         ):
             combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
+        # 切换 YUV 格式时，若为 YOnly 多 bit（16-bit 存储）则启用 Alignment/Endianness
+        self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
             spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
 
@@ -367,16 +405,26 @@ class ControlPanel(QWidget):
             self.bayer_pattern_combo.setEnabled(
                 self.raw_preview_combo.currentText().startswith("Bayer")
             )
+            if hasattr(self, "adv_btn"):
+                self.adv_btn.setChecked(True)
         elif image_type == "YUV":
-            self.align_combo.setEnabled(False)
-            self.endian_combo.setEnabled(False)
+            # YUV 默认禁用位对齐/大小端；YOnly 多 bit（16-bit 存储）除外——
+            # 它们的有效位位置（lsb/msb）与大小端由这几个控件控制。
+            is_yonly_16 = self.format_combo.currentText() in self._YONLY_16BIT
+            self.align_combo.setEnabled(is_yonly_16)
+            self.endian_combo.setEnabled(is_yonly_16)
             self.raw_preview_combo.setEnabled(False)
             self.bayer_pattern_combo.setEnabled(False)
+            if hasattr(self, "adv_btn"):
+                # 仅当 YOnly 多 bit 需要位控时才展开，否则收起
+                self.adv_btn.setChecked(is_yonly_16)
         else:
             self.align_combo.setEnabled(False)
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
             self.bayer_pattern_combo.setEnabled(False)
+            if hasattr(self, "adv_btn"):
+                self.adv_btn.setChecked(False)
 
     # ── internal slots ───────────────────────────────────────────────
 
@@ -424,9 +472,17 @@ class ControlPanel(QWidget):
             self.endian_combo.setEnabled(False)
             self.raw_preview_combo.setEnabled(False)
             self.bayer_pattern_combo.setEnabled(False)
+        # 类型联动折叠组：RAW 时自动展开（位对齐等有意义）；YUV/Standard 时收起
+        if hasattr(self, "adv_btn"):
+            self.adv_btn.setChecked(image_type == "RAW")
         self.typeChanged.emit(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:
         is_raw = self.type_combo.currentText() == "RAW"
         self.bayer_pattern_combo.setEnabled(is_raw and value.startswith("Bayer"))
         self.rawPreviewChanged.emit(value)
+
+    def _on_adv_toggled(self, checked: bool) -> None:
+        """展开/收起"RAW 高级参数"折叠组（箭头方向随状态变化）。"""
+        self.adv_container.setVisible(checked)
+        self.adv_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)

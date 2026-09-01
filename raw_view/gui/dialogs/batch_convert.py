@@ -381,7 +381,12 @@ class BatchConvertDialog(QDialog):
                             bayer_pattern=self.bayer_pattern.currentText(),
                         )
                     else:
-                        image_file_to_yuv(input_path, output_path, self.yuv_type.currentText(), out_w, out_h)
+                        image_file_to_yuv(
+                            input_path, output_path, self.yuv_type.currentText(),
+                            out_w, out_h,
+                            alignment=self.align.currentText(),
+                            endianness="little",
+                        )
 
                     self._file_table.item(row, 2).setText("OK")
                     success_count += 1

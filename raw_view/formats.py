@@ -45,9 +45,16 @@ RAW_BITS = {
 
 
 YUV_BYTES_PER_PIXEL = {
-    # YOnly = YUV 4:0:0 全分辨率灰度：每像素 1 字节，只含亮度（Y 平面），
-    # 无 U/V；对比度/灰度图按原样保存。无宽高必须为偶数的限制。
+    # YOnly 系列 = YUV 4:0:0 全分辨率灰度：只含亮度（Y 平面），无 U/V。
+    #   YOnly8     1 字节/像素（8-bit，无位对齐概念，别名 YOnly）
+    #   YOnly10/12/14/16  2 字节/像素（16-bit 存储，受 lsb/msb 位对齐与大小端控制）
+    # 无宽高必须为偶数的限制（任意正宽高均可）。
     "YOnly": 1.0,
+    "YOnly8": 1.0,
+    "YOnly10": 2.0,
+    "YOnly12": 2.0,
+    "YOnly14": 2.0,
+    "YOnly16": 2.0,
     "I420": 1.5,
     "YV12": 1.5,
     "NV12": 1.5,
@@ -58,6 +65,16 @@ YUV_BYTES_PER_PIXEL = {
     "VYUY": 2.0,
     "NV16": 2.0,
     "NV61": 2.0,
+}
+
+# YOnly 系列的位深度（16-bit 存储时的有效位；"YOnly" 是 YOnly8 的别名）。
+YUV_BITS = {
+    "YOnly": 8,
+    "YOnly8": 8,
+    "YOnly10": 10,
+    "YOnly12": 12,
+    "YOnly14": 14,
+    "YOnly16": 16,
 }
 
 # YUV 4:2:2 sub-formats (2.0 bytes/pixel, horizontal 2:1 chroma). Packed
@@ -99,17 +116,26 @@ def expected_frame_size_raw(raw_type: str, width: int, height: int) -> int:
     raise FormatError(f"unsupported RAW type: {raw_type}")
 
 
-def expected_frame_size_yuv(subformat: str, width: int, height: int) -> int:
+def expected_frame_size_yuv(
+    subformat: str,
+    width: int,
+    height: int,
+    alignment: Alignment = "msb",
+    endianness: Endianness = "little",
+) -> int:
     if subformat not in YUV_BYTES_PER_PIXEL:
         raise FormatError(f"unsupported YUV subformat: {subformat}")
-    if subformat == "YOnly":
-        # YUV 4:0:0 全分辨率灰度：无宽高偶数限制，任意正宽高均可。
-        return int(width * height * 1.0)
+    pixels = width * height
+    bits = YUV_BITS.get(subformat)
+    if bits is not None:
+        # YOnly 系列（4:0:0 灰度）：8-bit 1 字节/像素；10/12/14/16 用 16-bit 存储
+        # （2 字节/像素，alignment/endianness 决定位对齐与大小端）。任意正宽高。
+        return pixels if bits <= 8 else pixels * 2
     if subformat in {"I420", "YV12", "NV12", "NV21"} and (width % 2 or height % 2):
         raise FormatError(f"{subformat} requires even width/height")
     if subformat in (_YUV422_PACKED | _YUV422_SEMIPLANAR) and (width % 2):
         raise FormatError(f"{subformat} requires even width")
-    return int(width * height * YUV_BYTES_PER_PIXEL[subformat])
+    return int(pixels * YUV_BYTES_PER_PIXEL[subformat])
 
 
 def _slice_frame(data: bytes, spec: ImageSpec, frame_size: int) -> bytes:
@@ -228,15 +254,36 @@ def _yuv_to_rgb(y: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     return np.clip(np.round(rgb), 0, 255).astype(np.uint8)
 
 
-def decode_yuv(data: bytes, spec: ImageSpec, subformat: str) -> np.ndarray:
-    frame_size = expected_frame_size_yuv(subformat, spec.width, spec.height)
+def decode_yuv(
+    data: bytes,
+    spec: ImageSpec,
+    subformat: str,
+    alignment: Alignment = "msb",
+    endianness: Endianness = "little",
+) -> np.ndarray:
+    frame_size = expected_frame_size_yuv(
+        subformat, spec.width, spec.height, alignment=alignment, endianness=endianness
+    )
     frame = _slice_frame(data, spec, frame_size)
     w, h = spec.width, spec.height
     arr = np.frombuffer(frame, dtype=np.uint8)
 
-    if subformat == "YOnly":
-        # YUV 4:0:0：整帧就是一个全分辨率 Y 平面，灰度三通道复制。
-        y = arr[: w * h].reshape(h, w)
+    bits = YUV_BITS.get(subformat)
+    if bits is not None:
+        # YOnly 系列（4:0:0 全分辨率灰度）：整帧就是一个 Y 平面，灰度三通道复制。
+        # 8-bit 直接取字节；10/12/14/16 按 16-bit 存储读取，并受 lsb/msb 位对齐
+        # （有效位是低 N 位还是高 N 位）与大小端控制——与 RAW10/12/16 同构。
+        if bits <= 8:
+            y = arr[: w * h].reshape(h, w)
+        else:
+            raw16 = np.frombuffer(frame, dtype=_dtype_u16(endianness)).astype(np.uint16)
+            if alignment == "lsb":
+                raw16 = raw16 & ((1 << bits) - 1)
+            else:  # msb
+                raw16 = raw16 >> (16 - bits)
+            # 原生 N-bit 值归一化到 8-bit 显示（与 RAW 的 raw_to_display_gray 一致）
+            y = (raw16.astype(np.float32) / float((1 << bits) - 1) * 255.0)
+            y = np.clip(np.round(y), 0, 255).astype(np.uint8).reshape(h, w)
         return np.repeat(y[:, :, None], 3, axis=2)
 
     if subformat in {"I420", "YV12", "NV12", "NV21"}:
@@ -390,16 +437,30 @@ def gray8_to_raw_bytes(
     raise FormatError(f"unsupported RAW type: {raw_type}")
 
 
-def rgb_to_yuv_bytes(rgb: np.ndarray, subformat: str) -> bytes:
+def rgb_to_yuv_bytes(
+    rgb: np.ndarray,
+    subformat: str,
+    alignment: Alignment = "msb",
+    endianness: Endianness = "little",
+) -> bytes:
     r = rgb[:, :, 0].astype(np.float32)
     g = rgb[:, :, 1].astype(np.float32)
     b = rgb[:, :, 2].astype(np.float32)
     y = np.clip(np.round(0.299 * r + 0.587 * g + 0.114 * b), 0, 255).astype(np.uint8)
 
-    if subformat == "YOnly":
-        # YUV 4:0:0：只保留亮度平面（BT.601 灰度），输出 w*h 字节。
-        # 不采样色度，纯亮度逐像素直写，任意宽高均可。
-        return y.tobytes()
+    bits = YUV_BITS.get(subformat)
+    if bits is not None:
+        # YOnly 系列（4:0:0）：只保留亮度平面（BT.601 灰度），不采样色度。
+        # 8-bit 直接 1 字节/像素；10/12/14/16 转为 N-bit 后按 16-bit 存储
+        # （lsb=低 N 位有效 / msb=高 N 位有效 + 大小端），与 RAW10/12/16 同构。
+        if bits <= 8:
+            return y.tobytes()
+        vmax = (1 << bits) - 1
+        v = np.clip(np.round(y.astype(np.float64) / 255.0 * float(vmax)), 0, vmax)
+        v16 = v.astype(np.uint16)
+        if alignment == "msb":
+            v16 = v16 << (16 - bits)
+        return v16.astype(_dtype_u16(endianness)).tobytes()
 
     u = np.clip(np.round(-0.169 * r - 0.331 * g + 0.5 * b + 128.0), 0, 255).astype(np.uint8)
     v = np.clip(np.round(0.5 * r - 0.419 * g - 0.081 * b + 128.0), 0, 255).astype(np.uint8)

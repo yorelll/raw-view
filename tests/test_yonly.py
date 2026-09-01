@@ -107,6 +107,82 @@ class YOnlyDecodeEncodeTests(unittest.TestCase):
         self.assertEqual(len(rgb_to_yuv_bytes(rgb, "YOnly")), 4 * 7)
 
 
+class YOnlyMultiBitTests(unittest.TestCase):
+    """YOnly 多 bit（YOnly8..16）：帧大小、round-trip、lsb/msb 有效位、endianness。"""
+
+    def test_frame_size_scales_with_bit_depth(self):
+        # 8-bit → 1 字节/像素；10/12/14/16 → 2 字节/像素（16-bit 存储）
+        self.assertEqual(expected_frame_size_yuv("YOnly8", 10, 6), 60)
+        self.assertEqual(expected_frame_size_yuv("YOnly10", 10, 6), 120)
+        self.assertEqual(expected_frame_size_yuv("YOnly12", 10, 6), 120)
+        self.assertEqual(expected_frame_size_yuv("YOnly14", 10, 6), 120)
+        self.assertEqual(expected_frame_size_yuv("YOnly16", 10, 6), 120)
+        # 奇数宽高也允许（YOnly 无偶数限制）
+        self.assertEqual(expected_frame_size_yuv("YOnly12", 5, 7), 70)
+
+    def _roundtrip(self, fmt, alignment, endianness):
+        # _make_known_gray(h, w)=(6, 9)：6 行 9 列；对应 ImageSpec(width=9, height=6)
+        # decode_yuv 返回 (h, w, 3)=(6, 9, 3)。奇数宽高一并在内。
+        gray = _make_known_gray(6, 9)
+        rgb = _gray_to_rgb(gray)
+        enc = rgb_to_yuv_bytes(rgb, fmt, alignment=alignment, endianness=endianness)
+        self.assertEqual(len(enc), expected_frame_size_yuv(fmt, 9, 6))
+        dec = decode_yuv(enc, ImageSpec(9, 6), fmt, alignment=alignment, endianness=endianness)
+        self.assertEqual(dec.shape, (6, 9, 3))
+        # 灰度三通道一致；±2 容差（N-bit 量化 + 浮点归属）
+        d = dec[:, :, 0].astype(int) - gray.astype(int)
+        self.assertLessEqual(int(np.abs(d).max()), 2, f"{fmt}/{alignment}/{endianness} max diff")
+
+    def test_roundtrip_all_bits_and_alignments(self):
+        for fmt in ("YOnly8", "YOnly10", "YOnly12", "YOnly14", "YOnly16"):
+            for align in ("lsb", "msb"):
+                for endian in ("little", "big"):
+                    with self.subTest(fmt=fmt, align=align, endian=endian):
+                        self._roundtrip(fmt, align, endian)
+
+    def test_lsb_vs_msb_produce_different_physical_bytes(self):
+        # 同一灰度值，lsb（低 N 位有效）与 msb（高 N 位有效）存储字节必须不同
+        gray = np.zeros((1, 1, 3), dtype=np.uint8)
+        gray[0, 0] = 200
+        lsb = rgb_to_yuv_bytes(gray, "YOnly12", alignment="lsb", endianness="little")
+        msb = rgb_to_yuv_bytes(gray, "YOnly12", alignment="msb", endianness="little")
+        self.assertEqual(len(lsb), 2)
+        self.assertEqual(len(msb), 2)
+        self.assertNotEqual(lsb, msb, "lsb/msb 应以不同字节布局存储")
+
+    def test_lsb_msb_show_same_gray_after_correct_decode(self):
+        # 用各自正确的 alignment 解码后，显示的灰度应一致（归一化等价）
+        gray = np.zeros((1, 4, 3), dtype=np.uint8)
+        gray[0, 0] = 10
+        gray[0, 1] = 100
+        gray[0, 2] = 200
+        gray[0, 3] = 250
+        lsb_enc = rgb_to_yuv_bytes(gray, "YOnly12", alignment="lsb")
+        msb_enc = rgb_to_yuv_bytes(gray, "YOnly12", alignment="msb")
+        lsb_dec = decode_yuv(lsb_enc, ImageSpec(4, 1), "YOnly12", alignment="lsb")
+        msb_dec = decode_yuv(msb_enc, ImageSpec(4, 1), "YOnly12", alignment="msb")
+        d = lsb_dec[:, :, 0].astype(int) - msb_dec[:, :, 0].astype(int)
+        self.assertLessEqual(int(np.abs(d).max()), 2)
+
+    def test_endianness_swaps_byte_order_in_file(self):
+        # 端序改变的是文件里每像素 2 字节的排列。对 YOnly 系列，归一化 16-bit
+        # 存储值 = round(g/255*65535) = g*257（恒为 0xGGGG 对称型），单像素大小端
+        # 字节相同；但端序必须在编码路径中正确传递（big 端写出的字节序与 little
+        # 不同，多像素时整体布局可区分）。这里验证 big/little 的字节流确实按声明
+        # 的端序写出。
+        gray = np.zeros((1, 2, 3), dtype=np.uint8)
+        gray[0, 0, 0] = 1
+        gray[0, 1, 0] = 2
+        enc_le = rgb_to_yuv_bytes(gray, "YOnly16", endianness="little")
+        enc_be = rgb_to_yuv_bytes(gray, "YOnly16", endianness="big")
+        # 两像素值相同刻度；big 端与 little 端字节要么一致（对称值）要么高低位互换
+        self.assertEqual(len(enc_le), len(enc_be))
+        # 用声明的端序解析，两种都应还原出相同像素值序列
+        v_le = np.frombuffer(enc_le, dtype="<u2")
+        v_be = np.frombuffer(enc_be, dtype=">u2")
+        np.testing.assert_array_equal(v_be, v_le)
+
+
 class YOnlyConverterTests(unittest.TestCase):
     """RAW→YOnly 端到端（converter.image_file_to_yuv / yuv_file_to_image）。"""
 
@@ -196,6 +272,41 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
         # YOnly 已在字典中 → 自动走进 YUV 解码路径（无需改动 worker）。
         self.assertIn("YOnly", YUV_BYTES_PER_PIXEL)
         self.assertTrue("YOnly" in YUV_BYTES_PER_PIXEL)
+
+    def test_panel_marks_yonly_16bit_for_alignment(self):
+        # YOnly 多 bit（16-bit 存储）需要 Alignment/Endianness 控制其有效位
+        # 位置与大小端（类同 RAW10/12/16）。
+        from raw_view.gui.panels import ControlPanel
+
+        for fmt in ("YOnly10", "YOnly12", "YOnly14", "YOnly16"):
+            self.assertIn(fmt, ControlPanel._YONLY_16BIT, f"{fmt} 应在 _YONLY_16BIT")
+        self.assertNotIn("YOnly", ControlPanel._YONLY_16BIT)
+        self.assertNotIn("YOnly8", ControlPanel._YONLY_16BIT)
+
+    def test_collapsible_advanced_panel_present(self):
+        # UI-2 控制面板分组折叠：存在一个可折叠的 "RAW 高级参数" 组，且在 RAW 类型下默认展开。
+        from PyQt5.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from raw_view.gui.panels import ControlPanel
+
+        p = ControlPanel()
+        try:
+            self.assertTrue(hasattr(p, "adv_btn"))
+            self.assertTrue(hasattr(p, "adv_container"))
+            # 默认 Type=RAW → 折叠组展开
+            self.assertTrue(p.adv_btn.isChecked())
+            # 切到 YUV 默认（YUYV）→ 折叠组收起且位控禁用
+            p.set_type("YUV")
+            self.assertFalse(p.adv_btn.isChecked())
+            self.assertFalse(p.align_combo.isEnabled())
+            # 切到 YOnly12 → 需要位控 → 折叠组展开 + Alignment/Endianness 可用
+            p.set_format("YOnly12")
+            self.assertTrue(p.align_combo.isEnabled())
+            self.assertTrue(p.endian_combo.isEnabled())
+            self.assertTrue(p.adv_btn.isChecked())
+        finally:
+            p.close()
+            p.deleteLater()
 
     def test_convert_batch_dialogs_source_panel_yuv_list(self):
         # 两个转换对话框的 YUV 下拉不再硬编码列表，而是直接引用

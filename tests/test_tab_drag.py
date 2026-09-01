@@ -173,11 +173,18 @@ class SetMovableWiringTests(unittest.TestCase):
             w.close()
             w.deleteLater()
 
-    def test_tab_close_button_not_always_shown(self):
-        """关闭按钮不长期显示，避免占用名称区域影响拖动（点击名称区域拖动）。"""
+    def test_tab_close_button_shown(self):
+        """每个标签右侧显示关闭 X 按钮（用户可拖入，也可点击 X 关闭单个标签页）。
+
+        Qt 5.15 会把"点 X"与"按住标签主体拖动"区分开，关闭按钮与拖拽排序可共存。
+        """
         w = MainWindow()
         try:
-            self.assertFalse(w.item_tabs.tabBar().tabsClosable())
+            self.assertTrue(w.item_tabs.tabsClosable())
+            self.assertTrue(w.item_tabs.tabBar().tabsClosable())
+            # 关闭请求仍接到 close_item（点击 X 会触发 close 信号）
+            # 通过信号连接数间接验证：tabCloseRequested 有连接即可。
+            self.assertTrue(w.item_tabs.receivers(w.item_tabs.tabCloseRequested) > 0)
         finally:
             w.close()
             w.deleteLater()

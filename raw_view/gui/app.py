@@ -307,15 +307,14 @@ class MainWindow(QMainWindow):
 
         # Tab widget
         self.item_tabs = QTabWidget()
+        # 每个标签右侧显示关闭 X 按钮（点击关闭）——用户既可拖入文件，也可直接
+        # 点 X 关闭单个标签页。Qt 5.15 会把"点 X"与"按住标签主体拖动"区分开：
+        # 拖动从标签名称区域按下、X 按钮独立可点，二者可共存。
         self.item_tabs.setTabsClosable(True)
         # 允许通过点击标签名称并左右拖动来调整标签页顺序（5.15 原生支持）。
         # QTabWidget 移动标签后不会自动同步 ``self.items``，由 tabBar.tabMoved
         # 信号（见 :meth:`_on_tab_moved`）负责把 items 重排成与视觉顺序一致。
         self.item_tabs.setMovable(True)
-        # 关闭"悬停时显示关闭按钮"。默认每个标签悬停都会画一个关闭按钮，
-        # 点住该区域再拖动会被识别成"关闭"，影响拖拽排序；关闭可拖动标签页仍
-        # 可用（右键菜单 / Ctrl+W / close_item）。requirement：点击名称区域拖动。
-        self.item_tabs.tabBar().setTabsClosable(False)
         self.item_tabs.tabCloseRequested.connect(self.close_item)
         self.item_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
         self.item_tabs.currentChanged.connect(self._on_tab_changed)
@@ -689,7 +688,11 @@ class MainWindow(QMainWindow):
             ):
                 return expected_frame_size_raw(opts.format_name, opts.width, opts.height)
             else:
-                return expected_frame_size_yuv(opts.format_name, opts.width, opts.height)
+                # alignment/endianness 对 YOnly 多 bit（16-bit 存储）决定帧大小。
+                return expected_frame_size_yuv(
+                    opts.format_name, opts.width, opts.height,
+                    alignment=opts.alignment, endianness=opts.endianness,
+                )
         except Exception:
             return 0
 
@@ -1075,7 +1078,10 @@ class MainWindow(QMainWindow):
                 "RAW10 Packed", "RAW12 Packed", "RAW14 Packed",
             ):
                 return expected_frame_size_raw(opts.format_name, width, height)
-            return expected_frame_size_yuv(opts.format_name, width, height)
+            return expected_frame_size_yuv(
+                opts.format_name, width, height,
+                alignment=opts.alignment, endianness=opts.endianness,
+            )
         except Exception:
             return -1
 
@@ -1174,7 +1180,15 @@ class MainWindow(QMainWindow):
         preview_mode = opts.preview_mode
         bayer_pattern = opts.bayer_pattern
 
-        spec = ImageSpec(opts.width, opts.height, effective_offset)
+        # IMPORTANT: `data` is already the single frame extracted at
+        # `effective_offset` (decode_current -> _read_frame_data seeks to that
+        # offset and reads frame_size bytes). The decode spec must therefore use
+        # offset=0 — otherwise decode_raw's _slice_frame would offset into an
+        # already-sliced buffer a second time, making every frame after the
+        # first report "data too short: need 2x bytes" (regression from the H-2
+        # seek-read optimisation). The real source offset is remembered only
+        # for error messages via `source_offset`.
+        spec = ImageSpec(opts.width, opts.height, 0)
 
         self._thread = QThread()
         self._worker = DecodeWorker()
@@ -1190,6 +1204,7 @@ class MainWindow(QMainWindow):
             generation=self._decode_generation,
             file_path=opts.file_path,
             frame_index=item.current_frame,
+            source_offset=effective_offset,
         )
 
         # Lifecycle: when THIS worker finishes/errors, quit its thread's event

@@ -158,13 +158,18 @@ def image_file_to_yuv(
     subformat: str,
     out_width: int,
     out_height: int,
+    alignment: str = "msb",
+    endianness: str = "little",
 ) -> int:
     bgr = load_bgr_image(input_path)
     src_h, src_w = bgr.shape[:2]
     if (src_w, src_h) != (out_width, out_height):
         bgr = cv2.resize(bgr, (out_width, out_height), interpolation=cv2.INTER_LINEAR)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    yuv_bytes = rgb_to_yuv_bytes(rgb, subformat)
+    # alignment/endianness 对 YOnly 多 bit（16-bit 存储）有效，其余 YUV 忽略。
+    yuv_bytes = rgb_to_yuv_bytes(
+        rgb, subformat, alignment=alignment, endianness=endianness
+    )
     with open(output_path, "wb") as f:
         f.write(yuv_bytes)
     return len(yuv_bytes)
@@ -357,16 +362,20 @@ def yuv_file_to_image(
     width: int,
     height: int,
     offset: int = 0,
+    alignment: str = "msb",
+    endianness: str = "little",
 ) -> int:
     """Decode a YUV file and save as PNG/JPEG."""
     logger.debug(
         "yuv_file_to_image: %s -> %s (%s, %dx%d, offset=%d)",
         input_path, output_path, subformat, width, height, offset,
     )
-    frame_size = expected_frame_size_yuv(subformat, width, height)
+    frame_size = expected_frame_size_yuv(
+        subformat, width, height, alignment=alignment, endianness=endianness
+    )
     data = _read_frame(input_path, width, height, frame_size, offset)
     spec = ImageSpec(width, height, 0)  # offset 已在 _read_frame 里 seek 消费
-    rgb = decode_yuv(data, spec, subformat)
+    rgb = decode_yuv(data, spec, subformat, alignment=alignment, endianness=endianness)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     cv2.imwrite(output_path, bgr)
     size = os.path.getsize(output_path)

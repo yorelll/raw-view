@@ -62,6 +62,9 @@ class DecodeWorker(QObject):
         # can build a precise "which file / which frame" message on failure.
         self._file_path: str = ""
         self._frame_index: int = 0
+        # The real byte offset of this frame in the file. `spec.offset` is 0
+        # because `data` is already the sliced frame; keep this for messages.
+        self._source_offset: int = 0
 
     def configure(
         self,
@@ -75,6 +78,7 @@ class DecodeWorker(QObject):
         generation: int = 0,
         file_path: str = "",
         frame_index: int = 0,
+        source_offset: int = 0,
     ) -> None:
         """Set decode parameters before starting the thread."""
         self._data = data
@@ -87,6 +91,7 @@ class DecodeWorker(QObject):
         self._generation = generation
         self._file_path = file_path
         self._frame_index = frame_index
+        self._source_offset = source_offset
 
     def _describe_source(self) -> str:
         """Human-readable "which file / which frame" prefix for error messages."""
@@ -95,7 +100,7 @@ class DecodeWorker(QObject):
             detail = (
                 f"{name} frame {self._frame_index} "
                 f"(format={self._format_name}, {self._spec.width}x{self._spec.height}, "
-                f"offset={self._spec.offset})"
+                f"offset={self._source_offset})"
             )
         else:
             detail = f"{name} frame {self._frame_index}"
@@ -119,7 +124,15 @@ class DecodeWorker(QObject):
                     "Worker decoding YUV: %s, %dx%d, offset=%d",
                     self._format_name, self._spec.width, self._spec.height, self._spec.offset,
                 )
-                rgb = decode_yuv(self._data, self._spec, self._format_name)
+                # alignment/endianness 只对 YOnly 多 bit（10/12/14/16，16-bit 存储）
+                # 有效；其余 YUV 格式忽略这两个参数（decode_yuv 保持向后兼容）。
+                rgb = decode_yuv(
+                    self._data,
+                    self._spec,
+                    self._format_name,
+                    alignment=self._alignment,
+                    endianness=self._endianness,
+                )
                 h, w = rgb.shape[:2]
                 qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
                 result = DecodeResult(rgb, qimg, w, h, self._format_name)

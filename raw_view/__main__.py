@@ -226,14 +226,18 @@ def _require_decode_size(width: int, height: int, frame_size: int) -> None:
         )
 
 
-def _check_decode_args_for(type_name: str, width: int, height: int) -> None:
+def _check_decode_args_for(
+    type_name: str, width: int, height: int, alignment: str = "msb", endianness: str = "little"
+) -> None:
     """根据 target/raw/yuv 类型计算单帧字节并做上限校验（CLI 入口统一走这里）。"""
     from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 
     if type_name.startswith("RAW"):
         frame_size = expected_frame_size_raw(type_name, width, height)
     else:
-        frame_size = expected_frame_size_yuv(type_name, width, height)
+        frame_size = expected_frame_size_yuv(
+            type_name, width, height, alignment=alignment, endianness=endianness
+        )
     _require_decode_size(width, height, frame_size)
 
 
@@ -290,7 +294,10 @@ def _run_view_decode(
 
     # 解码前上限校验：单帧字节超过 512MB 直接拒绝
     try:
-        _check_decode_args_for(raw_type if target == "RAW" else yuv_type, width, height)
+        _check_decode_args_for(
+            raw_type if target == "RAW" else yuv_type, width, height,
+            alignment=alignment, endianness=endianness,
+        )
     except FormatError as exc:
         logger.error("Decode rejected: %s", exc)
         print(f"Error: {exc}", file=sys.stderr)
@@ -349,6 +356,7 @@ def _run_view_decode(
             size = yuv_file_to_image(
                 input_path, output_path, yuv_type, width, height,
                 offset=offset,
+                alignment=alignment, endianness=endianness,
             )
         logger.info("View decode OK: %s -> %s (%d bytes)", input_path, output_path, size)
         print(f"Decoded: {input_path} -> {output_path} ({size} bytes)")
@@ -377,6 +385,7 @@ def _run_convert(args: argparse.Namespace) -> None:
         _check_decode_args_for(
             args.raw_type if args.target == "RAW" else args.yuv_type,
             args.width, args.height,
+            alignment=args.alignment, endianness=args.endianness,
         )
     except FormatError as exc:
         logger.error("Convert rejected: %s", exc)
@@ -434,6 +443,7 @@ def _run_convert(args: argparse.Namespace) -> None:
             size = image_file_to_yuv(
                 args.input, output_path,
                 args.yuv_type, args.width, args.height,
+                alignment=args.alignment, endianness=args.endianness,
             )
         logger.info("Convert OK: %s -> %s (%d bytes)", args.input, output_path, size)
         print(f"Converted: {args.input} -> {output_path} ({size} bytes)")
@@ -517,7 +527,11 @@ def _run_batch(args: argparse.Namespace) -> None:
         if mode == "view":
             view_type = params["raw_type"] if target == "RAW" else params["yuv_type"]
             try:
-                _check_decode_args_for(view_type, width, height)
+                _check_decode_args_for(
+                    view_type, width, height,
+                    alignment=params.get("alignment", "msb"),
+                    endianness=params.get("endianness", "little"),
+                )
             except FormatError as exc:
                 print(f"  FAIL: {input_path} -> {exc}")
                 failed += 1
@@ -562,6 +576,8 @@ def _run_batch(args: argparse.Namespace) -> None:
                     size = image_file_to_yuv(
                         input_path, output_path,
                         params["yuv_type"], width, height,
+                        alignment=params["alignment"],
+                        endianness=params["endianness"],
                     )
             else:  # view mode
                 is_raw = target == "RAW"
@@ -580,6 +596,8 @@ def _run_batch(args: argparse.Namespace) -> None:
                         input_path, output_path,
                         params["yuv_type"], width, height,
                         offset=params["offset"],
+                        alignment=params["alignment"],
+                        endianness=params["endianness"],
                     )
             logger.info("Batch OK: %s -> %s (%d bytes)", input_path, output_path, size)
             print(f"  OK: {input_path} -> {output_path} ({size} bytes)")

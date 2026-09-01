@@ -374,7 +374,12 @@ class ConvertDialog(QDialog):
             else:
                 fmt = self.yuv_type.currentText()
                 try:
-                    fsize = expected_frame_size_yuv(fmt, out_w, out_h)
+                    # alignment/endianness 对 YOnly 多 bit 决定 16-bit 存储帧大小
+                    fsize = expected_frame_size_yuv(
+                        fmt, out_w, out_h,
+                        alignment=self.align.currentText(),
+                        endianness="little",  # 预览仅估算大小，端序不影响字节数
+                    )
                 except Exception:
                     fsize = 0
 
@@ -442,6 +447,8 @@ class ConvertDialog(QDialog):
                     self.yuv_type.currentText(),
                     self.width.value(),
                     self.height.value(),
+                    alignment=self.align.currentText(),
+                    endianness="little",
                 )
             self.output_edit.setText(output_path)
             try:

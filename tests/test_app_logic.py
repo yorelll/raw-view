@@ -28,6 +28,8 @@ from dataclasses import asdict
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtWidgets import QApplication  # noqa: E402
@@ -376,10 +378,13 @@ class ErrorContextTests(unittest.TestCase):
         from raw_view.formats import ImageSpec
 
         worker._data = b"\x00" * 4
-        worker._spec = ImageSpec(2, 2, offset=8)
+        # spec.offset 固定为 0（data 已是按 source offset 切出的帧）；
+        # 真实文件内 offset 独立记在 _source_offset 供错误信息定位。
+        worker._spec = ImageSpec(2, 2, offset=0)
         worker._format_name = "RAW8"
         worker._file_path = os.path.join("d", "sensor", "cap.bin")
         worker._frame_index = 2
+        worker._source_offset = 8
         text = worker._describe_source()
         self.assertIn("cap.bin", text)
         self.assertIn("frame 2", text)
@@ -517,6 +522,85 @@ class ViewerItemFieldTests(unittest.TestCase):
     def test_rotation_angle_removed(self):
         item = ViewerItem()
         self.assertFalse(hasattr(item, "rotation_angle"))
+
+
+# ── 多帧回归：data 已按 effective_offset 切片，spec.offset 必须为 0 ───────
+
+
+class MultiFrameOffsetRegressionTests(unittest.TestCase):
+    """Regression for the double-offset bug where frame 1+ reported
+    "data too short: need 2x bytes" (H-2 seek-read optimisation sliced the
+    frame at effective_offset, but the decode spec still used that offset,
+    slicing an already-sliced buffer a second time).
+    """
+
+    def _worker_decode(self, data, width, height, offset, format_name="RAW12", frame_index=0):
+        """Run a DecodeWorker synchronously (bypassing QThread) and return result/error."""
+        from PyQt5.QtCore import QCoreApplication
+        app = QCoreApplication.instance() or QCoreApplication([])
+        from raw_view.gui.worker import DecodeWorker
+        from raw_view.formats import ImageSpec
+
+        outcome = {}
+        worker = DecodeWorker()
+
+        def on_finish(_gen, res):
+            outcome["ok"] = res
+
+        def on_error(_gen, msg):
+            outcome["err"] = msg
+
+        worker.finished.connect(on_finish)
+        worker.error.connect(on_error)
+        # 修复后的调用契约：data 是已按 offset 读出的单帧，spec.offset 必须为 0
+        worker.configure(
+            data, ImageSpec(width, height, 0), format_name,
+            alignment="msb", endianness="little", preview_mode="Grayscale",
+            generation=1, file_path="cap.bin", frame_index=frame_index,
+            source_offset=offset,
+        )
+        worker.run()
+        return outcome
+
+    def test_multi_frame_all_frames_decode(self):
+        # 用户场景：256x36 RAW12，一帧 18432，5 帧 → 92160 字节
+        import tempfile
+        w, h, frames = 256, 36, 5
+        frame_size = w * h * 2
+        fd, path = tempfile.mkstemp(suffix=".raw")
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                for fi in range(frames):
+                    frame = (np.arange(w * h, dtype=np.uint16).reshape(h, w) * (fi + 1)) & 0x0FFF
+                    frame.astype("<u2").tofile(f)
+            for fi in range(frames):
+                offset = fi * frame_size
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    data = f.read(frame_size)
+                outcome = self._worker_decode(data, w, h, offset, frame_index=fi)
+                self.assertNotIn("err", outcome, f"frame {fi} failed: {outcome.get('err')}")
+                self.assertEqual(outcome["ok"].width, w)
+                self.assertEqual(outcome["ok"].height, h)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def test_worker_describe_source_shows_real_offset(self):
+        # 错误消息应显示真实源 offset（即使 spec.offset=0）
+        from raw_view.formats import ImageSpec
+        from raw_view.gui.worker import DecodeWorker
+
+        worker = DecodeWorker()
+        worker.configure(b"", ImageSpec(4, 4, 0), "RAW12",
+                         generation=1, file_path="/tmp/cap.bin",
+                         frame_index=3, source_offset=6144)
+        desc = worker._describe_source()
+        self.assertIn("frame 3", desc)
+        self.assertIn("offset=6144", desc)
 
 
 if __name__ == "__main__":
