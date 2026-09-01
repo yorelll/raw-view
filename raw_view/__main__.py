@@ -149,7 +149,8 @@ def _show_batch_help() -> None:
   "bayer_pattern": "RGGB",
   "preview_mode": "Bayer Color",  // only for mode="view"
   "offset": 0,
-  "output_dir": null,             // optional; defaults to convert_out/ or view_out/
+  "output_dir": null,             // optional. 若指定（全局或单条）则输出到该目录；
+                                  // 未指定且未给 "output" 时，自动输出放到输入文件同目录。
 
   "files": [
     {
@@ -207,29 +208,15 @@ def _default_out_dir(mode: str) -> str:
 
 # ── 解码尺寸上限保护 ─────────────────────────────────────────────────
 
-MAX_DECODE_BYTES = 512 * 1024 * 1024  # 单帧解码字节上限：512 MB
-
-
-def _require_decode_size(width: int, height: int, frame_size: int) -> None:
-    """解码前校验帧大小，防超大宽高导致内存/堆栈崩溃。
-
-    计算 *一帧* 的字节数与上限比较，超过即抛 ``FormatError``。
-    """
-    if width <= 0 or height <= 0:
-        raise FormatError(f"invalid dimensions: {width}x{height}")
-    if width * height <= 0:
-        raise FormatError(f"overflow: {width}x{height}")
-    if frame_size > MAX_DECODE_BYTES:
-        raise FormatError(
-            f"frame too large: {frame_size} bytes ({width}x{height}) "
-            f"exceeds the {MAX_DECODE_BYTES}-byte decode limit"
-        )
-
-
 def _check_decode_args_for(
     type_name: str, width: int, height: int, alignment: str = "msb", endianness: str = "little"
 ) -> None:
-    """根据 target/raw/yuv 类型计算单帧字节并做上限校验（CLI 入口统一走这里）。"""
+    """根据 target/raw/yuv 类型计算单帧字节并做上限校验（CLI 入口统一走这里）。
+
+    复用 ``formats.require_decode_size``（MAX_DECODE_BYTES = 512MB）保证
+    GUI / CLI / batch 共用同一上限。
+    """
+    from raw_view.formats import require_decode_size
     from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 
     if type_name.startswith("RAW"):
@@ -238,7 +225,7 @@ def _check_decode_args_for(
         frame_size = expected_frame_size_yuv(
             type_name, width, height, alignment=alignment, endianness=endianness
         )
-    _require_decode_size(width, height, frame_size)
+    require_decode_size(width, height, frame_size)
 
 
 # ── View mode (CLI decode + GUI fallback) ─────────────────────────────
@@ -555,8 +542,15 @@ def _run_batch(args: argparse.Namespace) -> None:
                 alignment=params.get("alignment", ""),
                 endianness=params.get("endianness", ""),
             )
-            # Place next to input when no explicit output dir was set
-            if not entry.get("output"):
+            # 未显式指定 output_dir（JSON 全局/entry 均未给）且无显式 output 时，
+            # 保持旧行为：把自动输出放到输入文件同目录。一旦用户显式给了
+            # output_dir 或 output，就尊重它，绝不覆盖（0.2.1 review M-2）。
+            has_explicit_dir = (
+                entry.get("output_dir") is not None
+                or spec.get("output_dir") is not None
+                or entry.get("output")  # 已由上方分支覆盖，这里不会命中 output
+            )
+            if not has_explicit_dir:
                 output_path = str(Path(input_path).parent / Path(output_path).name)
 
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)

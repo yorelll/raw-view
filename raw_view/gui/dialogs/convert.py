@@ -87,6 +87,11 @@ class ConvertDialog(QDialog):
         self.align = QComboBox()
         self.align.addItems(["msb", "lsb"])
 
+        # Endianness：RAW 与 YOnly 多 bit（16-bit 存储）可选用大小端；
+        # 普通 YUV 无意义（_sync_controls 禁用）。
+        self.endian = QComboBox()
+        self.endian.addItems(["little", "big"])
+
         self.raw_source_mode = QComboBox()
         self.raw_source_mode.addItems(["bayer", "gray"])
 
@@ -178,6 +183,7 @@ class ConvertDialog(QDialog):
         form.addRow("RAW type", self.raw_type)
         form.addRow("YUV format", self.yuv_type)
         form.addRow("Alignment", self.align)
+        form.addRow("Endianness", self.endian)
         form.addRow("RAW source", self.raw_source_mode)
         form.addRow("Bayer pattern", self.bayer_pattern)
         form.addRow("Width", self.width)
@@ -298,8 +304,12 @@ class ConvertDialog(QDialog):
     def _sync_controls(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
+        # YOnly 多 bit（16-bit 存储）与 RAW 一样需要 Alignment/Endianness
+        yuv_fmt = self.yuv_type.currentText()
+        is_yonly_16 = yuv_fmt in ControlPanel._YONLY_16BIT
         self.raw_type.setEnabled(is_raw)
-        self.align.setEnabled(is_raw)
+        self.align.setEnabled(is_raw or is_yonly_16)
+        self.endian.setEnabled(is_raw or is_yonly_16)
         self.raw_source_mode.setEnabled(is_raw)
         self.bayer_pattern.setEnabled(is_raw and is_bayer)
         self.yuv_type.setEnabled(not is_raw)
@@ -323,6 +333,7 @@ class ConvertDialog(QDialog):
             bayer_pattern=self.bayer_pattern.currentText(),
             source_mode=self.raw_source_mode.currentText(),
             alignment=self.align.currentText(),
+            endianness=self.endian.currentText(),
         )
         current = self.output_edit.text().strip()
         if path and (not current or current == self._auto_output_path):
@@ -422,6 +433,7 @@ class ConvertDialog(QDialog):
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
                 )
             if not input_path:
                 raise ValueError("input path is required")
@@ -437,6 +449,7 @@ class ConvertDialog(QDialog):
                     self.width.value(),
                     self.height.value(),
                     alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     bayer_pattern=self.bayer_pattern.currentText(),
                 )
@@ -448,7 +461,7 @@ class ConvertDialog(QDialog):
                     self.width.value(),
                     self.height.value(),
                     alignment=self.align.currentText(),
-                    endianness="little",
+                    endianness=self.endian.currentText(),
                 )
             self.output_edit.setText(output_path)
             try:
@@ -482,9 +495,10 @@ class ConvertDialog(QDialog):
             return
         source_mode = self.raw_source_mode.currentText()
         alignment = self.align.currentText()
+        endianness = self.endian.currentText()
         plans = plan_image_variants(
             input_path, formats, sizes, bayer,
-            source_mode=source_mode, alignment=alignment,
+            source_mode=source_mode, alignment=alignment, endianness=endianness,
             output_dir=self._settings.default_output_dirname,
             template=self._settings.output_template,
         )
@@ -503,7 +517,7 @@ class ConvertDialog(QDialog):
         try:
             written = generate_image_variants(
                 input_path, formats, sizes, bayer,
-                source_mode=source_mode, alignment=alignment,
+                source_mode=source_mode, alignment=alignment, endianness=endianness,
                 output_dir=self._settings.default_output_dirname,
                 template=self._settings.output_template,
                 on_output=_progress,

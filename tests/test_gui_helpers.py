@@ -138,20 +138,24 @@ class CLIFixTests(unittest.TestCase):
             def flush(self):
                 pass
 
-        old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
-        narrow_in, narrow_out, narrow_err = _Narrow(), _Narrow(), _Narrow()
-        sys.stdin, sys.stdout, sys.stderr = narrow_in, narrow_out, narrow_err
-        try:
-            _make_utf8_stdio()  # must redirect stdin/stdout/stderr to UTF-8
-            self.assertEqual(narrow_in.encoding, "utf-8")
-            self.assertEqual(narrow_out.encoding, "utf-8")
-            self.assertEqual(narrow_err.encoding, "utf-8")
-            # The Unicode arrows that crashed CI now encode cleanly.
-            narrow_out.write("─◀ → OK\n")
-            narrow_out.write("format → {input_stem}\n")
-            narrow_out.flush()
-        finally:
-            sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+        # 0.2.1-L-1：宿主环境若注入 PYTHONIOENCODING=utf-8，_make_utf8_stdio 会
+        # 按产品契约直接返回（“已显式配置 UTF-8 → 不重配”），使本测试的 stand-in
+        # 转换断言失去前提。这里显式清空该变量，保证测试不随宿主环境漂移。
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": ""}, clear=False):
+            old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+            narrow_in, narrow_out, narrow_err = _Narrow(), _Narrow(), _Narrow()
+            sys.stdin, sys.stdout, sys.stderr = narrow_in, narrow_out, narrow_err
+            try:
+                _make_utf8_stdio()  # must redirect stdin/stdout/stderr to UTF-8
+                self.assertEqual(narrow_in.encoding, "utf-8")
+                self.assertEqual(narrow_out.encoding, "utf-8")
+                self.assertEqual(narrow_err.encoding, "utf-8")
+                # The Unicode arrows that crashed CI now encode cleanly.
+                narrow_out.write("─◀ → OK\n")
+                narrow_out.write("format → {input_stem}\n")
+                narrow_out.flush()
+            finally:
+                sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
 
     def test_command_does_not_crash_as_module_subprocess(self):
         """Full end-to-end: ``python -m raw_view --batch-help`` exits 0."""

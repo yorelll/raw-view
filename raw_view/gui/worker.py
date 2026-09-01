@@ -173,6 +173,11 @@ class DecodeWorker(QObject):
                     ).copy()
                     result = DecodeResult(raw8, qimg, w, h, self._format_name)
 
+            # 注意：这里**不能**因 cancel 而 suppress finished/error——主窗口的
+            # 线程清理（thread.quit() / deleteLater）就连接在这两个信号上，
+            # 取消后不发信号会让旧 QThread/worker 永久泄漏（0.1.1-M-1 复查发现）。
+            # 真正的"过期结果丢弃"已由主线程 generation check（_should_apply_decode）
+            # 完成；cancel() 仅作可选中断标记，不影响信号发射。
             logger.debug("Worker decode finished successfully")
             self.finished.emit(self._generation, result)
         except Exception as exc:

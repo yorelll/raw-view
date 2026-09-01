@@ -186,6 +186,7 @@ def plan_image_variants(
     *,
     source_mode: str = "bayer",
     alignment: str = "msb",
+    endianness: str = "little",
     output_dir: str | None = None,
     template: str | None = None,
 ) -> list[dict]:
@@ -225,6 +226,7 @@ def plan_image_variants(
                     bayer_pattern=pat,
                     source_mode=source_mode,
                     alignment=alignment,
+                    endianness=endianness,
                 )
                 plans.append({
                     "target_type": target_type,
@@ -262,6 +264,7 @@ def generate_image_variants(
         bayer_patterns,
         source_mode=source_mode,
         alignment=alignment,
+        endianness=endianness,
         output_dir=output_dir,
         template=template,
     )
@@ -282,7 +285,12 @@ def generate_image_variants(
                 bayer_pattern=plan["bayer"] or "RGGB",
             )
         else:
-            image_file_to_yuv(input_path, out, plan["format"], plan["width"], plan["height"])
+            # 0.2.1-M-3：YUV 分支必须把 endianness（对 YOnly 多 bit 有效）传下去，
+            # 否则调用者请求 big endian 会按默认 little 写盘。
+            image_file_to_yuv(
+                input_path, out, plan["format"], plan["width"], plan["height"],
+                alignment=alignment, endianness=endianness,
+            )
         written.append(out)
         if on_output is not None:
             on_output(out)

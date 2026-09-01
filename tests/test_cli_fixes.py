@@ -140,16 +140,17 @@ class DecodeLimitTests(unittest.TestCase):
     # —— 纯函数级（快且稳）——
 
     def test_require_decode_size_rejects_oversize(self):
-        from raw_view.__main__ import MAX_DECODE_BYTES, _require_decode_size
-        from raw_view.formats import FormatError
+        # require_decode_size / MAX_DECODE_BYTES 已上移到 formats 公共层，
+        # GUI / CLI / batch 共用同一上限（见 review 0.1.1-H-1 / 0.2.1-H-1）。
+        from raw_view.formats import MAX_DECODE_BYTES, FormatError, require_decode_size
 
         with self.assertRaises(FormatError) as ctx:
-            _require_decode_size(32768, 8192, 1024 * 1024 * 1024)
+            require_decode_size(32768, 8192, 1024 * 1024 * 1024)
         self.assertIn("too large", str(ctx.exception))
         with self.assertRaises(FormatError):
-            _require_decode_size(32768, 8192, MAX_DECODE_BYTES + 1)
+            require_decode_size(32768, 8192, MAX_DECODE_BYTES + 1)
         # 正常尺寸通过
-        _require_decode_size(4096, 2160, MAX_DECODE_BYTES)
+        require_decode_size(4096, 2160, MAX_DECODE_BYTES)
 
     def test_check_decode_args_raw_and_yuv(self):
         from raw_view.__main__ import _check_decode_args_for

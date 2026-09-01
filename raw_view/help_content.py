@@ -23,7 +23,9 @@ HELP_HTML = """
 <p>Layout: Y(8 bytes) + U(2 bytes) + V(2 bytes). Each U/V sample covers one 2x2 luma block.</p>
 <h3>YUV Subformats</h3>
 <ul>
-<li>400 (YOnly): full-resolution grayscale, 1 byte/pixel, no chroma (any width/height)</li>
+<li>400 (YOnly): full-resolution grayscale, no chroma (any width/height)
+    — YOnly8 = 1 byte/pixel; YOnly10/12/14/16 = 16-bit storage (2 bytes/pixel,
+    LSB/MSB alignment + little/big endian, same semantics as RAW10/12/16).</li>
 <li>420: I420, YV12, NV12, NV21</li>
 <li>422: YUYV, UYVY, YVYU, VYUY, NV16, NV61</li>
 </ul>
@@ -37,7 +39,7 @@ HELP_HTML = """
 <h3>Productivity</h3>
 <ul>
 <li>Support dragging files into the main window to open quickly.</li>
-<li>Conversion input supports drag-and-drop, and output defaults to an <code>out</code> folder beside input file.</li>
+<li>Conversion input supports drag-and-drop; output defaults to the folder configured in <b>Settings</b> (默认 <code>convert_out</code>，可自定义).</li>
 <li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
 </ul>
 """

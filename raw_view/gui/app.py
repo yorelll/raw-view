@@ -32,9 +32,11 @@ from PyQt5.QtWidgets import (
 
 from raw_view.converter import load_bgr_image
 from raw_view.formats import (
+    FormatError,
     ImageSpec,
     expected_frame_size_raw,
     expected_frame_size_yuv,
+    require_decode_size,
 )
 from raw_view.logger import get_logger
 from raw_view.models import (
@@ -260,6 +262,9 @@ class MainWindow(QMainWindow):
         self.settings = AppSettings()
         self.items: list[ViewerItem] = []
         self._active_item_index = -1
+        # 对象身份引用：结构变更（拖拽/关闭）后用 `it is ref` 定位真实当前
+        # item，避免位置索引在 items 重排后指向邻居（0.2.1-M-1）。
+        self._active_item_ref: ViewerItem | None = None
         self._loading_item = False
         self._thread: QThread | None = None
         self._worker: DecodeWorker | None = None
@@ -871,9 +876,14 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if self._loading_item:
             return
-        if 0 <= self._active_item_index < len(self.items):
-            self._save_panel_to_item(self.items[self._active_item_index])
+        # 保存面板到"上一焦点 item 对象"（对象身份），而不是按位置索引——
+        # 否则标签被拖动/关闭后，旧 `_active_item_index` 会指向邻居 item，
+        # 把未 Apply 参数写错对象（0.2.1 review M-1 / 0.2.0-M-3）。
+        prev = self._active_item() if self._active_item_index >= 0 else None
+        if prev is not None:
+            self._save_panel_to_item(prev)
         self._active_item_index = index
+        self._active_item_ref = self.items[index] if 0 <= index < len(self.items) else None
         if 0 <= index < len(self.items):
             self._load_item_to_panel(self.items[index])
             self._sync_status_from_item(self.items[index])
@@ -883,6 +893,14 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.panel._sync_type_enabled()
 
+    def _active_item(self) -> ViewerItem | None:
+        """当前活动引用的 item（对象身份），结构变更后仍能定位真实对象。"""
+        ref = getattr(self, "_active_item_ref", None)
+        for it in self.items:
+            if it is ref:
+                return it
+        return None
+
     def close_current_item(self) -> None:
         idx = self.item_tabs.currentIndex()
         if idx >= 0:
@@ -891,12 +909,15 @@ class MainWindow(QMainWindow):
     def close_item(self, index: int) -> None:
         if not (0 <= index < len(self.items)):
             return
+        # 先按对象身份保存被关闭项的未 Apply 参数（若有）——不能依赖索引
+        # 在 pop 之后仍有效。
         self._loading_item = True
         self.item_tabs.removeTab(index)
         self.items.pop(index)
         self._loading_item = False
         if not self.items:
             self._active_item_index = -1
+            self._active_item_ref = None
             self.file_status.setText("File: -")
             self.image_status.setText("Image: -")
             self.zoom_status.setText("Zoom: 100%")
@@ -904,6 +925,7 @@ class MainWindow(QMainWindow):
             self._set_state("No item", "idle")
             self.panel.set_enabled(False)
         else:
+            self._active_item_ref = None
             self._on_tab_changed(self.item_tabs.currentIndex())
         self._update_center_stack()
 
@@ -1127,6 +1149,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Read Error", f"Failed to read file size: {path}")
             return
 
+        # 单帧内存上限（512MB）——GUI 与 CLI/batch 统一保护，防超大宽高 OOM
+        # （65535×65535 + RAW32 单帧约 16 GiB）。超限提示且不启动读取/worker。
+        if expected > 0:
+            try:
+                require_decode_size(opts.width, opts.height, expected)
+            except FormatError as exc:
+                QMessageBox.critical(
+                    self, "Frame Too Large",
+                    f"{exc}\n\n请降低宽度/高度，或换用更低位深/非 32-bit 格式。",
+                )
+                self._set_state("Decode rejected: frame too large", "error")
+                return
+
         # Only an explicit Apply pops the size-mismatch dialog; open/drop and
         # frame navigation never interrupt with the same question.
         if warn_mismatch and expected > 0 and actual < expected:
@@ -1234,12 +1269,15 @@ class MainWindow(QMainWindow):
     def _cancel_async_decode(self) -> None:
         """Detach from any in-flight decode without blocking the UI thread.
 
-        The worker is pure CPU code with no event loop, so ``quit()`` cannot
-        abort it — we only stop tracking it here. Its late ``finished``/``error``
-        signals are discarded on the main thread by the generation check in
-        ``_on_decode_finished`` / ``_on_decode_error``; when that stale worker
-        eventually finishes, its own bound quit/deleteLater lambdas wind its
-        thread down and Qt reclaims it.
+        设计取舍（0.1.1-M-1）：worker 是纯 CPU 计算且无事件循环，`quit()` 无法
+        中止；numpy/OpenCV 解码也不提供安全的分块取消点。因此这里"取消"= 停止
+        跟踪该 worker。其迟到的 `finished`/`error` 由主线程 generation check
+        （`_should_apply_decode`）丢弃；线程与 worker 的生命周期始终由
+        finished/error → thread.quit()/deleteLater 连接保证，**绝不能在 worker
+        内 suppress 信号**（否则线程/worker 永久泄漏——复查已确认该坑）。
+
+        若未来需要真正停止 CPU 工作：把 decode 拆成分块循环并检查
+        ``threading.Event``（各循环间是一个安全的中断点）。
         """
         if self._thread is not None:
             logger.debug("Detached from in-flight decode thread")

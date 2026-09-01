@@ -84,6 +84,27 @@ YUV_BITS = {
 _YUV422_PACKED = {"YUYV", "UYVY", "YVYU", "VYUY"}
 _YUV422_SEMIPLANAR = {"NV16", "NV61"}
 
+# 单帧解码字节上限（GUI / CLI / batch 共用）。
+# 65535×65535 + RAW32 单帧约 16 GiB，需在读取/解码前拒绝，避免 OOM/崩溃。
+MAX_DECODE_BYTES = 512 * 1024 * 1024  # 512 MB
+
+
+def require_decode_size(width: int, height: int, frame_size: int) -> None:
+    """校验单帧大小不超过 :data:`MAX_DECODE_BYTES`，超限抛 ``FormatError``。
+
+    供 GUI（decode_current / _expected_frame_size）、CLI 与 batch 统一使用，
+    保证跨入口的资源保护一致。
+    """
+    if width <= 0 or height <= 0:
+        raise FormatError(f"invalid dimensions: {width}x{height}")
+    if width * height <= 0:
+        raise FormatError(f"overflow: {width}x{height}")
+    if frame_size > MAX_DECODE_BYTES:
+        raise FormatError(
+            f"frame too large: {frame_size} bytes ({width}x{height}) "
+            f"exceeds the {MAX_DECODE_BYTES}-byte decode limit"
+        )
+
 
 def _dtype_u16(endianness: Endianness) -> np.dtype:
     return np.dtype("<u2") if endianness == "little" else np.dtype(">u2")

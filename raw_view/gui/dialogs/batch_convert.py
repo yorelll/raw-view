@@ -124,6 +124,11 @@ class BatchConvertDialog(QDialog):
         self.align = QComboBox()
         self.align.addItems(["msb", "lsb"])
 
+        # Endianness：RAW 与 YOnly 多 bit（16-bit 存储）可选用大小端；
+        # 普通 YUV 无意义（_sync_controls 禁用）。
+        self.endian = QComboBox()
+        self.endian.addItems(["little", "big"])
+
         self.raw_source_mode = QComboBox()
         self.raw_source_mode.addItems(["bayer", "gray"])
 
@@ -146,6 +151,7 @@ class BatchConvertDialog(QDialog):
         params_form.addRow("RAW type", self.raw_type)
         params_form.addRow("YUV format", self.yuv_type)
         params_form.addRow("Alignment", self.align)
+        params_form.addRow("Endianness", self.endian)
         params_form.addRow("RAW source", self.raw_source_mode)
         params_form.addRow("Bayer pattern", self.bayer_pattern)
         params_form.addRow("Width", self.width)
@@ -267,8 +273,11 @@ class BatchConvertDialog(QDialog):
     def _sync_controls(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
+        # YOnly 多 bit（16-bit 存储）与 RAW 一样需要 Alignment/Endianness
+        is_yonly_16 = self.yuv_type.currentText() in ControlPanel._YONLY_16BIT
         self.raw_type.setEnabled(is_raw)
-        self.align.setEnabled(is_raw)
+        self.align.setEnabled(is_raw or is_yonly_16)
+        self.endian.setEnabled(is_raw or is_yonly_16)
         self.raw_source_mode.setEnabled(is_raw)
         self.bayer_pattern.setEnabled(is_raw and is_bayer)
         self.yuv_type.setEnabled(not is_raw)
@@ -339,6 +348,7 @@ class BatchConvertDialog(QDialog):
                             input_path, formats, sizes, bayer,
                             source_mode=self.raw_source_mode.currentText(),
                             alignment=self.align.currentText(),
+                            endianness=self.endian.currentText(),
                             output_dir=out_dir,
                             template=template,
                         )
@@ -364,6 +374,7 @@ class BatchConvertDialog(QDialog):
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
                 )
 
                 self._file_table.item(row, 3).setText(output_path)
@@ -377,6 +388,7 @@ class BatchConvertDialog(QDialog):
                             out_w,
                             out_h,
                             alignment=self.align.currentText(),
+                            endianness=self.endian.currentText(),
                             source_mode=self.raw_source_mode.currentText(),
                             bayer_pattern=self.bayer_pattern.currentText(),
                         )
@@ -385,7 +397,7 @@ class BatchConvertDialog(QDialog):
                             input_path, output_path, self.yuv_type.currentText(),
                             out_w, out_h,
                             alignment=self.align.currentText(),
-                            endianness="little",
+                            endianness=self.endian.currentText(),
                         )
 
                     self._file_table.item(row, 2).setText("OK")
