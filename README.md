@@ -2,13 +2,13 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.2.0** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.2.1** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
 
 - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed，支持 LSB/MSB 对齐、大小端与 Bayer(RGGB/GRBG/GBRG/BGGR)彩色预览
-- YUV 查看：**YOnly**（4:0:0 全分辨率灰度，任意宽高）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
+- YUV 查看：**YOnly** 系列（YOnly8 1 字节/像素；YOnly10/12/14/16 为 16-bit 存储，支持 LSB/MSB 对齐与大小端）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
@@ -43,6 +43,10 @@ Python RAW/YUV 图像查看与格式转换工具。
 ```bash
 pip install -r requirements.txt
 ```
+
+> 若要复现 CI/发布所用的精确版本，叠加 `constraints.txt` 锁定：
+> `pip install -r requirements.txt -c constraints.txt`
+> （默认本地宽松安装会拿到当时最新版本，可能与 CI 锁定版本组合略有差异。）
 
 ## 运行
 

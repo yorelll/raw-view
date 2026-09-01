@@ -54,9 +54,13 @@ docs/review/
 
 - **每次 push / PR**：`.github/workflows/ci.yml` 自动跑全量测试
   （Windows + Ubuntu × Python 3.11/3.12 矩阵 + CLI 冒烟）。**提交前请在本地 `python -m unittest discover -s tests -q` 确认全绿。**
-- **打 tag（如 `v0.1.1`）**：`.github/workflows/build-release.yml` 自动打包 `raw-view.exe` + SHA-256 校验和并发布到 GitHub Releases。
+- **打 tag（如 `v0.1.1`）**：`.github/workflows/build-release.yml` 自动打包 `raw-view.exe` + zip 校验和并发布到 GitHub Releases。
 - 依赖：`requirements.txt` 宽松版；CI 用 `constraints.txt` 锁定版本可复现（注意 **constraints 文件必须保持纯 ASCII**，pip 以平台默认编码读取）。
-- 发布版本说明：使用 `gh release edit <tag> --notes-file - <<'EOF' ... EOF` 补充 changelog，需包含测试/CI 验证状态。
+- **Release 版本说明（重要）——必须"发布即最终版"，格式统一**：
+  1. **标准模板**：`docs/release-template.md`。所有 Release body 必须遵循该模板格式（标题含版本号、来源行含测试状态、`### 🐛 修复` / `### 🆕 新功能` / `### 使用方式` / `### 功能总览` / `### 文件` / `### 系统要求`）。
+  2. **打 tag 前填好**：发布者把当前版本的修复/新功能清单按模板填入 `.github/workflows/build-release.yml` 的 `body:`（Workflow 的 `Create or update GitHub Release` 步骤），连同版本号/文件名占位符一并更新。这样打 tag 后 Release **直接生成即最终版**，**不依赖事后 `gh release edit`**。
+  3. **确需事后修改时**：`gh release edit <tag> --notes-file - <<'EOF' ... EOF` 覆盖整个 body，内容仍必须与 `docs/release-template.md` 格式一致。
+  4. body 中版本号、zip 文件名、`name:` 中的版本号必须与 tag 一致（可用 `${{ steps.version.outputs.version }}` 动态占位符）。
 
 ## 3. 常用命令（本地）
 

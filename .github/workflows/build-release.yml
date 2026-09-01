@@ -79,7 +79,10 @@ jobs:
       # 两种环境都能跑；缺失时仅提示（Qt 自带默认英文本地化，不影响功能）。
       - name: Build onedir bundle with PyInstaller
         run: |
-          $QT_TRANSLATIONS = Join-Path (Split-Path (Split-Path (Split-Path (Get-Command python).Source))) "Lib\site-packages\PyQt5\Qt5\translations"
+          # 用 Python 运行时查询实际 PyQt5 translations 路径，而不是从 python.exe
+          # 路径手工 Split-Path 推导（后者在 GitHub Actions 的 Python 布局下会多退
+          # 一级导致找不到目录，发布包缺失 Qt 本地化——0.2.1 review L-2）。
+          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
           if (Test-Path $QT_TRANSLATIONS) {
             pyinstaller --noconfirm --clean --windowed --name raw-view `
               --hidden-import=cv2 `
@@ -185,39 +188,44 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: raw-view ${{ steps.version.outputs.version }}
+          # body 必须遵循 docs/release-template.md 的标准格式（发布即最终版，
+          # 不再依赖事后 gh release edit）。每次打 tag 前，将当前版本的
+          # 修复/新功能清单按模板填入下面的 body。占位符 {{ }} 由 GITHUB 上下文填充。
           body: |
             ## raw-view ${{ steps.version.outputs.version }}
 
-            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供单文件 exe 与 zip 压缩包两种形态）。
+            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿。
+
+            ### 🐛 修复
+            - 多帧切换失败：修复 double-offset（data 已按 effective_offset 切片，spec.offset 二次偏移）导致第 2 帧起
+              `data too short`；真实源 offset 改由 `source_offset` 传递，新增 5 帧回归测试。
+
+            ### 🆕 新功能 / 增强
+            1. **YOnly 多 bit**：`YOnly8`（1 字节/像素）+ `YOnly10/12/14/16`（16-bit 存储）；
+               **Alignment(lsb/msb) 控制有效位位置**，Endianness 可选大小端——语义与 RAW10/12/16 一致；
+               查看/转换/多变体/CLI 全链路支持。
+            2. **标签页关闭 X 按钮**：每个标签右侧显示关闭按钮，可拖入多文件也可点 X 关闭单个；与拖拽排序共存。
+            3. **控制面板分组折叠**：Alignment/Endianness/RAW preview/Bayer 收敛进可折叠 *RAW 高级参数* 组。
 
             ### 使用方式
-            **zip 版（推荐，解压即用）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`
-            并解压，直接运行其中的 `raw-view.exe`，无需安装 Python、无需选择目录样式；
-            目录内已含全部依赖（`_internal/`）。
-            **单文件版**：下载 `raw-view.exe`，双击即可运行；体积较小但启动稍慢（自解压到临时目录）。
+            - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
+            - **单文件版**：下载 `raw-view.exe` 双击运行。
+            - 命令行示例：`raw-view.exe convert -i img.png --target YUV --yuv-type YOnly12 --width 2560 --height 1440 --alignment lsb`；`raw-view.exe --batch-help`。
+            - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
-            - 命令行：`raw-view.exe view -i in.raw -o out.png --width 2560 --height 1440`；
-              `raw-view.exe convert -i img.png --target RAW`；
-              `raw-view.exe --batch-help` 查看批量 JSON 说明。
-            - 传感器预设保存在本机注册表/配置目录，不会随程序分发；团队共享可
-              *Manage sensor presets → Export / Import*。
-
-            ### 此版本内容
-            - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed（MIPI CSI-2）、LSB/MSB、
-              大小端、Bayer 彩色/灰度预览
-            - YUV 查看：I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
+            ### 功能总览
+            - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed（MIPI CSI-2）、LSB/MSB、大小端、Bayer 彩色/灰度预览
+            - YUV 查看：YOnly8/10/12/14/16、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
             - 转换：PNG/JPG/BMP → RAW / YUV；批量转换；多变体一键生成（格式×Bayer×分辨率）
-            - 帧导航、缩放/旋转/翻转、多标签页、Sensor 预设、输出文件名模板、FourCC 查找
+            - 帧导航、缩放/旋转/翻转、多标签页（拖拽排序+关闭）、Sensor 预设、输出模板、FourCC 查找
             - CLI 模式（view / convert / batch）、日志系统、Light/Dark 主题
 
             ### 文件
-            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（onedir 目录，解压即用，
-              内置全部依赖；适合需要快速分发整个目录、或单文件 exe 启动慢的场景）
-            - **`raw-view.exe`** — 主程序（单文件，约 100-130 MB，无需安装 Python）
-            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip.sha256`** / **`raw-view.exe.sha256`** —
-              SHA-256 校验和（`sha256sum -c` 校验）
+            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（onedir，解压即用，约 130 MB）
+            - **`raw-view.exe`** — 单文件 exe（约 125 MB）
+            - 各附 `.sha256` 校验和（`sha256sum -c` 校验）
 
             ### 系统要求
             - Windows 10 1809+（64 位）
