@@ -70,6 +70,7 @@ class ControlPanel(QWidget):
         "RAW32",
     ]
     YUV_FORMATS = [
+        "YOnly",
         "I420",
         "YV12",
         "NV12",

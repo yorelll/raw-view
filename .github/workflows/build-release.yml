@@ -1,4 +1,4 @@
-# Build raw-view.exe on Windows and attach it to a GitHub Release.
+# Build raw-view .exe / .zip and attach them to a GitHub Release.
 #
 # Triggers:
 #   - on tags like v0.1.0 (the official release path)
@@ -6,9 +6,15 @@
 #
 # What it does:
 #   1. Runs the full test suite (so a broken release is never published)
-#   2. Installs PyInstaller and builds a single-file, windowed exe
-#   3. Runs the exe with --help (CLI smoke test) and lists the artifact
-#   4. Attaches dist/raw-view.exe + SHA-256 checksum to the release
+#   2. Installs PyInstaller and builds TWO artifacts:
+#        a. onedir bundle  -> dist/raw-view/  (directory with all deps)
+#        b. single file    -> dist/raw-view.exe
+#      Each is staged under .artifact/ first so the two PyInstaller runs
+#      (both --noconfirm --clean) never delete each other's output.
+#   3. Zips the onedir bundle into a "unzip-and-run" package with the
+#      version in its file name (raw-view-<version>-windows-x64.zip).
+#   4. Runs the exe with --help (CLI smoke test) and lists the artifacts
+#   5. Attaches exe + zip + SHA-256 checksums to the release
 #
 # Version source of truth: the git tag (v0.1.0 -> product version 0.1.0).
 
@@ -25,7 +31,7 @@ permissions:
 
 jobs:
   build-and-release:
-    name: Build exe and publish release
+    name: Build exe + zip and publish release
     runs-on: windows-latest
 
     steps:
@@ -62,6 +68,49 @@ jobs:
       - name: Smoke test CLI (before packaging)
         run: python -m raw_view --batch-help
 
+      # PyInstaller 两次打包都会 --noconfirm --clean 清理 build/ 与 dist/，
+      # 因此两次产物分别落盘到独立 staging 目录（.artifact/raw-view.exe 与
+      # .artifact/raw-view/），避免 "后一次打包删掉前一次产物"。
+      #
+      # 第一次：onedir 目录 bundle（解压即用，含全部依赖）。
+      # 注意：.venv 是本机专用路径，CI（GitHub Actions）默认把依赖装进 Actions 自带
+      # 的 Python，不存在 .venv/；而 PyInstaller 对不存在的 --add-data 源目录会直接
+      # 报 ERROR 失败。因此 translations 路径由当前 python 安装位置推导，
+      # 两种环境都能跑；缺失时仅提示（Qt 自带默认英文本地化，不影响功能）。
+      - name: Build onedir bundle with PyInstaller
+        run: |
+          $QT_TRANSLATIONS = Join-Path (Split-Path (Split-Path (Split-Path (Get-Command python).Source))) "Lib\site-packages\PyQt5\Qt5\translations"
+          if (Test-Path $QT_TRANSLATIONS) {
+            pyinstaller --noconfirm --clean --windowed --name raw-view `
+              --hidden-import=cv2 `
+              --hidden-import=PIL `
+              --collect-all=cv2 `
+              --collect-all=PyQt5 `
+              --collect-all=qt_material `
+              --collect-all=qtawesome `
+              --icon assets/raw-view.ico `
+              --add-data "assets;assets" `
+              --add-data "$QT_TRANSLATIONS;Qt5/translations" `
+              raw_view/__main__.py
+          } else {
+            Write-Host "PyQt5 Qt5 translations not found at $QT_TRANSLATIONS; skipping translations (Qt falls back to English built-ins)."
+            pyinstaller --noconfirm --clean --windowed --name raw-view `
+              --hidden-import=cv2 `
+              --hidden-import=PIL `
+              --collect-all=cv2 `
+              --collect-all=PyQt5 `
+              --collect-all=qt_material `
+              --collect-all=qtawesome `
+              --icon assets/raw-view.ico `
+              --add-data "assets;assets" `
+              raw_view/__main__.py
+          }
+          # 目录模式输出到 dist/raw-view/，移入 staging 供压缩与 smoke test。
+          New-Item -ItemType Directory -Force .artifact | Out-Null
+          Move-Item dist\raw-view .artifact\raw-view
+
+      # 第二次：单文件 exe（--onefile），同样落到 staging，而不是留在 dist/，
+      # 避免后续 --clean 步骤与 dist/ 目录混淆。
       - name: Build single-file exe with PyInstaller
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
@@ -74,18 +123,28 @@ jobs:
             --icon assets/raw-view.ico `
             --add-data "assets;assets" `
             raw_view/__main__.py
+          Move-Item dist\raw-view.exe .artifact\raw-view.exe
+
+      - name: Collect release artifacts into dist
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item .artifact\raw-view.exe dist\raw-view.exe
+          # onedir 目录整体拷回 dist/raw-view/（若某步未生成会立刻失败）
+          if (-not (Test-Path .artifact\raw-view\raw-view.exe)) { throw "onedir bundle missing: .artifact\raw-view\raw-view.exe" }
+          Copy-Item -Recurse -Force .artifact\raw-view dist\raw-view
 
       - name: Verify the exe exists
         run: |
           if (-not (Test-Path dist\raw-view.exe)) { throw "dist\raw-view.exe not found" }
           Get-Item dist\raw-view.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+          if (-not (Test-Path dist\raw-view\raw-view.exe)) { throw "dist\raw-view\raw-view.exe (onedir) not found" }
+          Get-Item dist\raw-view\raw-view.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
 
-      - name: Compute SHA-256 checksum
-        shell: bash
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          sha256sum dist/raw-view.exe > dist/raw-view.exe.sha256
-          cat dist/raw-view.exe.sha256
+      - name: Smoke test CLI (onedir bundle)
+        run: .\dist\raw-view\raw-view.exe --batch-help
+
+      - name: Smoke test CLI (single-file exe)
+        run: .\dist\raw-view.exe --batch-help
 
       - name: Determine version from tag
         id: version
@@ -97,6 +156,30 @@ jobs:
           echo "tag=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
 
+      # 在版本号步骤之后压缩，zip 文件名才能带上版本号：
+      #   dist/raw-view-<version>-windows-x64.zip
+      # 源目录 dist/raw-view/ 由 "Collect release artifacts into dist" 步骤保证存在。
+      - name: Compress onedir bundle into a zip
+        shell: pwsh
+        run: |
+          $VERSION = "${{ steps.version.outputs.version }}"
+          $ZIP = "dist\raw-view-$VERSION-windows-x64.zip"
+          if (-not (Test-Path dist\raw-view)) { throw "source dist\raw-view not found" }
+          if (Test-Path $ZIP) { Remove-Item $ZIP -Force }
+          Compress-Archive -Path dist\raw-view -DestinationPath $ZIP
+          Get-Item $ZIP | Select-Object FullName, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+
+      - name: Compute SHA-256 checksums
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          sha256sum dist/raw-view.exe > dist/raw-view.exe.sha256
+          # bash 的 glob 不会在重定向目标里展开，必须先用变量拿到 zip 的实际文件名
+          ZIP="dist/raw-view-${{ steps.version.outputs.version }}-windows-x64.zip"
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          cat dist/raw-view.exe.sha256
+          cat "$ZIP.sha256"
+
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -105,16 +188,20 @@ jobs:
           body: |
             ## raw-view ${{ steps.version.outputs.version }}
 
-            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows 单文件 exe）。
+            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供单文件 exe 与 zip 压缩包两种形态）。
 
             > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建。
 
             ### 使用方式
-            - 解压后直接运行 `raw-view.exe`，无需安装 Python。
+            **zip 版（推荐，解压即用）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`
+            并解压，直接运行其中的 `raw-view.exe`，无需安装 Python、无需选择目录样式；
+            目录内已含全部依赖（`_internal/`）。
+            **单文件版**：下载 `raw-view.exe`，双击即可运行；体积较小但启动稍慢（自解压到临时目录）。
+
             - 命令行：`raw-view.exe view -i in.raw -o out.png --width 2560 --height 1440`；
               `raw-view.exe convert -i img.png --target RAW`；
               `raw-view.exe --batch-help` 查看批量 JSON 说明。
-            - 传感器预设保存在本机注册表/配置目录，不会随 exe 分发；团队共享可
+            - 传感器预设保存在本机注册表/配置目录，不会随程序分发；团队共享可
               *Manage sensor presets → Export / Import*。
 
             ### 此版本内容
@@ -126,13 +213,18 @@ jobs:
             - CLI 模式（view / convert / batch）、日志系统、Light/Dark 主题
 
             ### 文件
-            - **`raw-view.exe`** — 主程序（单文件，约 100-130 MB）
-            - **`raw-view.exe.sha256`** — SHA-256 校验和（`sha256sum -c` 校验）
+            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（onedir 目录，解压即用，
+              内置全部依赖；适合需要快速分发整个目录、或单文件 exe 启动慢的场景）
+            - **`raw-view.exe`** — 主程序（单文件，约 100-130 MB，无需安装 Python）
+            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip.sha256`** / **`raw-view.exe.sha256`** —
+              SHA-256 校验和（`sha256sum -c` 校验）
 
             ### 系统要求
             - Windows 10 1809+（64 位）
             - Visual C++ Redistributable 2015-2022（多数系统已自带）
           files: |
+            dist/raw-view-${{ steps.version.outputs.version }}-windows-x64.zip
+            dist/raw-view-${{ steps.version.outputs.version }}-windows-x64.zip.sha256
             dist/raw-view.exe
             dist/raw-view.exe.sha256
           fail_on_unmatched_files: true

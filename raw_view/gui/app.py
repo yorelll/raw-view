@@ -308,7 +308,16 @@ class MainWindow(QMainWindow):
         # Tab widget
         self.item_tabs = QTabWidget()
         self.item_tabs.setTabsClosable(True)
+        # 允许通过点击标签名称并左右拖动来调整标签页顺序（5.15 原生支持）。
+        # QTabWidget 移动标签后不会自动同步 ``self.items``，由 tabBar.tabMoved
+        # 信号（见 :meth:`_on_tab_moved`）负责把 items 重排成与视觉顺序一致。
+        self.item_tabs.setMovable(True)
+        # 关闭"悬停时显示关闭按钮"。默认每个标签悬停都会画一个关闭按钮，
+        # 点住该区域再拖动会被识别成"关闭"，影响拖拽排序；关闭可拖动标签页仍
+        # 可用（右键菜单 / Ctrl+W / close_item）。requirement：点击名称区域拖动。
+        self.item_tabs.tabBar().setTabsClosable(False)
         self.item_tabs.tabCloseRequested.connect(self.close_item)
+        self.item_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
         self.item_tabs.currentChanged.connect(self._on_tab_changed)
 
         # Right side: a stack that shows an empty-state placeholder until the
@@ -824,6 +833,37 @@ class MainWindow(QMainWindow):
             self.decode_current()
 
     # ── Tab management ────────────────────────────────────────────────
+
+    def _reorder_items(self, from_index: int, to_index: int) -> None:
+        """把 ``self.items`` 中的一项移动到新位置（keep item identity intact）。
+
+        与 QTabBar 移动标签的语义保持一致：等价于
+        ``items.insert(to_index, items.pop(from_index))``，因此调用后
+        ``self.items`` 的顺序与标签视觉顺序一一对应。序号越界时直接忽略，
+        保证拖拽排序不会破坏 items 与 tab 的对应关系。
+        """
+        if not (0 <= from_index < len(self.items)) or not (0 <= to_index < len(self.items)):
+            return
+        item = self.items.pop(from_index)
+        self.items.insert(to_index, item)
+
+    def _on_tab_moved(self, from_index: int, to_index: int) -> None:
+        """标签被拖动后同步 ``self.items``，保证两者顺序完全一致。
+
+        QTabWidget.setMovable(True) 只移动了标签本身，不会自动重排
+        ``self.items``；若不同步，close_item / _current_item / decode 都会按
+        错误的索引取到别的 item。注意：
+
+        * 只同步顺序，不改变当前选中的 item——Qt 移动标签时选中的 *page
+          widget* 始终跟随用户拖动的那一项，且之后必然发出一次
+          ``currentChanged``，由 ``_on_tab_changed`` 重新校准
+          ``_active_item_index`` 并重载面板状态。
+        * ``_loading_item`` 在拖拽期间为 False，若选中项确实改变会走正常的
+          保存/加载同步路径，不会触发误保存/误解码。
+        """
+        if from_index == to_index:
+            return
+        self._reorder_items(from_index, to_index)
 
     def _on_tab_changed(self, index: int) -> None:
         if self._loading_item:

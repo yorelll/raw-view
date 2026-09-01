@@ -15,10 +15,11 @@
 3. GitHub Actions 工作流 `.github/workflows/build-release.yml`（tag 触发）自动：
    - Windows 环境安装 Python 3.12 + 全部依赖（叠加 `constraints.txt` 锁定版本）；
    - 运行 `python -m unittest discover -s tests -q`（**测试不过不发布**）；
-   - `pyinstaller --onefile --windowed` 打包；
-   - 生成 `raw-view.exe.sha256` 校验和；
-   - 创建/更新 Release（名称 `raw-view <版本>`，包含 exe + 校验和 + 版本说明）。
-4. 到仓库 **Releases** 页面即可看到并下载 `raw-view.exe`。
+   - 先用 PyInstaller **目录模式（onedir）** 打包 `dist/raw-view/`，再用 `--onefile` 打包单文件 exe（两次都在 staging 中暂存，互不覆盖）；
+   - 把 onedir 目录压缩为 `raw-view-<版本>-windows-x64.zip`（解压即用）；
+   - 生成 `raw-view.exe.sha256` 与 zip 的 `.sha256` 校验和；
+   - 创建/更新 Release（名称 `raw-view <版本>`，包含 **zip + exe + 两个校验和** + 版本说明）。
+4. 到仓库 **Releases** 页面即可看到并下载 `raw-view-<版本>-windows-x64.zip`（推荐，解压即用）或 `raw-view.exe`（单文件）。
 
 手动触发（不打 tag）也可在 Actions 页面选 `workflow_dispatch` 构建设置。
 
@@ -91,9 +92,33 @@ pyinstaller --noconfirm --clean --windowed --name raw-view `
 
 ---
 
+### 方式三：zip 压缩包（onedir，解压即用，推荐分发）
+
+将上面的 onedir 目录（方式二）压缩成 zip，**任何目标电脑解压后直接运行 `raw-view.exe`，
+无需安装 Python**。与单文件 exe（方式一）的关系：
+- **方式一（单文件 exe）**：体积最小、方便拷贝分享，但启动时要自解压到临时目录，**首次启动慢**；
+- **方式三（zip/onedir）**：体积更大、需整体解压，但**启动快、目录内已含全部依赖（`_internal/`）**；
+- 两者**功能与依赖完全一致**（同一次 CI 构建产物），按场景二选一即可。
+
+**CI 已自动产出 zip**：打 tag 后 `build-release.yml` 自动把 onedir 目录压缩为
+`raw-view-<版本>-windows-x64.zip` 并连同校验和一起发布到 GitHub Releases，
+一般无需手动执行。本地手动制作（离线场景）：
+
+```powershell
+# 先按方式二命令生成 dist/raw-view/，然后（把 0.2.0 换成当前版本号）：
+Compress-Archive -Path dist\raw-view -DestinationPath dist\raw-view-0.2.0-windows-x64.zip
+```
+
+> 提示：zip 内是 `raw-view/` 目录（内含 `raw-view.exe` 与 `_internal/`），解压后进入该目录运行即可；
+> 若希望"解压到桌面即出 exe"，可把 zip 改为直接打包 `dist/raw-view\*` 内容（`Compress-Archive -Path dist\raw-view\*`），
+> CI 默认采用整目录打包（目录名即版本标识，多版本共存不冲突）。
+
+---
+
 > 注意：
 > - 将 `D:\work\jira\generate_raw\raw-view` 替换为你实际的仓库根目录路径
 > - 如果是 Bash，将 `` 改为 `^`，或使用一行命令
+> - CI 里不硬编码本机 `.venv` 路径：打包步骤用当前 `python` 的安装位置解析 PyQt5 translations（见 `build-release.yml`）
 
 ## 3. 验证打包结果
 
@@ -178,6 +203,15 @@ PyInstaller 不会扫描这些位置；exe 启动后第一次读取 `presets/sen
 │   ├── raw-view.exe
 │   └── _internal/        # 依赖文件
 ├── Python312/            # 需要打包 Python 环境（可选）
+└── README.md
+```
+
+### 方式三（zip 压缩包，onedir）发布（推荐）
+```
+发布目录/
+├── raw-view-<版本>-windows-x64.zip      # 解压即用（内含 raw-view/ 整目录）
+├── raw-view-<版本>-windows-x64.zip.sha256
+├── raw-view.exe                        # 可选的单文件版
 └── README.md
 ```
 

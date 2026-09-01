@@ -2,13 +2,13 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.1.0** —— 正式发布通过 GitHub Releases 分发 Windows 单文件 exe（见下方
+> **当前版本：0.2.0** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
 
 - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed，支持 LSB/MSB 对齐、大小端与 Bayer(RGGB/GRBG/GBRG/BGGR)彩色预览
-- YUV 查看：I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
+- YUV 查看：**YOnly**（4:0:0 全分辨率灰度，任意宽高）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
@@ -18,7 +18,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **CLI 模式**：支持命令行解码 RAW/YUV→PNG/JPEG（`python -m raw_view view`）、编码 image→RAW/YUV（`convert`）、批量模式（`batch`）、启动 GUI 并打开文件
 - 支持主界面拖拽打开文件、拖拽文件夹自动扫描 RAW/YUV 文件、拖入时高亮窗口边框视觉反馈
 - 支持转换输入拖拽
-- 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item
+- 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item；**点住标签名称可左右拖动排序**
 - 支持 Recent Files 最近文件列表
 - Convert 输出支持默认 `convert_out` 目录（可在 Settings 调整）与手动更改
 - 内置 Help：格式排列、Packed bit 规则与示例
@@ -347,9 +347,14 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 发布由 GitHub Actions 自动完成（`.github/workflows/build-release.yml`）：
 
 1. 提交并推送代码；
-2. 打 tag：`git tag v0.1.0 && git push origin v0.1.0`；
-3. 工作流自动运行测试 → 打包 `raw-view.exe` → 生成 SHA-256 校验和 → 发布到 **Releases**；
+2. 打 tag：`git tag v0.2.0 && git push origin v0.2.0`；
+3. 工作流自动运行测试 → 打包 **两种发行物** → 生成 SHA-256 校验和 → 发布到 **Releases**；
 4. 到仓库 [Releases 页面](https://github.com/yorelll/raw-view/releases) 下载即可。
+
+**发行物形态**：
+- **`raw-view.exe`** — 单文件 exe（约 100-130 MB，无需安装 Python，自解压启动）
+- **`raw-view-<版本>-windows-x64.zip`** — onedir 压缩包（解压即用；内含 `raw-view/_internal/` 全部依赖；
+  适合需要快速分发整个目录、或单文件版启动慢的场景）
 
 手动触发（不打 tag）也可以在 Actions 页选择 `workflow_dispatch` 构建设置开发版。
 

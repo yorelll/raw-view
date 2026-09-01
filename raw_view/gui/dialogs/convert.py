@@ -80,9 +80,9 @@ class ConvertDialog(QDialog):
         self.raw_type.addItems(ControlPanel.RAW_FORMATS)
 
         self.yuv_type = QComboBox()
-        self.yuv_type.addItems(
-            ["I420", "YV12", "NV12", "NV21", "YUYV", "UYVY", "YVYU", "VYUY", "NV16", "NV61"]
-        )
+        # YUV 类型列表与主面板 ControlPanel.YUV_FORMATS 保持一致
+        # （含 YOnly 4:0:0 全分辨率灰度）。
+        self.yuv_type.addItems(ControlPanel.YUV_FORMATS)
 
         self.align = QComboBox()
         self.align.addItems(["msb", "lsb"])
@@ -105,6 +105,7 @@ class ConvertDialog(QDialog):
 
         # Help text for YUV formats
         self._yuv_note = QLabel(
+            "YOnly: full-resolution grayscale (4:0:0); "
             "YUV420: U/V 2x2 downsample; YUV422: horizontal 2:1 downsample"
         )
         self._yuv_note.setWordWrap(True)

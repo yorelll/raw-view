@@ -1,4 +1,8 @@
-"""RAW/YUV parsing and conversion utilities."""
+"""RAW/YUV parsing and conversion utilities.
+
+Supported YUV sub-formats include 4:0:0 (YOnly, full-resolution grayscale),
+4:2:0 (I420/YV12/NV12/NV21) and 4:2:2 (YUYV/UYVY/YVYU/VYUY/NV16/NV61).
+"""
 
 from __future__ import annotations
 
@@ -41,6 +45,9 @@ RAW_BITS = {
 
 
 YUV_BYTES_PER_PIXEL = {
+    # YOnly = YUV 4:0:0 全分辨率灰度：每像素 1 字节，只含亮度（Y 平面），
+    # 无 U/V；对比度/灰度图按原样保存。无宽高必须为偶数的限制。
+    "YOnly": 1.0,
     "I420": 1.5,
     "YV12": 1.5,
     "NV12": 1.5,
@@ -95,6 +102,9 @@ def expected_frame_size_raw(raw_type: str, width: int, height: int) -> int:
 def expected_frame_size_yuv(subformat: str, width: int, height: int) -> int:
     if subformat not in YUV_BYTES_PER_PIXEL:
         raise FormatError(f"unsupported YUV subformat: {subformat}")
+    if subformat == "YOnly":
+        # YUV 4:0:0 全分辨率灰度：无宽高偶数限制，任意正宽高均可。
+        return int(width * height * 1.0)
     if subformat in {"I420", "YV12", "NV12", "NV21"} and (width % 2 or height % 2):
         raise FormatError(f"{subformat} requires even width/height")
     if subformat in (_YUV422_PACKED | _YUV422_SEMIPLANAR) and (width % 2):
@@ -223,6 +233,11 @@ def decode_yuv(data: bytes, spec: ImageSpec, subformat: str) -> np.ndarray:
     frame = _slice_frame(data, spec, frame_size)
     w, h = spec.width, spec.height
     arr = np.frombuffer(frame, dtype=np.uint8)
+
+    if subformat == "YOnly":
+        # YUV 4:0:0：整帧就是一个全分辨率 Y 平面，灰度三通道复制。
+        y = arr[: w * h].reshape(h, w)
+        return np.repeat(y[:, :, None], 3, axis=2)
 
     if subformat in {"I420", "YV12", "NV12", "NV21"}:
         y_size = w * h
@@ -380,6 +395,12 @@ def rgb_to_yuv_bytes(rgb: np.ndarray, subformat: str) -> bytes:
     g = rgb[:, :, 1].astype(np.float32)
     b = rgb[:, :, 2].astype(np.float32)
     y = np.clip(np.round(0.299 * r + 0.587 * g + 0.114 * b), 0, 255).astype(np.uint8)
+
+    if subformat == "YOnly":
+        # YUV 4:0:0：只保留亮度平面（BT.601 灰度），输出 w*h 字节。
+        # 不采样色度，纯亮度逐像素直写，任意宽高均可。
+        return y.tobytes()
+
     u = np.clip(np.round(-0.169 * r - 0.331 * g + 0.5 * b + 128.0), 0, 255).astype(np.uint8)
     v = np.clip(np.round(0.5 * r - 0.419 * g - 0.081 * b + 128.0), 0, 255).astype(np.uint8)
 

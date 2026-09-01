@@ -23,6 +23,7 @@ HELP_HTML = """
 <p>Layout: Y(8 bytes) + U(2 bytes) + V(2 bytes). Each U/V sample covers one 2x2 luma block.</p>
 <h3>YUV Subformats</h3>
 <ul>
+<li>400 (YOnly): full-resolution grayscale, 1 byte/pixel, no chroma (any width/height)</li>
 <li>420: I420, YV12, NV12, NV21</li>
 <li>422: YUYV, UYVY, YVYU, VYUY, NV16, NV61</li>
 </ul>

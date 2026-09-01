@@ -113,6 +113,8 @@ class DecodeWorker(QObject):
 
             if self._format_name in YUV_BYTES_PER_PIXEL:
                 # ── YUV path ────────────────────────────────────────
+                # 含 YOnly（YUV 4:0:0 全分辨率灰度），其命名已在字典中，
+                # 自动走进 YUV 解码分支。
                 logger.debug(
                     "Worker decoding YUV: %s, %dx%d, offset=%d",
                     self._format_name, self._spec.width, self._spec.height, self._spec.offset,

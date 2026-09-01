@@ -40,7 +40,9 @@ _RAW_ENTRIES: list[tuple[str, list[str], str, str, int]] = [
     ("NM16", [], "Y/UV 4:2:2 (N-C) Semi-planar",                     "MEDIA_BUS_FMT_YUYV8_2X8", 0x2008),
     ("NM61", [], "Y/VU 4:2:2 (N-C) Semi-planar",                     "MEDIA_BUS_FMT_YUYV8_2X8", 0x2008),
     # ---- Monochrome (raw sensor) ----
-    ("GREY", [], "8-bit monochrome",                                 "MEDIA_BUS_FMT_Y8_1X8",   0x2001),
+    # YOnly 是本项目对 YUV 4:0:0 全分辨率灰度的叫法，与 GREY/Y8 同义；
+    # 作为 GREY 条目的 alias 追加，避免重复登记一个独立的 Monochrome 条目。
+    ("GREY", ["Y8", "YOnly"], "8-bit monochrome / Y-only (YUV 4:0:0)", "MEDIA_BUS_FMT_Y8_1X8", 0x2001),
     ("Y10",  [], "10-bit monochrome",                                "MEDIA_BUS_FMT_Y10_1X10", 0x2003),
     ("Y12",  [], "12-bit monochrome",                                "MEDIA_BUS_FMT_Y12_1X12", 0x2004),
     # ---- Bayer 8-bit ----
