@@ -49,9 +49,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # 叠加 constraints.txt 锁定已实测一致的精确版本，保证可复现
-          pip install -c constraints.txt
+          # 叠加 constraints.txt 锁定已实测一致的精确版本，保证可复现。
+          # 注：-c/--constraint 必须与安装需求同一条命令使用（pip 不允许单独 -c 而不给包名）。
+          pip install -r requirements.txt -c constraints.txt
 
       - name: Run test suite (unittest)
         run: python -m unittest discover -s tests -q
