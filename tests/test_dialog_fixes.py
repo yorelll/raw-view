@@ -42,15 +42,16 @@ class BatchConvertFixesTests(unittest.TestCase):
 
     def test_resolve_output_dir_same_dir_true(self):
         # 勾选 “Same directory as input” → 输出到输入文件同目录
-        self.assertEqual(
-            resolve_output_dir(True, r"C:\in\frame.png", "convert_out"),
-            r"C:\in",
-        )
+        # 用平台路径（不用 Windows 字面量），保证 Windows/Linux 均通过。
+        input_path = os.path.join("workspace", "images", "frame.png")
+        expected = os.path.join("workspace", "images")
+        self.assertEqual(_norm(resolve_output_dir(True, input_path, "convert_out")),
+                         _norm(expected))
 
     def test_resolve_output_dir_same_dir_false(self):
         # 未勾选 → 落到 Settings 默认输出目录名
         self.assertEqual(
-            resolve_output_dir(False, r"C:\in\frame.png", "convert_out"),
+            resolve_output_dir(False, "/workspace/images/frame.png", "convert_out"),
             "convert_out",
         )
 
@@ -64,7 +65,8 @@ class BatchConvertFixesTests(unittest.TestCase):
     def test_resolve_output_dir_settings_dir_used_when_not_same_dir(self):
         # 未勾选时 settings 目录原样返回（相对 or 绝对都保留调用方语义）
         self.assertEqual(
-            resolve_output_dir(False, r"C:\in\frame.png", "custom_out/foo"), "custom_out/foo"
+            resolve_output_dir(False, "/workspace/images/frame.png", "custom_out/foo"),
+            "custom_out/foo",
         )
 
 

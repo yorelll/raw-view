@@ -347,8 +347,12 @@ def gray8_to_raw_bytes(
         # RAW32 按 32-bit 刻度（8bit 0..255 → 0..0xFFFFFFFF）写盘，
         # 与 decode_raw 的 32-bit 读取对称；不能用下面的 uint16 通用路径
         # （会截断高 16 位导致回读数值错误）。
+        # float32 在 255 → 2^32 时因精度舍入成 4294967296.0，直接
+        # .astype(np.uint32) 会触发 "invalid value encountered in cast" 警告；
+        # 先按 np.iinfo(uint32).max 上限 clip 消化该越界再 cast。
         v32 = np.clip(
-            np.round(g / 255.0 * ((1 << 32) - 1)), 0, (1 << 32) - 1
+            np.round(g / 255.0 * float((1 << 32) - 1)),
+            0, np.iinfo(np.uint32).max,
         ).astype(np.uint32)
         dtype = _dtype_u32(endianness)
         return v32.astype(dtype).tobytes()
