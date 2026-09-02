@@ -196,19 +196,33 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**227 passed**）。
 
-            ### 🐛 修复
-            - **GUI 超大帧保护**：GUI 解码接入与 CLI/batch 一致的 512MB 单帧上限（`formats.require_decode_size`），
-              65535×65535 大帧不再 OOM/崩溃。
-            - **标签关闭/拖拽参数污染**：关闭或拖动标签页改为按对象身份（`_active_item_ref`）保存面板，
-              不再把未 Apply 参数写入相邻 item。
-            - **批量输出目录**：batch 尊重显式 `output_dir`/`output`，未显式时才放到输入文件同目录；
-              `--batch-help` 说明同步。
-            - **YOnly 多 bit 端序链路**：Convert/Batch 增加 Endianness 控件，多变体/自动命名全链路传递
-              big-endian（输出文件名与写盘字节一致）。
-            - **测试稳定性**：清除 `PYTHONIOENCODING` 对 CLI 测试的宿主环境干扰；CI translations 路径改为
-              Python 运行时查询（不再手工 Split-Path 推导）。
+            ### 🆕 0.3.0 主要变更
+
+            **YOnly 单格式 + Bit depth 配置**
+            - YOnly 收敛为一个格式（不再有 YOnly8/10/12/14/16 独立条目），面板 / Convert / Batch / 多变体新增
+              **Bit depth 下拉**（8/10/12/14/16）：选 YOnly 后配置位深即按对应语义解析/生成。
+            - 支持 `.y` / `.grey` 后缀文件直接以 YOnly 打开。
+
+            **高级参数改为条件显隐（不再折叠）**
+            - Alignment / Endianness / RAW preview / Bayer 仅在 RAW 时显示；Bit depth / 对齐 / 大小端仅在
+              YOnly 时显示——**不相关的参数完全隐藏**，面板更清爽。
+
+            **体验与工程增强（依据 improvement 建议落地）**
+            - 解码 LRU 缓存（DecodeCache）加速帧导航
+            - 转换覆盖确认（跳过/覆盖/全部覆盖/重命名三种策略，Convert/Batch/多变体统一）
+            - CLI batch 支持 base_dir 相对路径与 `*.png` glob 展开
+            - About 对话框 + `--version`（单一版本源）
+            - 崩溃日志钩子（sys.excepthook + Qt message handler）
+            - 标签页完整路径 tooltip + 未 Apply「●」标记；`Ctrl+←/→` 上一文件/下一文件
+            - 面板实时帧大小估算，超 512MB 自动禁用 Apply（大帧预检）
+            - 新增 `[`/`]` 快速翻帧快捷键
+
+            **本版代码 review（agent 复核）修正**
+            - 解码缓存键补 offset（防多帧串帧）；缓存命中补写 current_display
+            - 标签未保存●清除时机修正；tab 切换后 Apply 门禁恢复
+            - 相邻文件翻页、RAW 不再误显 Bit depth、对话框首次打开控件不灰置等 13 处修正
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
@@ -218,10 +232,10 @@ jobs:
 
             ### 功能总览
             - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed（MIPI CSI-2）、LSB/MSB、大小端、Bayer 彩色/灰度预览
-            - YUV 查看：YOnly8/10/12/14/16、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
-            - 转换：PNG/JPG/BMP → RAW / YUV；批量转换；多变体一键生成（格式×Bayer×分辨率）
-            - 帧导航、缩放/旋转/翻转、多标签页（拖拽排序+关闭）、Sensor 预设、输出模板、FourCC 查找
-            - CLI 模式（view / convert / batch）、日志系统、Light/Dark 主题
+            - YUV 查看：YOnly（+Bit depth 8/10/12/14/16）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
+            - 转换：PNG/JPG/BMP → RAW / YUV；批量转换；多变体一键生成（格式×Bayer×分辨率）；覆盖确认
+            - 帧导航（含 LRU 缓存）、缩放/旋转/翻转、多标签页（拖拽排序+关闭+●标记）、Prev/Next 文件
+            - CLI 模式（view / convert / batch，支持 glob/base_dir）、日志系统、崩溃日志、Light/Dark 主题
 
             ### 文件
             - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（onedir，解压即用，约 130 MB）
