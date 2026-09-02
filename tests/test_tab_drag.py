@@ -190,12 +190,16 @@ class SetMovableWiringTests(unittest.TestCase):
             w.deleteLater()
 
     def test_source_contains_setmovable_and_tab_moved_connection(self):
-        """源码层面：_build_ui 显式启用 setMovable，并连接了 tabMoved 处理器。"""
+        """源码层面：_build_ui 显式启用 setMovable，并连接了 tabMoved 处理器。
+
+        (findChild 定位 tabBar——_build_ui 已把 tabBar 赋给局部变量
+        ``tab_bar`` 以承接右键菜单接线，需求 5。)
+        """
         import inspect
 
         src = inspect.getsource(MainWindow._build_ui)
         self.assertIn("setMovable(True)", src)
-        self.assertIn(".tabBar().tabMoved.connect(self._on_tab_moved)", src)
+        self.assertIn("tab_bar.tabMoved.connect(self._on_tab_moved)", src)
         self.assertIn("def _on_tab_moved", inspect.getsource(MainWindow))
 
 

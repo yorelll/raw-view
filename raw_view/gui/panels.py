@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -221,6 +220,10 @@ class ControlPanel(QWidget):
         # ── Layout ──
         form = QFormLayout(content)
         form.setVerticalSpacing(10)
+        # 供条件显隐（_set_row_visibility）隐藏控件时同步隐藏其行标签——
+        # 主 QFormLayout 直接行：只隐藏 field 时 QFormLayout 的行 label 仍会
+        # 留在表单里占一行（实测验证），必须 field+label 一起隐藏行才真正收起。
+        self._main_form = form
         form.addRow("Preset", preset_row)
 
         # Separator: the Preset row is "preset management"; everything below
@@ -235,36 +238,20 @@ class ControlPanel(QWidget):
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
 
-        # ── 条件显隐区：RAW 高级参数 + YOnly 位深 ──────────────────────
-        # 不复用折叠组（用户判定折叠太丑）：只有选择目标时才「显示」，否则完全
-        # 隐藏（不是禁用），面板保持清爽。
-        #   - Type=RAW   → 显示 高级参数（Alignment/Endianness/RAW preview/Bayer）
-        #   - Format=YOnly → 显示 Bit depth + Alignment + Endianness（16-bit 存储需要）
-        #   - 其它      → 全部隐藏
-        self.adv_form = QFormLayout()
-        self.adv_form.setContentsMargins(0, 0, 0, 0)
-        self.adv_form.setVerticalSpacing(10)
-        self.adv_form.addRow("Bit depth", self.bit_depth_combo)
-        self.adv_form.addRow("Alignment", self.align_combo)
-        self.adv_form.addRow("Endianness", self.endian_combo)
-        self.adv_form.addRow("RAW preview", self.raw_preview_combo)
-        self.adv_form.addRow("Bayer pattern", self.bayer_pattern_combo)
-        # 用容器框住这些行：需要控制 form 中整组行的显隐时，把容器自身显隐切换，
-        # 但 QFormLayout 里切换容器可见需容器自己有布局并 setVisible。
-        self.advanced_section = QWidget()
-        self.advanced_section.setLayout(self.adv_form)
-        form.addRow(self.advanced_section)
+        # ── 条件显隐区：RAW 高级参数 + YOnly 位深（主 QFormLayout 直接行）──
+        # 不做折叠组；这些行是主表单的直接行，每个 label+field 一行。行本身
+        # 不放进容器，显隐由「状态槽同步主表单行可见性」控制：
+        #   - Type=RAW            → 显示 Alignment/Endianness/RAW preview/Bayer
+        #   - Type=YUV+Format=YOnly → 显示 Bit depth/Alignment/Endianness
+        #   - 其它（YUV 非 YOnly / Standard Image）→ 全部隐藏
+        form.addRow("Bit depth", self.bit_depth_combo)
+        form.addRow("Alignment", self.align_combo)
+        form.addRow("Endianness", self.endian_combo)
+        form.addRow("RAW preview", self.raw_preview_combo)
+        form.addRow("Bayer pattern", self.bayer_pattern_combo)
 
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
-
-        # ── UI-9 帧大小/内存提示：随宽高/格式实时更新，超 512MB 时标红并
-        # 禁用 Apply（与 CLI/GUI 统一的 MAX_DECODE_BYTES 保护呼应）。────────
-        self.frame_size_hint = QLabel("")
-        self.frame_size_hint.setWordWrap(True)
-        self.frame_size_hint.setObjectName("frameSizeHint")
-        form.addRow("Estimated frame", self.frame_size_hint)
-
         form.addRow("Offset", self.offset_spin)
         form.addRow("Zoom", zoom_row)
 
@@ -308,7 +295,8 @@ class ControlPanel(QWidget):
         self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
             spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
-        # UI-9：宽高/格式/位深/对齐变化时刷新"Estimated frame"提示与 Apply 门禁
+        # UI-9：宽高/格式/位深/对齐变化时刷新 Apply 门禁（Estimated frame 提示
+        # 已按需求 3 移除，门禁逻辑保留）
         self.width_spin.valueChanged.connect(lambda _v: self._refresh_frame_size_hint())
         self.height_spin.valueChanged.connect(lambda _v: self._refresh_frame_size_hint())
         self.format_combo.currentTextChanged.connect(lambda _f: self._refresh_frame_size_hint())
@@ -422,13 +410,15 @@ class ControlPanel(QWidget):
             widget.setEnabled(enabled)
 
     def _refresh_frame_size_hint(self) -> None:
-        """按当前宽高/格式估算单帧字节数并更新提示与 Apply 门禁（UI-9）。
+        """按当前宽高/格式估算单帧字节数并刷新 Apply 门禁（UI-9 内部逻辑）。
 
-        - 计算失败（如 YUV 偶数宽高校验、非法参数）→ 提示置空、Apply 恢复可用；
-        - 超过 MAX_DECODE_BYTES（512MB）→ 标红警告 + 禁用 Apply，阻止大帧 OOM
+        Estimated frame 提示标签已按需求 3 从 UI 移除（状态栏已有
+        ``Image: WxH (frame_size)``），这里只保留**必要**的 512MB 门禁：
+        - 计算失败（如 YUV 偶数宽高校验、非法参数）→ Apply 恢复可用；
+        - 超过 MAX_DECODE_BYTES（512MB）→ 禁用 Apply，阻止大帧 OOM
           （与 decode_current / CLI 的 require_decode_size 保护语义一致，只是提前
-          到参数编辑阶段）。
-        - 其它 → 只更新信息，不干扰 Apply（对齐/位深变化不触发禁用）。
+          到参数编辑阶段）；
+        - 其它 → 只更新门禁，不干扰 Apply（对齐/位深变化不触发禁用）。
         """
         fmt = self.format_combo.currentText()
         image_type = self.type_combo.currentText()
@@ -462,23 +452,15 @@ class ControlPanel(QWidget):
                 frame_size = expected_frame_size_raw(fmt, width, height)
         except (FormatError, ValueError):
             # 非法参数（偶数宽高要求不满足等）不可能解码成功，这里不做门禁——
-            # 解码时会由 worker 报错。仅清空提示、恢复 Apply。
-            self.frame_size_hint.setText("")
-            self.frame_size_hint.setStyleSheet("")
+            # 解码时会由 worker 报错。仅恢复 Apply。
             _set_apply(True)
             return
         if not dynamic:
-            self.frame_size_hint.setText("")
-            self.frame_size_hint.setStyleSheet("")
+            _set_apply(True)
             return
-        text = f"{width}x{height}  ≈  {_format_size(frame_size)} / 帧"
         if frame_size > MAX_DECODE_BYTES:
-            self.frame_size_hint.setText(f"⚠ {text}（超过 {MAX_DECODE_BYTES // (1024 * 1024)}MB 解码上限）")
-            self.frame_size_hint.setStyleSheet("color: #E53935; font-weight: 600;")
             _set_apply(False)
         else:
-            self.frame_size_hint.setText(text)
-            self.frame_size_hint.setStyleSheet("color: #9AA0AC;")
             _set_apply(True)
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
@@ -532,36 +514,46 @@ class ControlPanel(QWidget):
         fmt = self.format_combo.currentText()
         image_type = self.type_combo.currentText()
         if image_type == "RAW":
-            # 位深下拉是 YOnly 专用（需求 1/2）；RAW 用 Format 自身（RAW8/10/12/16）
-            # 表达位深，不应显示 Bit depth 行。
             self._set_advanced_visible(
                 bit=False, align=True, endian=True, preview=True, bayer=(
                     self.raw_preview_combo.currentText().startswith("Bayer")
-                ), section=True,
+                ),
             )
         elif image_type == "YUV" and fmt == "YOnly":
             self._set_advanced_visible(
-                bit=True, align=True, endian=True, preview=False, bayer=False, section=True,
+                bit=True, align=True, endian=True, preview=False, bayer=False,
             )
         else:
-            self._set_advanced_visible(False, False, False, False, False, section=False)
+            self._set_advanced_visible(False, False, False, False, False)
 
-    def _set_advanced_visible(self, bit, align, endian, preview, bayer, section) -> None:
-        """统一控制条件显隐区各控件与容器的显隐/可用性。
+    def _set_advanced_visible(self, bit, align, endian, preview, bayer) -> None:
+        """统一控制条件显隐区（主 QFormLayout 直接行）各控件的显隐/可用性。
 
-        显隐优先：section 为 False 时整组行隐藏；为 True 时按各控件 flag 控制
-        可见性与 enabled（其中隐藏的控件同时禁用，避免 tab 焦点/键盘可达）。
+        隐藏的控件同时禁用，避免 tab 焦点/键盘可达。因这些行是主 QFormLayout
+        的直接行，隐藏 field 必须**连带隐藏其行 label** 行才会真正从表单中收起
+        （实测：只隐藏 field，QFormLayout 仍会把 label 留在原位占一行）。
         """
-        self.advanced_section.setVisible(section)
-        for widget, visible in (
-            (self.bit_depth_combo, bit),
-            (self.align_combo, align),
-            (self.endian_combo, endian),
-            (self.raw_preview_combo, preview),
-            (self.bayer_pattern_combo, bayer),
-        ):
-            widget.setVisible(section and visible)
-            widget.setEnabled(section and visible)
+        self._set_row_visibility((self.bit_depth_combo, bit))
+        self._set_row_visibility((self.align_combo, align))
+        self._set_row_visibility((self.endian_combo, endian))
+        self._set_row_visibility((self.raw_preview_combo, preview))
+        self._set_row_visibility((self.bayer_pattern_combo, bayer))
+
+    def _set_row_visibility(self, item: tuple) -> None:
+        """``(field, visible)`` 的行的 field 与 label 同步显隐/启用。
+
+        不依赖 Qt 自动同步（实测只藏 field 不会收起 label 行），手动把主表单里
+        该 field 的 label 一起 setVisible / setEnabled，保证行整体收起、不残留
+        孤零零的 label 占位。
+        """
+        field, visible = item
+        visible = bool(visible)
+        field.setVisible(visible)
+        field.setEnabled(visible)
+        label = self._main_form.labelForField(field) if self._main_form else None
+        if label is not None:
+            label.setVisible(visible)
+            label.setEnabled(visible)
 
     # ── internal slots ───────────────────────────────────────────────
 
@@ -607,12 +599,8 @@ class ControlPanel(QWidget):
         self.typeChanged.emit(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:
-        # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件
-        is_raw = self.type_combo.currentText() == "RAW"
-        self.bayer_pattern_combo.setVisible(
-            is_raw and self.advanced_section.isVisible() and value.startswith("Bayer")
-        )
-        self.bayer_pattern_combo.setEnabled(
-            is_raw and self.advanced_section.isVisible() and value.startswith("Bayer")
-        )
+        # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件（连同行 label 一起显隐，
+        # 否则隐藏 field 后 label 仍占一行，见 _set_row_visibility 注释）
+        is_bayer = self.type_combo.currentText() == "RAW" and value.startswith("Bayer")
+        self._set_row_visibility((self.bayer_pattern_combo, is_bayer))
         self.rawPreviewChanged.emit(value)

@@ -328,8 +328,15 @@ class MainWindow(QMainWindow):
         # QTabWidget 移动标签后不会自动同步 ``self.items``，由 tabBar.tabMoved
         # 信号（见 :meth:`_on_tab_moved`）负责把 items 重排成与视觉顺序一致。
         self.item_tabs.setMovable(True)
+        # 标签名称区域右键 → "Close All Items" / "Close Items to the Right"
+        # （需求 5）。setContextMenuPolicy(CustomContextMenu) 只接管标签栏上的
+        # 右键，不干扰标签右侧的关闭 X 按钮（QTabBar::close-button 仍由
+        # tabCloseRequested 处理）与拖拽排序（可见 tabBar 自身事件）。
+        tab_bar = self.item_tabs.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._show_tab_context_menu)
         self.item_tabs.tabCloseRequested.connect(self.close_item)
-        self.item_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
+        tab_bar.tabMoved.connect(self._on_tab_moved)
         self.item_tabs.currentChanged.connect(self._on_tab_changed)
 
         # Right side: a stack that shows an empty-state placeholder until the
@@ -586,16 +593,11 @@ class MainWindow(QMainWindow):
             action.setIcon(self._build_action_icon(icon_name))
             toolbar.addAction(action)
 
-        # UI-6：上一/下一文件的快捷入口（默认隐藏，有同目录文件组时才可用，
-        # 与菜单快捷键 Ctrl+Left/Right 一致）。
-        prev_file_icon = self._build_action_icon("fa5s.arrow-left")
-        next_file_icon = self._build_action_icon("fa5s.arrow-right")
-        self.prev_file_action.setIcon(prev_file_icon)
-        self.next_file_action.setIcon(next_file_icon)
+        # 上一/下一文件的入口保留在 Navigate 菜单（Ctrl+Left/Right），不再是
+        # 工具栏常驻箭头按钮（需求 4）；状态栏和菜单是唯一入口。
+        # 给动作保留 tooltip，便于菜单 hover 时提示快捷键（工具栏不展示它们）。
         self.prev_file_action.setToolTip("Previous file in the same folder (Ctrl+Left)")
         self.next_file_action.setToolTip("Next file in the same folder (Ctrl+Right)")
-        toolbar.addAction(self.prev_file_action)
-        toolbar.addAction(self.next_file_action)
 
         toolbar.addSeparator()
 
@@ -1017,6 +1019,79 @@ class MainWindow(QMainWindow):
             self._on_tab_changed(self.item_tabs.currentIndex())
         self._update_center_stack()
         self._refresh_file_nav_actions()
+
+    # ── 标签右键菜单（需求 5）────────────────────────────────────────
+
+    def _show_tab_context_menu(self, pos) -> None:
+        """标签名称区域右键 → Close All Items / Close Items to the Right。
+
+        被右击的标签通过 ``tabBar().tabAt(pos)`` 定位，并在菜单弹出**前先选中
+        它**（明确操作对象，也保证 close-items-to-the-right 的语义与右键目标
+        一致）。``pos`` 来自 ``customContextMenuRequested``，为 tabBar 本地坐标，
+        ``tabAt`` 直接用即可；``exec_`` 返回被点选的 QAction，用对象身份对比
+        分派（不经 triggered 信号，避免与动作上的连接重复执行）。
+        """
+        tab_bar = self.item_tabs.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index >= 0:
+            self.item_tabs.setCurrentIndex(index)
+        # 用 __dict__.get 而非 getattr(…, None)：__new__ 构造的测试桩（未调用
+        # QObject.__init__）上 getattr 会抛 RuntimeError 而非返回默认值。
+        menu = self.__dict__.get("_tabRMenu")
+        if menu is None:
+            menu = self._build_tab_context_menu()
+        selected = menu.exec_(tab_bar.mapToGlobal(pos))
+        self._run_tab_menu_action(selected, index)
+
+    def _run_tab_menu_action(self, action, index: int) -> None:
+        """按 exec_ 返回的 QAction 对象身份分派右键菜单命令。
+
+        拆成独立可测方法：真实流程里 ``menu.exec_`` 会阻塞等待交互，测试直接
+        调用本方法验证分派与行为，无需弹出菜单。
+        """
+        if action is None:
+            return
+        if action is self.__dict__.get("_acTabCloseAll"):
+            self.close_all_items()
+        elif action is self.__dict__.get("_acTabCloseRight"):
+            self.close_items_to_the_right(index)
+
+    def _build_tab_context_menu(self) -> QMenu:
+        """创建并缓存标签右键菜单（英文文案，无快捷键）。
+
+        动作与菜单都以 ``item_tabs``（真实 QObject）为父对象：真实窗口与
+        ``MainWindow.__new__`` 测试桩（不带完整 Qt 初始化）下都能安全构造。
+        两个 action 不带 triggered 连接：真正分派在 ``_show_tab_context_menu``
+        里按 exec_ 返回的对象身份完成，避免 `QMenu.exec_` 触发动作再叠加一次。
+        """
+        parent = self.item_tabs
+        close_all = QAction("Close All Items", parent)
+        close_right = QAction("Close Items to the Right", parent)
+        m = QMenu(parent)
+        m.addAction(close_all)
+        m.addAction(close_right)
+        self._tabRMenu = m
+        self._acTabCloseAll = close_all
+        self._acTabCloseRight = close_right
+        return m
+
+    def close_all_items(self) -> None:
+        """安全关闭所有标签与 item（倒序 close 避免索引错位）。"""
+        while self.items:
+            self.close_item(len(self.items) - 1)
+
+    def close_items_to_the_right(self, index: int) -> None:
+        """把 *index* 右侧的所有标签倒序关闭，*index* 本身与左侧不受影响。
+
+        从最右侧倒序 close，被关闭项（``items[-1]``）的索引始终稳定有效，不会
+        因先关左侧而错位。越界索引（如右键在空白区得到的 -1）直接忽略。
+        """
+        count = len(self.items)
+        if not (0 <= index < count):
+            return
+        while count > index + 1:
+            count -= 1
+            self.close_item(count)
 
     def _current_item(self) -> ViewerItem | None:
         idx = self.item_tabs.currentIndex()
@@ -1632,13 +1707,13 @@ class MainWindow(QMainWindow):
             self._toggle_fullscreen(False)
             event.accept()
             return
-        if event.key() in (Qt.Key_Up, Qt.Key_Left, Qt.Key_BracketLeft):
+        if event.key() in (Qt.Key_Up, Qt.Key_Left):
             item = self._current_item()
             if item:
                 self._nav_frame(item, -1)
             event.accept()
             return
-        if event.key() in (Qt.Key_Down, Qt.Key_Right, Qt.Key_BracketRight):
+        if event.key() in (Qt.Key_Down, Qt.Key_Right):
             item = self._current_item()
             if item:
                 self._nav_frame(item, 1)

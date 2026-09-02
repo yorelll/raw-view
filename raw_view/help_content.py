@@ -44,4 +44,12 @@ HELP_HTML = """
 <li>Conversion input supports drag-and-drop; output defaults to the folder configured in <b>Settings</b> (默认 <code>convert_out</code>，可自定义).</li>
 <li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
 </ul>
+<h3>Keyboard Shortcuts</h3>
+<ul>
+<li><b>Frame navigation</b> &mdash; Up / Left: previous frame; Down / Right: next frame; Home: first frame; End: last frame.</li>
+<li><b>File navigation</b> &mdash; Ctrl+Left: previous file in the same folder; Ctrl+Right: next file in the same folder.</li>
+<li><b>Zoom</b> &mdash; Ctrl++ (Zoom In); Ctrl+- (Zoom Out); Ctrl+0: fit to window; Ctrl+1: actual size (100%).</li>
+<li><b>View</b> &mdash; F11: toggle fullscreen; Escape: exit fullscreen.</li>
+<li><b>Transform</b> &mdash; Ctrl+R: rotate clockwise; Ctrl+Shift+R: rotate counter-clockwise; Ctrl+H: flip horizontally; Ctrl+Shift+V: flip vertically.</li>
+</ul>
 """

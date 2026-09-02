@@ -288,9 +288,10 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
         self.assertNotIn("YOnly", ControlPanel._YONLY_16BIT)
         self.assertNotIn("YOnly8", ControlPanel._YONLY_16BIT)
 
-    def test_advanced_section_conditional_visibility(self):
-        # 需求 1/2：高级参数不复用折叠，而是"只有选目标才显示"。
-        #   RAW → 显示高级参数（align/endian/preview/bayer）
+    def test_advanced_conditional_visibility(self):
+        # 需求 1/2：高级参数不做折叠容器，而是"只有选目标才显示"（主 QFormLayout
+        # 直接行，逐控件 setVisible）。
+        #   RAW → 显示高级参数（align/endian/preview/bayer），隐藏 bit depth
         #   YUV+YOnly → 显示 bit depth + align + endian
         #   其它 → 全部隐藏
         from PyQt5.QtWidgets import QApplication
@@ -299,17 +300,21 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
 
         p = ControlPanel()
         try:
-            # RAW 默认：advanced 显示
+            # RAW 默认：显示高级参数（无 advanced_section 容器——不再有折叠组）
+            self.assertFalse(hasattr(p, "advanced_section"))
             p.set_type("RAW")
-            self.assertFalse(p.advanced_section.isHidden())
             self.assertFalse(p.align_combo.isHidden())
-            # YUV 默认 YUYV：隐藏
+            self.assertFalse(p.endian_combo.isHidden())
+            self.assertFalse(p.raw_preview_combo.isHidden())
+            self.assertFalse(p.bayer_pattern_combo.isHidden())
+            # RAW 隐藏 bit depth（位深由 Format 自身表达，需求 1）
+            self.assertTrue(p.bit_depth_combo.isHidden())
+            # YUV 默认 YUYV：全部隐藏
             p.set_type("YUV")
-            self.assertTrue(p.advanced_section.isHidden())
             self.assertTrue(p.align_combo.isHidden())
+            self.assertTrue(p.bit_depth_combo.isHidden())
             # 切 YOnly：显示 bit depth + align + endian，隐藏 preview/bayer
             p.set_format("YOnly")
-            self.assertFalse(p.advanced_section.isHidden())
             self.assertFalse(p.bit_depth_combo.isHidden())
             self.assertFalse(p.align_combo.isHidden())
             self.assertFalse(p.endian_combo.isHidden())

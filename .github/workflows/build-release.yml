@@ -196,33 +196,24 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**227 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**260 passed**）。
 
-            ### 🆕 0.3.0 主要变更
+            ### 🆕 0.3.1 主要变更
 
-            **YOnly 单格式 + Bit depth 配置**
-            - YOnly 收敛为一个格式（不再有 YOnly8/10/12/14/16 独立条目），面板 / Convert / Batch / 多变体新增
-              **Bit depth 下拉**（8/10/12/14/16）：选 YOnly 后配置位深即按对应语义解析/生成。
-            - 支持 `.y` / `.grey` 后缀文件直接以 YOnly 打开。
+            **UI 面板优化**
+            - Bit depth 仅属 YOnly：RAW 界面不再显示 Bit depth（仅 Type=YUV+Format=YOnly 时显示）
+            - 高级控件（Alignment/Endianness/RAW preview/Bayer/Bit depth）改为主表单直接行，
+              宽度与间距统一（消除嵌套容器造成的宽窄不一与 YUYV 下 Format→Width 的多余空白）
+            - 移除面板内与状态栏重复的 "Estimated frame" 标签（超大帧 512MB 禁用 Apply 的门禁保留）
 
-            **高级参数改为条件显隐（不再折叠）**
-            - Alignment / Endianness / RAW preview / Bayer 仅在 RAW 时显示；Bit depth / 对齐 / 大小端仅在
-              YOnly 时显示——**不相关的参数完全隐藏**，面板更清爽。
+            **交互优化**
+            - 工具栏不再常驻 Prev/Next File 箭头（保留 Navigate 菜单与 `Ctrl+←/→` 快捷键）
+            - 标签页右键菜单：`Close All Items` / `Close Items to the Right`（无需快捷键，英文）
+            - Help 新增 **Keyboard Shortcuts** 章节，列示全部已支持快捷键
 
-            **体验与工程增强（依据 improvement 建议落地）**
-            - 解码 LRU 缓存（DecodeCache）加速帧导航
-            - 转换覆盖确认（跳过/覆盖/全部覆盖/重命名三种策略，Convert/Batch/多变体统一）
-            - CLI batch 支持 base_dir 相对路径与 `*.png` glob 展开
-            - About 对话框 + `--version`（单一版本源）
-            - 崩溃日志钩子（sys.excepthook + Qt message handler）
-            - 标签页完整路径 tooltip + 未 Apply「●」标记；`Ctrl+←/→` 上一文件/下一文件
-            - 面板实时帧大小估算，超 512MB 自动禁用 Apply（大帧预检）
-            - 新增 `[`/`]` 快速翻帧快捷键
-
-            **本版代码 review（agent 复核）修正**
-            - 解码缓存键补 offset（防多帧串帧）；缓存命中补写 current_display
-            - 标签未保存●清除时机修正；tab 切换后 Apply 门禁恢复
-            - 相邻文件翻页、RAW 不再误显 Bit depth、对话框首次打开控件不灰置等 13 处修正
+            **清理**
+            - 移除 `[`/`]` 翻帧快捷键（此前误加）：翻帧仅保留方向键（←/↑ 上一、→/↓ 下一、Home 首、End 末）
+            - 本版经独立 agent 双重审查确认：Help 所列快捷键与真实代码一致，无残留/过期描述
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
