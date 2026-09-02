@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -30,6 +31,39 @@ except ImportError:  # pragma: no cover
 def _require_cv2() -> None:
     if cv2 is None:
         raise RuntimeError("opencv-python is required for image file conversion")
+
+
+def resolve_output_path_collision(
+    output_path: str,
+    on_existing: str = "overwrite",
+    prefer_keep: bool = False,
+) -> str:
+    """处理目标输出路径已存在时的命名（P1-6「转换加覆盖确认」）。
+
+    只做**纯路径解析**（不写盘），供 GUI 单文件/多变体/Batch 转换统一使用：
+
+    - ``on_existing == "overwrite"`` → 原路径不动（覆盖；默认，保持旧行为）；
+    - ``on_existing == "rename"`` → 已存在时自动改为 ``<stem>_N.ext``
+      （跳过被占用的序号），可重复生成不丢旧文件；
+    - ``on_existing == "skip"`` → 已存在返回 ``None``，由调用方跳过。
+
+    ``prefer_keep`` 供 Batch 使用：默认 ``rename`` 更安全（不因提示缺失丢文件），
+    但如果调用方在上层已经做过一次确认（如"全部覆盖"），则按该选择覆盖。
+    """
+    if on_existing == "overwrite":
+        return output_path
+    if on_existing == "skip":
+        return None if os.path.exists(output_path) else output_path
+    # rename
+    if not os.path.exists(output_path):
+        return output_path
+    p = Path(output_path)
+    stem, ext = p.stem, p.suffix
+    for i in range(1, 10_000):
+        candidate = p.with_name(f"{stem}_{i}{ext}")
+        if not os.path.exists(candidate):
+            return str(candidate)
+    return output_path  # 前 9999 个序号都被占用 → 原路径（由底层写入决定）
 
 
 def load_bgr_image(path: str) -> np.ndarray:
@@ -251,11 +285,16 @@ def generate_image_variants(
     output_dir: str | None = None,
     template: str | None = None,
     on_output=None,
+    output_paths=None,
 ) -> list[str]:
     """Generate every variant produced by :func:`plan_image_variants`.
 
     Returns the list of written output paths. ``on_output`` — if given — is
     called with each output path as it is written (useful for progress UIs).
+    ``output_paths`` — if given — is a callable ``out -> out|str`` consulted
+    on each plan to (re)resolve the target path (e.g. GUI P1-6 rename-on-
+    collision). Returned paths are recorded in ``written``; the written path
+    may differ from the planned one.
     """
     plans = plan_image_variants(
         input_path,
@@ -271,6 +310,12 @@ def generate_image_variants(
     written: list[str] = []
     for plan in plans:
         out = plan["output_path"]
+        if output_paths is not None:
+            out = output_paths(out)
+        if out is None:
+            # 覆盖策略 "skip"：该目标已存在 → 跳过本变体（不写不报错）。
+            # 调用方（batch/convert）在 plan 级解析路径时可能按单文件策略跳过。
+            continue
         os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
         if plan["target_type"] == "RAW":
             image_file_to_raw(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
@@ -34,6 +35,7 @@ from raw_view.converter import (
     image_file_to_raw,
     image_file_to_yuv,
     load_bgr_image,
+    resolve_output_path_collision,
 )
 from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 from raw_view.models import (
@@ -118,8 +120,13 @@ class BatchConvertDialog(QDialog):
 
         self.yuv_type = QComboBox()
         # YUV 类型列表与主面板 ControlPanel.YUV_FORMATS 保持一致
-        # （含 YOnly 4:0:0 全分辨率灰度）。
+        # （YOnly 是一个独立格式 + Bit depth 下拉，见 bit_depth_combo）。
         self.yuv_type.addItems(ControlPanel.YUV_FORMATS)
+
+        # YOnly 位深（仅 Format=YOnly 时显示/可用），内部映射 YOnly<bit>。
+        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo.addItems(ControlPanel.YONLY_BIT_DEPTHS)
+        self.bit_depth_combo.setCurrentText("12")
 
         self.align = QComboBox()
         self.align.addItems(["msb", "lsb"])
@@ -150,6 +157,7 @@ class BatchConvertDialog(QDialog):
         params_form.addRow("Target", self.target_type)
         params_form.addRow("RAW type", self.raw_type)
         params_form.addRow("YUV format", self.yuv_type)
+        params_form.addRow("Bit depth", self.bit_depth_combo)
         params_form.addRow("Alignment", self.align)
         params_form.addRow("Endianness", self.endian)
         params_form.addRow("RAW source", self.raw_source_mode)
@@ -174,6 +182,8 @@ class BatchConvertDialog(QDialog):
         self._progress.canceled.connect(self._on_cancel_batch)
         self._progress.hide()
         self._batch_cancelled = False
+        # P1-6：会话内"全部覆盖"开关（选中后本次对话框不再问覆盖策略）。
+        self._overwrite_all = False
 
         # ── Buttons ──
         self._run_btn = QPushButton("Start Batch Convert")
@@ -221,6 +231,8 @@ class BatchConvertDialog(QDialog):
         self.input_edit.fileDropped.connect(self._on_files_dropped)
         self.target_type.currentTextChanged.connect(self._sync_controls)
         self.raw_source_mode.currentTextChanged.connect(self._sync_controls)
+        # 切换 YUV 格式（如 YUYV→YOnly）也要重跑条件显隐：YOnly 需显示位深/对齐/端序
+        self.yuv_type.currentTextChanged.connect(self._sync_controls)
 
         self._sync_controls()
 
@@ -270,16 +282,37 @@ class BatchConvertDialog(QDialog):
 
     # ── Control sync ───────────────────────────────────────────────────
 
+    def _resolve_yuv_fmt(self) -> str:
+        """把 UI 的 YOnly + Bit depth 映射为内部有效格式名（YOnly8/10/12/14/16）。"""
+        return ControlPanel._yonly_internal_name(
+            self.yuv_type.currentText(), self.bit_depth_combo.currentText()
+        )
+
     def _sync_controls(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
-        # YOnly 多 bit（16-bit 存储）与 RAW 一样需要 Alignment/Endianness
-        is_yonly_16 = self.yuv_type.currentText() in ControlPanel._YONLY_16BIT
-        self.raw_type.setEnabled(is_raw)
-        self.align.setEnabled(is_raw or is_yonly_16)
-        self.endian.setEnabled(is_raw or is_yonly_16)
-        self.raw_source_mode.setEnabled(is_raw)
-        self.bayer_pattern.setEnabled(is_raw and is_bayer)
+        # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
+        is_yonly = self.yuv_type.currentText() == "YOnly"
+        show_raw = is_raw
+        show_bit = (not is_raw) and is_yonly
+        show_align_endian = is_raw or show_bit
+        self.raw_type.setVisible(show_raw)
+        self.bit_depth_combo.setVisible(show_bit)
+        self.align.setVisible(show_align_endian)
+        self.endian.setVisible(show_align_endian)
+        self.raw_source_mode.setVisible(is_raw)
+        self.bayer_pattern.setVisible(is_raw and is_bayer)
+        # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
+        # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用。
+        for w, shown in (
+            (self.raw_type, show_raw),
+            (self.bit_depth_combo, show_bit),
+            (self.align, show_align_endian),
+            (self.endian, show_align_endian),
+            (self.raw_source_mode, is_raw),
+            (self.bayer_pattern, is_raw and is_bayer),
+        ):
+            w.setEnabled(shown)
         self.yuv_type.setEnabled(not is_raw)
 
     # ── Batch conversion ───────────────────────────────────────────────
@@ -291,7 +324,7 @@ class BatchConvertDialog(QDialog):
             return
 
         target_type = self.target_type.currentText()
-        fmt = self.raw_type.currentText() if target_type == "RAW" else self.yuv_type.currentText()
+        fmt = self.raw_type.currentText() if target_type == "RAW" else self._resolve_yuv_fmt()
         out_w = self.width.value()
         out_h = self.height.value()
         template = self._settings.output_template
@@ -319,6 +352,27 @@ class BatchConvertDialog(QDialog):
         self._progress.setLabelText("Batch conversion in progress...")
         self._progress.show()
 
+        # P1-6 覆盖策略：默认 "rename"（不覆盖不丢文件）；用户选过"全部覆盖"
+        # 则覆盖。先一次性询问所有冲突文件（会话内记住选择）。
+        existing_paths = []
+        for _row, input_path in files:
+            out = format_output_template(
+                template, input_path, out_w, out_h, target_type,
+                output_dir=resolve_output_dir(
+                    self._same_dir_cb.isChecked(), input_path,
+                    self._settings.default_output_dirname,
+                ),
+                raw_type=self.raw_type.currentText(),
+                yuv_type=self._resolve_yuv_fmt(),
+                bayer_pattern=self.bayer_pattern.currentText(),
+                source_mode=self.raw_source_mode.currentText(),
+                alignment=self.align.currentText(),
+                endianness=self.endian.currentText(),
+            )
+            if os.path.exists(out):
+                existing_paths.append(out)
+        self._collision_policy = self._ask_overwrite_strategy(existing_paths)
+
         success_count = 0
         fail_count = 0
 
@@ -343,6 +397,17 @@ class BatchConvertDialog(QDialog):
                         self._same_dir_cb.isChecked(), input_path,
                         self._settings.default_output_dirname,
                     )
+                    # P1-6：多变体按会话策略处理已存在目标（skip → None 跳过本文件）
+                    policy = "overwrite" if self._overwrite_all else getattr(
+                        self, "_collision_policy", "rename"
+                    )
+                    if policy == "skip":
+                        self._file_table.item(row, 2).setText("Skipped (exists)")
+                        continue
+
+                    def _map_output(out: str) -> str:
+                        return resolve_output_path_collision(out, on_existing=policy)
+
                     try:
                         written = generate_image_variants(
                             input_path, formats, sizes, bayer,
@@ -351,6 +416,7 @@ class BatchConvertDialog(QDialog):
                             endianness=self.endian.currentText(),
                             output_dir=out_dir,
                             template=template,
+                            output_paths=_map_output,
                         )
                         self._file_table.item(row, 2).setText(f"OK ({len(written)} files)")
                         self._file_table.item(row, 3).setText(str(Path(written[0]).parent) if written else "")
@@ -370,13 +436,21 @@ class BatchConvertDialog(QDialog):
                         self._settings.default_output_dirname,
                     ),
                     raw_type=self.raw_type.currentText(),
-                    yuv_type=self.yuv_type.currentText(),
+                    yuv_type=self._resolve_yuv_fmt(),
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
                     endianness=self.endian.currentText(),
                 )
 
+                self._file_table.item(row, 3).setText(output_path)
+
+                # P1-6：按会话策略处理已存在的目标（skip → None 跳过本文件）
+                resolved = self._resolve_collision(output_path)
+                if resolved is None:
+                    self._file_table.item(row, 2).setText("Skipped (exists)")
+                    continue
+                output_path = resolved
                 self._file_table.item(row, 3).setText(output_path)
 
                 try:
@@ -394,7 +468,7 @@ class BatchConvertDialog(QDialog):
                         )
                     else:
                         image_file_to_yuv(
-                            input_path, output_path, self.yuv_type.currentText(),
+                            input_path, output_path, self._resolve_yuv_fmt(),
                             out_w, out_h,
                             alignment=self.align.currentText(),
                             endianness=self.endian.currentText(),
@@ -422,3 +496,46 @@ class BatchConvertDialog(QDialog):
 
     def _on_cancel_batch(self) -> None:
         self._batch_cancelled = True
+
+    # ── P1-6 覆盖确认 ───────────────────────────────────────────────────
+
+    def _ask_overwrite_strategy(self, existing_paths: list[str]) -> str:
+        """批量转换目标已存在时，一次性询问处理策略。
+
+        返回 "overwrite"（覆盖，含"全部覆盖"）/ "rename"（自动改名，默认）/
+        "skip"（遇到已存在文件标题跳过该文件）。无冲突时直接返回默认
+        "rename"（保持不覆盖不丢文件的语义）。
+        """
+        if not existing_paths:
+            # 无冲突：默认 rename（不覆盖不丢文件），避免意外覆盖历史产物。
+            return "rename"
+        if self._overwrite_all:
+            return "overwrite"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Output file exists")
+        box.setText(
+            f"{len(existing_paths)} output file(s) already exist."
+            "How do you want to handle them?"
+        )
+        rename_b = box.addButton("Rename (_1)", QMessageBox.ActionRole)
+        ovw_b = box.addButton("Overwrite All", QMessageBox.AcceptRole)
+        skip_b = box.addButton("Skip existing", QMessageBox.RejectRole)
+        box.setDefaultButton(rename_b)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is ovw_b:
+            self._overwrite_all = True
+            return "overwrite"
+        if clicked is skip_b:
+            return "skip"
+        return "rename"
+
+    def _resolve_collision(self, output_path: str) -> str | None:
+        """按当前策略解析单个输出路径；返回 None 表示应跳过（skip 策略）。"""
+        policy = getattr(self, "_collision_policy", "rename")
+        if self._overwrite_all:
+            policy = "overwrite"
+        if policy == "skip":
+            return None if os.path.exists(output_path) else output_path
+        return resolve_output_path_collision(output_path, on_existing=policy)

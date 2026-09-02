@@ -24,6 +24,7 @@ batch
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -33,6 +34,13 @@ from raw_view.formats import FormatError
 from raw_view.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def get_app_version() -> str:
+    """返回应用版本号（单一来源，ENG-6：见 raw_view.models.APP_VERSION）。"""
+    from raw_view.models import APP_VERSION
+
+    return APP_VERSION
 
 
 def _make_utf8_stdio() -> None:
@@ -77,6 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m raw_view",
         description="RAW/YUV image viewer and converter",
+    )
+    # P2-4 / ENG-6：版本号单一来源（models.APP_VERSION），CLI 与 About/Help 一致。
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {get_app_version()}",
     )
     p.add_argument(
         "mode",
@@ -151,6 +165,8 @@ def _show_batch_help() -> None:
   "offset": 0,
   "output_dir": null,             // optional. 若指定（全局或单条）则输出到该目录；
                                   // 未指定且未给 "output" 时，自动输出放到输入文件同目录。
+  "base_dir": null,               // optional (P2-3). 相对基准目录：files[].input
+                                  // 的相对路径从该目录解析；给绝对路径则忽略。
 
   "files": [
     {
@@ -171,6 +187,11 @@ def _show_batch_help() -> None:
     }
   ]
 }
+
+Glob expansion (P2-3): any "input" containing * ? []  is expanded via glob,
+e.g. "frames/*.raw" turns each match into its own entry (per-file overrides
+still apply). With "base_dir" set, relative "input" paths resolve from it
+(first when present).
 
 If "output" is omitted, the path is auto-generated from the input name
 + resolution into the "output_dir" (or a default dir next to the input).
@@ -488,6 +509,41 @@ def _run_batch(args: argparse.Namespace) -> None:
     if not files:
         print("No files to process.")
         return
+
+    # ── P2-3：相对路径基准 + glob 展开 ─────────────────────────────────
+    # "base_dir": 可选顶层字段，作为 files[].input 的基准目录（相对路径解析
+    # 基准）。glob：input 含 "*"/"?"/"[]" 时按 glob 展开成一批文件。
+    base_dir = spec.get("base_dir", "") or ""
+    if base_dir and not os.path.isabs(base_dir):
+        base_dir = os.path.abspath(base_dir)
+
+    expanded_files: list[dict] = []
+    for entry in files:
+        raw_input = entry.get("input", "")
+        if not raw_input:
+            expanded_files.append(entry)
+            continue
+        if base_dir:
+            raw_input = (
+                os.path.join(base_dir, raw_input)
+                if not os.path.isabs(raw_input)
+                else raw_input
+            )
+        if glob.has_magic(raw_input):
+            matches = sorted(glob.glob(raw_input))
+            if not matches:
+                expanded_files.append(entry)
+            else:
+                expanded_files.extend(
+                    {**entry, "input": m} for m in matches
+                )
+        elif os.path.isabs(raw_input):
+            expanded_files.append({**entry, "input": raw_input})
+        else:
+            # 不带魔法符号且为相对路径：归一为基准下（或本 CWD 下）的绝对路径，
+            # 保证 os.path.isfile 判定一致。
+            expanded_files.append({**entry, "input": os.path.abspath(raw_input)})
+    files = expanded_files
 
     success = 0
     failed = 0

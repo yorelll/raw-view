@@ -25,6 +25,7 @@ raw_pic/
 docs/review/
 docs/summary/
 docs/improvement/
+docs/ui-review/
 
 # Sensor preset exports — shared/distributed manually, never auto-committed.
 # Match common names users pick when exporting from the Preset Manager.

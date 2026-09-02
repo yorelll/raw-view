@@ -48,14 +48,18 @@ class VariantSelector(QWidget):
     """Grouped checkboxes for RAW/YUV formats, bayer patterns, and sizes."""
 
     RAW_FORMATS = list(RAW_BITS.keys())
-    YUV_FORMATS = list(YUV_BYTES_PER_PIXEL.keys())
+    # YUV 列表收敛为单个 YOnly（+位深多选），去掉 YOnly8/10/12/14/16 独立条目。
+    YUV_FORMATS = [f for f in YUV_BYTES_PER_PIXEL if not (f.startswith("YOnly") and f != "YOnly")]
     _SIZE_COLS = 3
+    # YOnly 位深多选：勾选 YOnly 格式后按这些位深展开成 YOnly<bit> 变体
+    YONLY_BITS = ["8", "10", "12", "14", "16"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         self._format_boxes: dict[str, QCheckBox] = {}
         self._bayer_boxes: dict[str, QCheckBox] = {}
+        self._yonly_bit_boxes: dict[str, QCheckBox] = {}
         # (checkbox, w, h, is_custom)
         self._size_boxes: list[tuple[QCheckBox, int, int, bool]] = []
 
@@ -70,6 +74,13 @@ class VariantSelector(QWidget):
         ))
         root.addWidget(self._make_group(
             "Formats (YUV)", self.YUV_FORMATS, self._format_boxes, columns=4,
+        ))
+        # ── YOnly 位深（仅当 YOnly 勾选时参与展开）──
+        root.addWidget(self._make_group(
+            "YOnly Bit Depth", self.YONLY_BITS, self._yonly_bit_boxes, columns=5,
+            checked={"8", "12"},
+            help_text="When YOnly is selected above, these bit depths are fanned "
+                      "out into YOnly8/10/12/14/16 variants.",
         ))
 
         # ── Bayer patterns ── (short title + hover help)
@@ -228,7 +239,19 @@ class VariantSelector(QWidget):
     # ── public accessors ──────────────────────────────────────────────
 
     def selected_formats(self) -> list[str]:
-        return [name for name, cb in self._format_boxes.items() if cb.isChecked()]
+        """所选格式；勾选 YOnly 时按选中的位深展开为 YOnly<bit> 内部名。"""
+        out: list[str] = []
+        for name, cb in self._format_boxes.items():
+            if not cb.isChecked():
+                continue
+            if name == "YOnly":
+                bits = [b for b, bcb in self._yonly_bit_boxes.items() if bcb.isChecked()]
+                if not bits:
+                    bits = ["8"]
+                out.extend(f"YOnly{b}" for b in bits)
+            else:
+                out.append(name)
+        return out
 
     def selected_bayer(self) -> list[str]:
         return [name for name, cb in self._bayer_boxes.items() if cb.isChecked()]

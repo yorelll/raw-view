@@ -23,9 +23,11 @@ HELP_HTML = """
 <p>Layout: Y(8 bytes) + U(2 bytes) + V(2 bytes). Each U/V sample covers one 2x2 luma block.</p>
 <h3>YUV Subformats</h3>
 <ul>
-<li>400 (YOnly): full-resolution grayscale, no chroma (any width/height)
-    — YOnly8 = 1 byte/pixel; YOnly10/12/14/16 = 16-bit storage (2 bytes/pixel,
-    LSB/MSB alignment + little/big endian, same semantics as RAW10/12/16).</li>
+<li>400 (YOnly): full-resolution grayscale, no chroma (any width/height).
+    YOnly is a single format; pick a bit depth (8/10/12/14/16) in the
+    Bit depth field — 8-bit = 1 byte/pixel, 10/12/14/16 = 16-bit storage
+    (2 bytes/pixel, LSB/MSB alignment + little/big endian, same semantics
+    as RAW10/12/16).</li>
 <li>420: I420, YV12, NV12, NV21</li>
 <li>422: YUYV, UYVY, YVYU, VYUY, NV16, NV61</li>
 </ul>

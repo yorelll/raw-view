@@ -5,7 +5,7 @@ from .convert import ConvertDialog
 from .fourcc import FourCCDialog
 from .preset import PresetManagerDialog
 from .settings import SettingsDialog
-from .help import HelpDialog
+from .help import AboutDialog, HelpDialog
 
 __all__ = [
     "BatchConvertDialog",
@@ -14,4 +14,5 @@ __all__ = [
     "PresetManagerDialog",
     "SettingsDialog",
     "HelpDialog",
+    "AboutDialog",
 ]

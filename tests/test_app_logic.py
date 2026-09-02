@@ -603,5 +603,55 @@ class MultiFrameOffsetRegressionTests(unittest.TestCase):
         self.assertIn("offset=6144", desc)
 
 
+# ── UI-6: 同目录文件组切换（上一/下一文件）─────────────────────────────
+
+
+class SameDirNavTests(unittest.TestCase):
+    """Regression for the P1-6-style prev/next-file nav: _same_dir_items 排除
+    自身，_nav_file_by_dir 不能把「完整有序列表中的 rank」直接当下标（siblings
+    少一个元素），否则 "c" 的下一文件会错误跳过、落到错误邻居。"""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.mkdtemp(prefix="rv-nav-")
+        for fn in ("a.raw", "b.raw", "c.raw", "d.raw"):
+            open(os.path.join(self._tmp, fn), "w").close()
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _nav(self, path: str, delta: int):
+        w = _new_window()
+        item = ViewerItem()
+        item.options.file_path = path
+        w._current_item = lambda: item
+        opened: list[str] = []
+        w._open_item = lambda p, decode=True: opened.append(os.path.basename(p))
+        w._nav_file_by_dir(delta)
+        return opened
+
+    def test_next_from_middle(self):
+        base = os.path.join(self._tmp, "c.raw")
+        self.assertEqual(self._nav(base, 1), ["d.raw"])
+        self.assertEqual(self._nav(base, -1), ["b.raw"])
+
+    def test_boundaries_do_not_wrap(self):
+        head = os.path.join(self._tmp, "a.raw")
+        tail = os.path.join(self._tmp, "d.raw")
+        self.assertEqual(self._nav(head, -1), [])
+        self.assertEqual(self._nav(tail, 1), [])
+        self.assertEqual(self._nav(head, 1), ["b.raw"])
+
+    def test_same_dir_items_excludes_self(self):
+        w = _new_window()
+        item = ViewerItem()
+        item.options.file_path = os.path.join(self._tmp, "c.raw")
+        w._current_item = lambda: item
+        self.assertEqual(sorted(w._same_dir_items()), ["a.raw", "b.raw", "d.raw"])
+
+
 if __name__ == "__main__":
     unittest.main()

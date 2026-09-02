@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
@@ -30,6 +31,7 @@ from raw_view.converter import (
     image_file_to_yuv,
     load_bgr_image,
     plan_image_variants,
+    resolve_output_path_collision,
 )
 from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 from raw_view.models import (
@@ -81,8 +83,13 @@ class ConvertDialog(QDialog):
 
         self.yuv_type = QComboBox()
         # YUV 类型列表与主面板 ControlPanel.YUV_FORMATS 保持一致
-        # （含 YOnly 4:0:0 全分辨率灰度）。
+        # （YOnly 是一个独立格式 + Bit depth 下拉，见 bit_depth_combo）。
         self.yuv_type.addItems(ControlPanel.YUV_FORMATS)
+
+        # YOnly 位深（仅 Format=YOnly 时显示/可用），内部映射 YOnly<bit>。
+        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo.addItems(ControlPanel.YONLY_BIT_DEPTHS)
+        self.bit_depth_combo.setCurrentText("12")
 
         self.align = QComboBox()
         self.align.addItems(["msb", "lsb"])
@@ -101,6 +108,9 @@ class ConvertDialog(QDialog):
         self.width = QSpinBox()
         self.width.setRange(1, 65535)
         self.width.setValue(DEFAULT_CONVERT_WIDTH)
+
+        # P1-6：会话内"全部覆盖"开关（选中后本对话框不再逐个询问覆盖）。
+        self._overwrite_all = False
 
         self.height = QSpinBox()
         self.height.setRange(1, 65535)
@@ -182,6 +192,8 @@ class ConvertDialog(QDialog):
         form.addRow("Target", self.target_type)
         form.addRow("RAW type", self.raw_type)
         form.addRow("YUV format", self.yuv_type)
+        # YOnly 位深（YOnly 时显示）；其后为位对齐/大小端（YOnly 多 bit 需要）
+        form.addRow("Bit depth", self.bit_depth_combo)
         form.addRow("Alignment", self.align)
         form.addRow("Endianness", self.endian)
         form.addRow("RAW source", self.raw_source_mode)
@@ -262,6 +274,8 @@ class ConvertDialog(QDialog):
         self.input_edit.textChanged.connect(self._update_preview)
         self.target_type.currentTextChanged.connect(self._sync_controls)
         self.raw_source_mode.currentTextChanged.connect(self._sync_controls)
+        # 切换 YUV 格式（如 YUYV→YOnly）也要重跑条件显隐：YOnly 需显示位深/对齐/端序
+        self.yuv_type.currentTextChanged.connect(self._sync_controls)
         self.target_type.currentTextChanged.connect(self._sync_default_output)
         self.target_type.currentTextChanged.connect(self._update_preview)
         self.width.valueChanged.connect(self._sync_default_output)
@@ -270,6 +284,8 @@ class ConvertDialog(QDialog):
         self.height.valueChanged.connect(self._update_preview)
         self.raw_type.currentTextChanged.connect(self._update_preview)
         self.yuv_type.currentTextChanged.connect(self._update_preview)
+        # YOnly 位深变化直接影响 YOnly<bit> 帧大小 → 预览帧大小需刷新
+        self.bit_depth_combo.currentTextChanged.connect(self._update_preview)
         self.align.currentTextChanged.connect(self._update_preview)
         self.raw_source_mode.currentTextChanged.connect(self._update_preview)
         self.bayer_pattern.currentTextChanged.connect(self._update_preview)
@@ -278,6 +294,8 @@ class ConvertDialog(QDialog):
         # any of them changes.
         self.raw_type.currentTextChanged.connect(self._sync_default_output)
         self.yuv_type.currentTextChanged.connect(self._sync_default_output)
+        # YOnly 位深决定 {format} 中的 YOnly<bit> 与 {bits} 占位 → 输出路径需刷新
+        self.bit_depth_combo.currentTextChanged.connect(self._sync_default_output)
         self.align.currentTextChanged.connect(self._sync_default_output)
         self.raw_source_mode.currentTextChanged.connect(self._sync_default_output)
         self.bayer_pattern.currentTextChanged.connect(self._sync_default_output)
@@ -304,16 +322,40 @@ class ConvertDialog(QDialog):
     def _sync_controls(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
-        # YOnly 多 bit（16-bit 存储）与 RAW 一样需要 Alignment/Endianness
-        yuv_fmt = self.yuv_type.currentText()
-        is_yonly_16 = yuv_fmt in ControlPanel._YONLY_16BIT
-        self.raw_type.setEnabled(is_raw)
-        self.align.setEnabled(is_raw or is_yonly_16)
-        self.endian.setEnabled(is_raw or is_yonly_16)
-        self.raw_source_mode.setEnabled(is_raw)
-        self.bayer_pattern.setEnabled(is_raw and is_bayer)
-        self.yuv_type.setEnabled(not is_raw)
+        # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
+        is_yonly = self.yuv_type.currentText() == "YOnly"
+        show_raw = is_raw
+        show_bit = (not is_raw) and is_yonly
+        show_align_endian = is_raw or show_bit
+        self.raw_type.setVisible(show_raw)
+        self.bit_depth_combo.setVisible(show_bit)
+        self.align.setVisible(show_align_endian)
+        self.endian.setVisible(show_align_endian)
+        self.raw_source_mode.setVisible(is_raw)
+        self.bayer_pattern.setVisible(is_raw and is_bayer)
         self._yuv_note.setVisible(not is_raw)
+        # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
+        # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用
+        # （0.2.2 review 发现：初启 Convert 对话框所有高级控件全灰）。
+        for w, shown in (
+            (self.raw_type, show_raw),
+            (self.bit_depth_combo, show_bit),
+            (self.align, show_align_endian),
+            (self.endian, show_align_endian),
+            (self.raw_source_mode, is_raw),
+            (self.bayer_pattern, is_raw and is_bayer),
+        ):
+            w.setEnabled(shown)
+        self.yuv_type.setEnabled(not is_raw)
+
+    def _resolve_yuv_fmt(self) -> str:
+        """把 UI 的 YOnly + Bit depth 映射为内部有效格式名（YOnly8/10/12/14/16）。
+
+        worker/converter 按 YOnly<bit> 工作；普通 YUV 原样返回。
+        """
+        return ControlPanel._yonly_internal_name(
+            self.yuv_type.currentText(), self.bit_depth_combo.currentText()
+        )
 
     def _sync_default_output(self) -> None:
         input_path = self.input_edit.text().strip()
@@ -329,7 +371,7 @@ class ConvertDialog(QDialog):
             target_type,
             output_dir=self._settings.default_output_dirname,
             raw_type=self.raw_type.currentText(),
-            yuv_type=self.yuv_type.currentText(),
+            yuv_type=self._resolve_yuv_fmt(),
             bayer_pattern=self.bayer_pattern.currentText(),
             source_mode=self.raw_source_mode.currentText(),
             alignment=self.align.currentText(),
@@ -342,6 +384,47 @@ class ConvertDialog(QDialog):
 
     def _on_output_edited(self) -> None:
         self._auto_output_path = ""
+
+    # ── P1-6 覆盖确认 ───────────────────────────────────────────────────
+
+    def _confirm_output_collision(self, output_path: str) -> str | None:
+        """目标已存在时询问用户：跳过 / 覆盖 / 全部覆盖 / 自动重命名。
+
+        返回最终写入路径；None 表示用户选择跳过，调用方应中止本次写出。
+        """
+        if not os.path.exists(output_path):
+            return output_path
+        if getattr(self, "_overwrite_all", False):
+            return output_path
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Output file exists")
+        box.setText(
+            f"Output already exists:\n{output_path}\n\n"
+            "How do you want to continue?"
+        )
+        skip_b = box.addButton("Skip", QMessageBox.RejectRole)
+        keep_b = box.addButton("Rename (_1)", QMessageBox.ActionRole)
+        ovw_b = box.addButton("Overwrite", QMessageBox.AcceptRole)
+        ovw_all_b = box.addButton("Overwrite All", QMessageBox.AcceptRole)
+        box.setDefaultButton(ovw_b)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is skip_b:
+            return None
+        if clicked is ovw_all_b:
+            self._overwrite_all = True
+            return output_path
+        if clicked is keep_b:
+            return resolve_output_path_collision(output_path, on_existing="rename")
+        return output_path
+
+    def _set_convert_busy(self, busy: bool) -> None:
+        """统一转换按钮的 busy 禁用/文案状态。"""
+        self._btn_run.setEnabled(not busy and bool(self.input_edit.text().strip()))
+        wanted = "Convert" if not busy else "Converting…"
+        if self._btn_run.text() != wanted:
+            self._btn_run.setText(wanted)
 
     def _update_preview(self) -> None:
         """Update the thumbnail preview and info labels."""
@@ -383,7 +466,7 @@ class ConvertDialog(QDialog):
                 except Exception:
                     fsize = 0
             else:
-                fmt = self.yuv_type.currentText()
+                fmt = self._resolve_yuv_fmt()
                 try:
                     # alignment/endianness 对 YOnly 多 bit 决定 16-bit 存储帧大小
                     fsize = expected_frame_size_yuv(
@@ -405,14 +488,12 @@ class ConvertDialog(QDialog):
     def _convert(self) -> None:
         # Busy feedback: disable the button and show progress text so the user
         # knows work is happening (conversion is synchronous).
-        self._btn_run.setEnabled(False)
-        self._btn_run.setText("Converting…")
+        self._set_convert_busy(True)
         QApplication.processEvents()
         try:
             self._do_convert()
         finally:
-            self._btn_run.setText("Convert")
-            self._btn_run.setEnabled(bool(self.input_edit.text().strip()))
+            self._set_convert_busy(False)
 
     def _do_convert(self) -> None:
         try:
@@ -429,7 +510,7 @@ class ConvertDialog(QDialog):
                     target_type,
                     output_dir=self._settings.default_output_dirname,
                     raw_type=self.raw_type.currentText(),
-                    yuv_type=self.yuv_type.currentText(),
+                    yuv_type=self._resolve_yuv_fmt(),
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
@@ -440,6 +521,14 @@ class ConvertDialog(QDialog):
             if not output_path:
                 raise ValueError("output path is required")
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+            # P1-6 覆盖确认：目标已存在时弹"跳过/覆盖/全部覆盖/重命名"。
+            # 返回 None 表示用户选择跳过 → 直接结束本次转换。
+            resolved = self._confirm_output_collision(output_path)
+            if resolved is None:
+                self._set_convert_busy(False)
+                return
+            output_path = resolved
 
             if self.target_type.currentText() == "RAW":
                 image_file_to_raw(
@@ -457,7 +546,7 @@ class ConvertDialog(QDialog):
                 image_file_to_yuv(
                     input_path,
                     output_path,
-                    self.yuv_type.currentText(),
+                    self._resolve_yuv_fmt(),
                     self.width.value(),
                     self.height.value(),
                     alignment=self.align.currentText(),
@@ -514,6 +603,20 @@ class ConvertDialog(QDialog):
             self._btn_variants.setText(f"Generating {done['n']}/{len(plans)}…")
             QApplication.processEvents()
 
+        # P1-6\uff1a\u591a\u53d8\u4f53\u76ee\u6807\u5df2\u5b58\u5728\u65f6\u6309\u5df2\u9009\u7b56\u7565\u5904\u7406\u3002\u9ed8\u8ba4 "rename"\uff08\u4e0d\u8986\u76d6\u4e0d\u4e22
+        # \u6587\u4ef6\uff09\uff1b\u7528\u6237\u5728\u5f53\u524d\u4f1a\u8bdd\u91cc\u9009\u4e86"\u5168\u90e8\u8986\u76d6"\u5219\u8986\u76d6\u3002
+        collision_policy = "overwrite" if self._overwrite_all else "rename"
+        rewritten: dict[str, str] = {}
+
+        def _map_output(out: str) -> str:
+            if out in rewritten:
+                return rewritten[out]
+            resolved = resolve_output_path_collision(out, on_existing=collision_policy)
+            if resolved != out:
+                # \u6a21\u677f\u7b97\u51fa\u7684\u65e7\u6587\u4ef6\u6240\u5728\u5e8f\u53f7\u53ef\u80fd\u53cd\u590d\u51fa\u73b0\u540c\u4e00\u540d\u5b57 \u2192 \u8bb0\u5fc6\u4e00\u6b21\u6620\u5c04
+                rewritten[out] = resolved
+            return resolved
+
         try:
             written = generate_image_variants(
                 input_path, formats, sizes, bayer,
@@ -521,6 +624,7 @@ class ConvertDialog(QDialog):
                 output_dir=self._settings.default_output_dirname,
                 template=self._settings.output_template,
                 on_output=_progress,
+                output_paths=_map_output,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Generate Variants Failed", f"\u274c {exc}")

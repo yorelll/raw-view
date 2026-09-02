@@ -79,6 +79,7 @@ from raw_view.gui.framenav import FrameNavBar
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import (
+    AboutDialog,
     BatchConvertDialog,
     ConvertDialog,
     FourCCDialog,
@@ -86,7 +87,7 @@ from raw_view.gui.dialogs import (
     PresetManagerDialog,
     SettingsDialog,
 )
-from raw_view.gui.worker import DecodeWorker
+from raw_view.gui.worker import DecodeCache, DecodeWorker
 
 
 class DropCentralWidget(QWidget):
@@ -186,6 +187,9 @@ _YUV_EXTS: dict[str, str] = {
     ".vyuy": "VYUY",
     ".nv16": "NV16",
     ".nv61": "NV61",
+    # Y-only (YUV 4:0:0) 后缀：打开后面板 Format=YOnly + Bit depth 由用户选择
+    ".y": "YOnly",
+    ".grey": "YOnly",
 }
 
 # Extensions the viewer can actually open / decode. Directory drag-drop scans
@@ -276,6 +280,10 @@ class MainWindow(QMainWindow):
         # the generation counter, this lets us drop results that belong to a
         # different tab (item identity check in ``_should_apply_decode``).
         self._pending_decode_item: ViewerItem | None = None
+        # P1-1 解码缓存：同一 (文件/格式/尺寸/位对齐/端序/帧) 的重复解码直接复用，
+        # 避免来回翻帧时反复全量解码。数据在后台线程计算，缓存键由主线程生成并
+        # 于结果返回后写入（缓存本身只在主线程访问，无需跨线程锁）。
+        self.decode_cache = DecodeCache()
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -460,6 +468,17 @@ class MainWindow(QMainWindow):
         prev_tab.setShortcut("Ctrl+Shift+Tab")
         prev_tab.triggered.connect(self._prev_tab)
         nav_menu.addActions([next_tab, prev_tab])
+        nav_menu.addSeparator()
+        # UI-6：上一文件/下一文件（同目录文件组之间切换）。
+        self.prev_file_action = QAction("Previous File", self)
+        self.prev_file_action.setShortcut("Ctrl+Left")
+        self.prev_file_action.setEnabled(False)
+        self.prev_file_action.triggered.connect(lambda: self._nav_file_by_dir(-1))
+        self.next_file_action = QAction("Next File", self)
+        self.next_file_action.setShortcut("Ctrl+Right")
+        self.next_file_action.setEnabled(False)
+        self.next_file_action.triggered.connect(lambda: self._nav_file_by_dir(1))
+        nav_menu.addActions([self.prev_file_action, self.next_file_action])
 
         # ── View ── (grouped: zoom / display mode / transform)
         view_menu = menu.addMenu("View")
@@ -535,6 +554,9 @@ class MainWindow(QMainWindow):
         fmt_help = QAction("Format Help", self)
         fmt_help.triggered.connect(self.show_help)
         help_menu.addAction(fmt_help)
+        about_action = QAction("About raw-view", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
 
     def _build_toolbar(self) -> None:
         toolbar = self.addToolBar("Main")
@@ -563,6 +585,17 @@ class MainWindow(QMainWindow):
         ]:
             action.setIcon(self._build_action_icon(icon_name))
             toolbar.addAction(action)
+
+        # UI-6：上一/下一文件的快捷入口（默认隐藏，有同目录文件组时才可用，
+        # 与菜单快捷键 Ctrl+Left/Right 一致）。
+        prev_file_icon = self._build_action_icon("fa5s.arrow-left")
+        next_file_icon = self._build_action_icon("fa5s.arrow-right")
+        self.prev_file_action.setIcon(prev_file_icon)
+        self.next_file_action.setIcon(next_file_icon)
+        self.prev_file_action.setToolTip("Previous file in the same folder (Ctrl+Left)")
+        self.next_file_action.setToolTip("Next file in the same folder (Ctrl+Right)")
+        toolbar.addAction(self.prev_file_action)
+        toolbar.addAction(self.next_file_action)
 
         toolbar.addSeparator()
 
@@ -729,6 +762,55 @@ class MainWindow(QMainWindow):
         else:
             self.frame_status.setText("Frame: -")
 
+    # ── UI-6：同目录文件组切换 ────────────────────────────────────────
+
+    def _same_dir_items(self) -> list[str]:
+        """当前项同目录下按名称排序的支持文件列表（排除了自身）。"""
+        item = self._current_item()
+        path = item.options.file_path if item else ""
+        directory = os.path.dirname(path)
+        try:
+            candidates = [
+                p for p in os.listdir(directory)
+                if _is_supported_file(p) and p != os.path.basename(path)
+            ]
+        except OSError:
+            return []
+        return sorted(candidates)
+
+    def _nav_file_by_dir(self, delta: int) -> None:
+        """打开同目录文件组中的上一个/下一个支持文件（UI-6）。
+
+        名称排序后按 delta=-1/+1 取相邻项；已在最前/最后时忽略。新文件以
+        ``_open_item(decode=True)`` 打开（沿用默认参数），不弹尺寸警告。
+        """
+        item = self._current_item()
+        if item is None:
+            return
+        directory = os.path.dirname(item.options.file_path)
+        siblings = self._same_dir_items()
+        if not siblings:
+            return
+        cur_name = os.path.basename(item.options.file_path)
+        # siblings 已排除自身。rank = 当前文件在「含自身完整有序列表」中的位置
+        # （= 字典序小于自身的兄弟数量）。上一/下一兄弟在 siblings 中的下标与
+        # rank 的关系：
+        #   delta=-1 → siblings[rank-1]（当前之前一位的兄弟）
+        #   delta=+1 → siblings[rank]  （当前之后一位的兄弟，因为 rank 已扣掉自身）
+        # 不能用 rank+delta 直接当下标（rank 是完整列表位置，siblings 少一个元素）。
+        rank = sum(1 for s in siblings if s < cur_name)
+        new_idx = rank - 1 if delta == -1 else rank
+        if not (0 <= new_idx < len(siblings)):
+            return
+        self._open_item(os.path.join(directory, siblings[new_idx]), decode=True)
+
+    def _refresh_file_nav_actions(self) -> None:
+        """打开/关闭标签后刷新上一/下一文件动作的可用性。"""
+        count = len(self._same_dir_items())
+        both = count >= 1
+        self.prev_file_action.setEnabled(both)
+        self.next_file_action.setEnabled(both)
+
     # ── Tab navigation ──────────────────────────────────────────────
 
     def _next_tab(self) -> None:
@@ -833,7 +915,10 @@ class MainWindow(QMainWindow):
 
         self.items.append(item)
         index = self.item_tabs.addTab(container, os.path.basename(path))
+        # UI-4：标签 tooltip 显示完整路径（悬停即见）。
+        self.item_tabs.setTabToolTip(index, path)
         self.item_tabs.setCurrentIndex(index)
+        self._refresh_file_nav_actions()
         self.panel.set_enabled(True)
         self._update_center_stack()
 
@@ -889,9 +974,12 @@ class MainWindow(QMainWindow):
             self._sync_status_from_item(self.items[index])
         self.panel.set_enabled(index >= 0)
         # set_enabled(True) enables all controls blindly, so re-sync
-        # type-specific control states (e.g., disable bayer for YUV).
+        # type-specific control states (e.g., disable bayer for YUV) and
+        # re-evaluate the frame-size gate (set_values→set_enabled 会把超大帧
+        # 时被禁用的 Apply 重新启用，这里再按当前参数恢复门禁)。
         if index >= 0:
             self.panel._sync_type_enabled()
+            self.panel._refresh_frame_size_hint()
 
     def _active_item(self) -> ViewerItem | None:
         """当前活动引用的 item（对象身份），结构变更后仍能定位真实对象。"""
@@ -928,6 +1016,7 @@ class MainWindow(QMainWindow):
             self._active_item_ref = None
             self._on_tab_changed(self.item_tabs.currentIndex())
         self._update_center_stack()
+        self._refresh_file_nav_actions()
 
     def _current_item(self) -> ViewerItem | None:
         idx = self.item_tabs.currentIndex()
@@ -952,6 +1041,10 @@ class MainWindow(QMainWindow):
         # only meaningful for RAW decoding, which decides by ``image_type``.
         item.options.preview_mode = vals["preview_mode"]
         item.options.bayer_pattern = vals["bayer_pattern"]
+        # 注意：这里**不能**顺便清掉标签的未保存标记（●）。本函数还被
+        # _on_tab_changed（保存上一标签的面板值）与 _on_preset_selected 调用，
+        # 那些场景并没有真正 Apply/解码 → 清 ● 会让用户误以为已生效。
+        # 清除标记放在解码真正成功之后（_on_decode_success）。
 
     def _load_item_to_panel(self, item: ViewerItem) -> None:
         self._loading_item = True
@@ -1007,8 +1100,38 @@ class MainWindow(QMainWindow):
         """A decode parameter was edited — flag that Apply is needed."""
         if self._loading_item:
             return
-        if self._current_item() is not None:
+        item = self._current_item()
+        if item is not None:
             self._set_state("Unapplied changes — click Apply", "busy")
+            # UI-4：标签显示未保存标记（"●"直到 Apply 应用）。
+            self._set_tab_dirty(item, True)
+
+    def _set_tab_dirty(self, item: ViewerItem, dirty: bool) -> None:
+        """UI-4：当前项对应标签的 tooltip 显示完整路径；未 Apply 时加 ● 前缀。
+
+        只更新与 *item* 对象身份一致的标签（拖拽重排后不误改邻居）。
+        """
+        items = self.__dict__.get("items") or []
+        tabs = self.__dict__.get("item_tabs")
+        if tabs is None:
+            # 测试常用 MainWindow.__new__ 构造（无标签控件），保持既有契约。
+            return
+        for i, it in enumerate(items):
+            if it is item:
+                index = i
+                break
+        else:
+            return
+        if dirty:
+            self.item_tabs.setTabToolTip(index, f"● {item.options.file_path or ''}")
+            self.item_tabs.setTabText(
+                index, f"● {os.path.basename(item.options.file_path)}"
+            )
+        else:
+            self.item_tabs.setTabToolTip(index, item.options.file_path or "")
+            self.item_tabs.setTabText(
+                index, os.path.basename(item.options.file_path)
+            )
 
     def _on_panel_type_changed(self, image_type: str) -> None:
         pass
@@ -1168,6 +1291,33 @@ class MainWindow(QMainWindow):
             if not self._warn_size_mismatch(self, actual, expected):
                 return
 
+        # P1-1 缓存命中：同一帧/同参数已解码过 → 直接复用显示结果，跳过
+        # 读取与后台线程。只有与最新参数、当前项一致的缓存才被消费
+        # （缓存键覆盖全部参数 + 帧号，天然隔离不同项/不同参数）。
+        # 注：测试常用 ``MainWindow.__new__``（不跑 __init__）构造，没有
+        # ``decode_cache`` 属性；且 getattr 在该类实例上可能因 Qt 包装层抛
+        # RuntimeError 而非 AttributeError，故用 ``__dict__`` 探测并惰性补建，
+        # 保持既有测试契约不变。
+        cache = self.__dict__.get("decode_cache")
+        if cache is None:
+            cache = self.decode_cache = DecodeCache()
+        cache_key = DecodeCache.key(opts, item.current_frame)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.debug(
+                "Decode cache hit: frame=%d format=%s %dx%d",
+                item.current_frame, opts.format_name, opts.width, opts.height,
+            )
+            # 与 _on_decode_finished 一致：命中时也要回填当前显示数组，
+            # 否则 save_display / 后续帧缓存写回会读到过期数据。
+            item.current_display = cached.display_array
+            self._on_decode_success(item, cached.qimage, cached.width, cached.height, cached.format_name)
+            item.options.width = cached.width
+            item.options.height = cached.height
+            self._pending_decode_item = None
+            self._set_state("Decoded (cached)", "ok")
+            return
+
         read_len = frame_size if frame_size > 0 else actual
         data = self._read_frame_data(path, effective_offset, read_len)
         if not data and actual > 0:
@@ -1312,9 +1462,19 @@ class MainWindow(QMainWindow):
         item.current_display = result.display_array
         item.options.width = result.width
         item.options.height = result.height
+        # P1-1：把这份刚算好的帧写入解码缓存，供前后翻帧复用
+        # （键覆盖当前参数，只对相同配置的再次请求命中）。
+        # 测试（MainWindow.__new__）未建缓存属性 → 用 __dict__ 探测并惰性补建。
+        cache = self.__dict__.get("decode_cache")
+        if cache is not None:
+            cache.store(DecodeCache.key(item.options, item.current_frame), result)
         self._on_decode_success(item, result.qimage, result.width, result.height, result.format_name)
 
     def _on_decode_success(self, item: ViewerItem, qimg: QImage, width: int, height: int, format_name: str) -> None:
+        # UI-4：解码真正成功后，用户看到的即当前参数 → 清除标签未保存标记 ●
+        # （缓存命中与后台线程结果都汇聚到这里；不能放在 _save_panel_to_item，
+        #   那会被 tab 切换/预设选择误触发）。
+        self._set_tab_dirty(item, False)
         item.view.set_pixmap(QPixmap.fromImage(qimg))
         item.view.fit_image()
         path = item.options.file_path
@@ -1472,13 +1632,13 @@ class MainWindow(QMainWindow):
             self._toggle_fullscreen(False)
             event.accept()
             return
-        if event.key() in (Qt.Key_Up, Qt.Key_Left):
+        if event.key() in (Qt.Key_Up, Qt.Key_Left, Qt.Key_BracketLeft):
             item = self._current_item()
             if item:
                 self._nav_frame(item, -1)
             event.accept()
             return
-        if event.key() in (Qt.Key_Down, Qt.Key_Right):
+        if event.key() in (Qt.Key_Down, Qt.Key_Right, Qt.Key_BracketRight):
             item = self._current_item()
             if item:
                 self._nav_frame(item, 1)
@@ -1578,6 +1738,10 @@ class MainWindow(QMainWindow):
 
     def show_help(self) -> None:
         dlg = HelpDialog(self)
+        dlg.exec_()
+
+    def show_about(self) -> None:
+        dlg = AboutDialog(self)
         dlg.exec_()
 
     def open_convert_dialog(self) -> None:
@@ -1693,6 +1857,45 @@ class MainWindow(QMainWindow):
         self._refresh_preset_combo()
 
 
+# ENG-4：未捕获异常的全局兜底 —— 把 Python 主线程与 Qt 槽（pyqtSlot 抛出的
+# 异常不会冒泡到解释器）里的异常写入独立 crash log，避免静默崩溃无从排查。
+_CRASH_ORIGINAL_EXCEPTHOOK = None
+
+
+def _install_crash_hooks() -> None:
+    global _CRASH_ORIGINAL_EXCEPTHOOK
+    if _CRASH_ORIGINAL_EXCEPTHOOK is not None:
+        return
+    _CRASH_ORIGINAL_EXCEPTHOOK = sys.excepthook
+
+    def _crash_hook(exc_type, exc_value, exc_tb) -> None:
+        try:
+            logger.critical(
+                "Uncaught exception: %s: %s",
+                exc_type.__name__, exc_value,
+                exc_info=(exc_type, exc_value, exc_tb),
+            )
+        except Exception:
+            pass
+        if callable(_CRASH_ORIGINAL_EXCEPTHOOK):
+            _CRASH_ORIGINAL_EXCEPTHOOK(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _crash_hook
+
+    try:
+        from PyQt5.QtCore import qInstallMessageHandler
+
+        def _qt_message(msg_type, context, message) -> None:
+            if msg_type in (2, 3):  # QtWarningMsg / QtCriticalMsg
+                logger.warning("Qt message: %s", message)
+            elif msg_type == 4:  # QtFatalMsg
+                logger.critical("Qt fatal: %s", message)
+
+        qInstallMessageHandler(_qt_message)
+    except Exception:
+        pass  # 非 Qt 环境（测试用 offscreen）可忽略
+
+
 def run(files: list[str] | None = None) -> None:
     """Application entry point — create QApplication and show MainWindow.
 
@@ -1701,6 +1904,7 @@ def run(files: list[str] | None = None) -> None:
     files : list of str, optional
         File paths to open on startup (from CLI arguments).
     """
+    _install_crash_hooks()
     app = QApplication.instance() or QApplication([])
     app.setWindowIcon(app_icon())
     w = MainWindow()

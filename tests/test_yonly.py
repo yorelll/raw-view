@@ -258,14 +258,19 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
         self.assertIn("YOnly", ControlPanel.YUV_FORMATS)
         self.assertEqual(ControlPanel.YUV_FORMATS[0], "YOnly")
 
-    def test_variant_selector_yuv_formats_follows_dict(self):
+    def test_variant_selector_yuv_format_is_single_yonly(self):
         from raw_view.gui.widgets.variant_selector import VariantSelector
 
-        self.assertEqual(
-            VariantSelector.YUV_FORMATS, list(YUV_BYTES_PER_PIXEL.keys())
-        )
-        self.assertEqual(VariantSelector.YUV_FORMATS[0], "YOnly")
+        # YUV 列表收敛为单个 YOnly（需求 2：yonly 是一个 fmt，非 yonly8/10/... 多格式）
         self.assertIn("YOnly", VariantSelector.YUV_FORMATS)
+        for f in ("YOnly8", "YOnly10", "YOnly12", "YOnly14", "YOnly16"):
+            self.assertNotIn(f, VariantSelector.YUV_FORMATS)
+        # 勾选 YOnly → 按位深展开
+        vs = VariantSelector.__new__(VariantSelector)
+        vs._format_boxes = {"YOnly": type("C", (), {"isChecked": lambda s: True})()}
+        vs._yonly_bit_boxes = {"8": type("C", (), {"isChecked": lambda s: True})(),
+                               "12": type("C", (), {"isChecked": lambda s: False})()}
+        self.assertEqual(vs.selected_formats(), ["YOnly8"])
 
     def test_worker_dispatch_rule_holds_for_yonly(self):
         # 后台 worker 的 YUV 分支判定就是 ``name in YUV_BYTES_PER_PIXEL``，
@@ -283,27 +288,36 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
         self.assertNotIn("YOnly", ControlPanel._YONLY_16BIT)
         self.assertNotIn("YOnly8", ControlPanel._YONLY_16BIT)
 
-    def test_collapsible_advanced_panel_present(self):
-        # UI-2 控制面板分组折叠：存在一个可折叠的 "RAW 高级参数" 组，且在 RAW 类型下默认展开。
+    def test_advanced_section_conditional_visibility(self):
+        # 需求 1/2：高级参数不复用折叠，而是"只有选目标才显示"。
+        #   RAW → 显示高级参数（align/endian/preview/bayer）
+        #   YUV+YOnly → 显示 bit depth + align + endian
+        #   其它 → 全部隐藏
         from PyQt5.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])
         from raw_view.gui.panels import ControlPanel
 
         p = ControlPanel()
         try:
-            self.assertTrue(hasattr(p, "adv_btn"))
-            self.assertTrue(hasattr(p, "adv_container"))
-            # 默认 Type=RAW → 折叠组展开
-            self.assertTrue(p.adv_btn.isChecked())
-            # 切到 YUV 默认（YUYV）→ 折叠组收起且位控禁用
+            # RAW 默认：advanced 显示
+            p.set_type("RAW")
+            self.assertFalse(p.advanced_section.isHidden())
+            self.assertFalse(p.align_combo.isHidden())
+            # YUV 默认 YUYV：隐藏
             p.set_type("YUV")
-            self.assertFalse(p.adv_btn.isChecked())
-            self.assertFalse(p.align_combo.isEnabled())
-            # 切到 YOnly12 → 需要位控 → 折叠组展开 + Alignment/Endianness 可用
-            p.set_format("YOnly12")
-            self.assertTrue(p.align_combo.isEnabled())
-            self.assertTrue(p.endian_combo.isEnabled())
-            self.assertTrue(p.adv_btn.isChecked())
+            self.assertTrue(p.advanced_section.isHidden())
+            self.assertTrue(p.align_combo.isHidden())
+            # 切 YOnly：显示 bit depth + align + endian，隐藏 preview/bayer
+            p.set_format("YOnly")
+            self.assertFalse(p.advanced_section.isHidden())
+            self.assertFalse(p.bit_depth_combo.isHidden())
+            self.assertFalse(p.align_combo.isHidden())
+            self.assertFalse(p.endian_combo.isHidden())
+            self.assertTrue(p.raw_preview_combo.isHidden())
+            self.assertTrue(p.bayer_pattern_combo.isHidden())
+            # get_values 把 YOnly+bit 映射为内部有效名
+            p.bit_depth_combo.setCurrentText("16")
+            self.assertEqual(p.get_values()["format_name"], "YOnly16")
         finally:
             p.close()
             p.deleteLater()

@@ -13,12 +13,27 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from raw_view.formats import (
+    FormatError,
+    MAX_DECODE_BYTES,
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+)
 from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS
+
+
+def _format_size(num_bytes: int) -> str:
+    """Format a byte count as a compact human-readable string (UI-9)."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def _qta_icon(name: str):
@@ -70,16 +85,10 @@ class ControlPanel(QWidget):
         "RAW16",
         "RAW32",
     ]
-    # YOnly 系列：4:0:0 全分辨率灰度。YOnly8 为 1 字节/像素（"YOnly" 是其别名）；
-    # YOnly10/12/14/16 为 16-bit 存储（2 字节/像素），由 Alignment(lsb/msb) +
-    # Endianness 决定有效位位置与大小端，语义与 RAW10/12/16 一致。
+    # YOnly 是一个独立格式（YUV 4:0:0 全分辨率灰度）；位深由 Bit depth 下拉
+    # 单独配置（8/10/12/14/16），内部映射为 YOnly8/10/12/14/16。普通 YUV 无需位深。
     YUV_FORMATS = [
         "YOnly",
-        "YOnly8",
-        "YOnly10",
-        "YOnly12",
-        "YOnly14",
-        "YOnly16",
         "I420",
         "YV12",
         "NV12",
@@ -91,6 +100,9 @@ class ControlPanel(QWidget):
         "NV16",
         "NV61",
     ]
+    # YOnly 可选位深（内部格式名 YOnly<bit>）：8 = 1 字节/像素；10/12/14/16 =
+    # 16-bit 存储（2 字节/像素），由 Alignment(lsb/msb) + Endianness 决定有效位。
+    YONLY_BIT_DEPTHS = ["8", "10", "12", "14", "16"]
     # YOnly 多 bit（16-bit 存储）需要启用 Alignment/Endianness 控制。
     _YONLY_16BIT = {"YOnly10", "YOnly12", "YOnly14", "YOnly16"}
 
@@ -98,6 +110,8 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(340)
         self.setObjectName("controlPanel")
+        # 面板整体启用态（供帧大小门禁判断是否干预 Apply）；初始启用。
+        self._panel_enabled = True
 
         # Scrollable content
         scroll = QScrollArea()
@@ -165,6 +179,11 @@ class ControlPanel(QWidget):
         self.bayer_pattern_combo = QComboBox()
         self.bayer_pattern_combo.addItems(BAYER_PATTERNS)
 
+        # YOnly 位深（仅 Format=YOnly 时显示）。内部映射为 YOnly<bit> 有效格式名。
+        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo.addItems(self.YONLY_BIT_DEPTHS)
+        self.bit_depth_combo.setCurrentText("12")
+
         self.width_spin = QSpinBox()
         self.width_spin.setRange(1, 65535)
         self.width_spin.setValue(2560)
@@ -216,36 +235,36 @@ class ControlPanel(QWidget):
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
 
-        # ── 折叠组：RAW 高级参数（位对齐/大小端/预览/Bayer）────────────
-        # UI-2：高频用的是 Type/Format/Width/Height/Offset/Zoom；位对齐等仅在
-        # RAW（及 YOnly 多 bit）时有意义，收敛进一个可折叠组，减少面板占用。
-        # 用 QToolButton + 箭头指示展开/收起。
-        self.adv_btn = QToolButton()
-        self.adv_btn.setObjectName("advToggle")
-        self.adv_btn.setCheckable(True)
-        self.adv_btn.setChecked(True)
-        self.adv_btn.setArrowType(Qt.DownArrow)
-        self.adv_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.adv_btn.setText("RAW 高级参数")
-        self.adv_btn.setStyleSheet(
-            "QToolButton { border: none; text-align: left; font-weight: 600; padding: 2px; }"
-            "QToolButton:hover { color: #4A90D9; }"
-        )
-        adv_form = QFormLayout()
-        adv_form.setContentsMargins(0, 0, 0, 0)
-        adv_form.setVerticalSpacing(10)
-        adv_form.addRow("Alignment", self.align_combo)
-        adv_form.addRow("Endianness", self.endian_combo)
-        adv_form.addRow("RAW preview", self.raw_preview_combo)
-        adv_form.addRow("Bayer pattern", self.bayer_pattern_combo)
-        self.adv_container = QWidget()
-        self.adv_container.setLayout(adv_form)
-        form.addRow(self.adv_btn)
-        form.addRow(self.adv_container)
-        self.adv_btn.toggled.connect(self._on_adv_toggled)
+        # ── 条件显隐区：RAW 高级参数 + YOnly 位深 ──────────────────────
+        # 不复用折叠组（用户判定折叠太丑）：只有选择目标时才「显示」，否则完全
+        # 隐藏（不是禁用），面板保持清爽。
+        #   - Type=RAW   → 显示 高级参数（Alignment/Endianness/RAW preview/Bayer）
+        #   - Format=YOnly → 显示 Bit depth + Alignment + Endianness（16-bit 存储需要）
+        #   - 其它      → 全部隐藏
+        self.adv_form = QFormLayout()
+        self.adv_form.setContentsMargins(0, 0, 0, 0)
+        self.adv_form.setVerticalSpacing(10)
+        self.adv_form.addRow("Bit depth", self.bit_depth_combo)
+        self.adv_form.addRow("Alignment", self.align_combo)
+        self.adv_form.addRow("Endianness", self.endian_combo)
+        self.adv_form.addRow("RAW preview", self.raw_preview_combo)
+        self.adv_form.addRow("Bayer pattern", self.bayer_pattern_combo)
+        # 用容器框住这些行：需要控制 form 中整组行的显隐时，把容器自身显隐切换，
+        # 但 QFormLayout 里切换容器可见需容器自己有布局并 setVisible。
+        self.advanced_section = QWidget()
+        self.advanced_section.setLayout(self.adv_form)
+        form.addRow(self.advanced_section)
 
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
+
+        # ── UI-9 帧大小/内存提示：随宽高/格式实时更新，超 512MB 时标红并
+        # 禁用 Apply（与 CLI/GUI 统一的 MAX_DECODE_BYTES 保护呼应）。────────
+        self.frame_size_hint = QLabel("")
+        self.frame_size_hint.setWordWrap(True)
+        self.frame_size_hint.setObjectName("frameSizeHint")
+        form.addRow("Estimated frame", self.frame_size_hint)
+
         form.addRow("Offset", self.offset_spin)
         form.addRow("Zoom", zoom_row)
 
@@ -282,12 +301,20 @@ class ControlPanel(QWidget):
         for combo in (
             self.type_combo, self.format_combo, self.align_combo,
             self.endian_combo, self.raw_preview_combo, self.bayer_pattern_combo,
+            self.bit_depth_combo,
         ):
             combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
-        # 切换 YUV 格式时，若为 YOnly 多 bit（16-bit 存储）则启用 Alignment/Endianness
+        # 切换格式时联动条件显隐（YOnly → 位深+对齐+端序；RAW → 高级参数）
         self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
             spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
+        # UI-9：宽高/格式/位深/对齐变化时刷新"Estimated frame"提示与 Apply 门禁
+        self.width_spin.valueChanged.connect(lambda _v: self._refresh_frame_size_hint())
+        self.height_spin.valueChanged.connect(lambda _v: self._refresh_frame_size_hint())
+        self.format_combo.currentTextChanged.connect(lambda _f: self._refresh_frame_size_hint())
+        self.bit_depth_combo.currentTextChanged.connect(lambda _b: self._refresh_frame_size_hint())
+        self.align_combo.currentTextChanged.connect(lambda _a: self._refresh_frame_size_hint())
+        self._refresh_frame_size_hint()
 
         self._on_type_changed(self.type_combo.currentText())
 
@@ -301,11 +328,29 @@ class ControlPanel(QWidget):
         if idx >= 0:
             self.format_combo.setCurrentIndex(idx)
 
+    @staticmethod
+    def _yonly_internal_name(display_name: str, bit: str) -> str:
+        """把 UI 的 YOnly（+位深）映射为内部有效格式名 YOnly<bit>。
+
+        底层 decode/encode（worker/converter/formats）按 YOnly8/10/12/14/16 工作；
+        UI 层只暴露一个 "YOnly" 条目 + Bit depth 下拉，这里做归一。
+        """
+        if display_name == "YOnly":
+            return f"YOnly{bit}"
+        return display_name
+
     def get_values(self) -> dict:
-        """Return current control values as a flat dict."""
+        """Return current control values as a flat dict.
+
+        ``format_name`` 为**有效内部格式名**（YOnly + bit → ``YOnly12`` 等），
+        以便 DecodeOptions / worker / converter 直接按原语义工作。
+        """
+        fmt = self.format_combo.currentText()
         return {
             "image_type": self.type_combo.currentText(),
-            "format_name": self.format_combo.currentText(),
+            "format_name": self._yonly_internal_name(
+                fmt, self.bit_depth_combo.currentText()
+            ),
             "width": self.width_spin.value(),
             "height": self.height_spin.value(),
             "alignment": self.align_combo.currentText(),
@@ -313,14 +358,27 @@ class ControlPanel(QWidget):
             "offset": self.offset_spin.value(),
             "preview_mode": self.raw_preview_combo.currentText(),
             "bayer_pattern": self.bayer_pattern_combo.currentText(),
+            "bit_depth": self.bit_depth_combo.currentText(),
         }
 
     def set_values(self, **kwargs) -> None:
-        """Restore control values from a dict (keys match ``get_values()``)."""
+        """Restore control values from a dict (keys match ``get_values()``).
+
+        兼容：传入的 ``format_name`` 可能是内部有效名（``YOnly12``）——若以
+        ``YOnly`` 开头且 / 或带 ``bit_depth``，则拆成 UI 的 ``YOnly`` + Bit depth。
+        """
         if "image_type" in kwargs:
             self.type_combo.setCurrentText(kwargs["image_type"])
         if "format_name" in kwargs:
-            self.set_format(kwargs["format_name"])
+            fname = kwargs["format_name"]
+            if fname.startswith("YOnly"):
+                bit = kwargs.get("bit_depth") or fname[len("YOnly"):] or "8"
+                if bit not in self.YONLY_BIT_DEPTHS:
+                    bit = "12"
+                self.bit_depth_combo.setCurrentText(bit)
+                self.set_format("YOnly")
+            else:
+                self.set_format(fname)
         if "width" in kwargs:
             self.width_spin.setValue(kwargs["width"])
         if "height" in kwargs:
@@ -335,9 +393,16 @@ class ControlPanel(QWidget):
             self.raw_preview_combo.setCurrentText(kwargs["preview_mode"])
         if "bayer_pattern" in kwargs:
             self.bayer_pattern_combo.setCurrentText(kwargs["bayer_pattern"])
+        if "bit_depth" in kwargs:
+            bit = str(kwargs["bit_depth"])
+            if bit in self.YONLY_BIT_DEPTHS:
+                self.bit_depth_combo.setCurrentText(bit)
 
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable all controls in the panel."""
+        # 记录面板整体启用态，供 _refresh_frame_size_hint 的门禁判断：
+        # 面板禁用（无 item）时不改动 Apply，面板启用时门禁才能干预 Apply。
+        self._panel_enabled = bool(enabled)
         for widget in [
             self.preset_combo,
             self.preset_save_btn,
@@ -348,12 +413,73 @@ class ControlPanel(QWidget):
             self.endian_combo,
             self.raw_preview_combo,
             self.bayer_pattern_combo,
+            self.bit_depth_combo,
             self.width_spin,
             self.height_spin,
             self.offset_spin,
             self.apply_btn,
         ]:
             widget.setEnabled(enabled)
+
+    def _refresh_frame_size_hint(self) -> None:
+        """按当前宽高/格式估算单帧字节数并更新提示与 Apply 门禁（UI-9）。
+
+        - 计算失败（如 YUV 偶数宽高校验、非法参数）→ 提示置空、Apply 恢复可用；
+        - 超过 MAX_DECODE_BYTES（512MB）→ 标红警告 + 禁用 Apply，阻止大帧 OOM
+          （与 decode_current / CLI 的 require_decode_size 保护语义一致，只是提前
+          到参数编辑阶段）。
+        - 其它 → 只更新信息，不干扰 Apply（对齐/位深变化不触发禁用）。
+        """
+        fmt = self.format_combo.currentText()
+        image_type = self.type_combo.currentText()
+        width = self.width_spin.value()
+        height = self.height_spin.value()
+        # 面板整体被禁用（无 item）时，不干预 Apply 的状态（保持灰）。
+        # 注意不能拿 apply_btn.isEnabled() 当“面板启用态”：一旦门禁因超大帧
+        # 临时禁用过 Apply，参数改回合法时也要能重新点亮——所以这里用一个
+        # 由 set_enabled() 维护的独立面板启用标志。
+        panel_enabled = getattr(self, "_panel_enabled", True)
+
+        def _set_apply(allowed: bool) -> None:
+            # 只在面板启用态下调整 Apply 门禁；面板被禁用时维持原状
+            # （否则 _refresh_frame_size_hint 会在无 item 时把 Apply 点亮）。
+            if panel_enabled:
+                self.apply_btn.setEnabled(allowed)
+
+        dynamic = image_type != "Standard Image"
+        try:
+            if image_type == "YUV":
+                if fmt == "YOnly":
+                    fmt = ControlPanel._yonly_internal_name(
+                        "YOnly", self.bit_depth_combo.currentText()
+                    )
+                frame_size = expected_frame_size_yuv(
+                    fmt, width, height,
+                    alignment=self.align_combo.currentText(),
+                    endianness=self.endian_combo.currentText(),
+                )
+            else:  # RAW
+                frame_size = expected_frame_size_raw(fmt, width, height)
+        except (FormatError, ValueError):
+            # 非法参数（偶数宽高要求不满足等）不可能解码成功，这里不做门禁——
+            # 解码时会由 worker 报错。仅清空提示、恢复 Apply。
+            self.frame_size_hint.setText("")
+            self.frame_size_hint.setStyleSheet("")
+            _set_apply(True)
+            return
+        if not dynamic:
+            self.frame_size_hint.setText("")
+            self.frame_size_hint.setStyleSheet("")
+            return
+        text = f"{width}x{height}  ≈  {_format_size(frame_size)} / 帧"
+        if frame_size > MAX_DECODE_BYTES:
+            self.frame_size_hint.setText(f"⚠ {text}（超过 {MAX_DECODE_BYTES // (1024 * 1024)}MB 解码上限）")
+            self.frame_size_hint.setStyleSheet("color: #E53935; font-weight: 600;")
+            _set_apply(False)
+        else:
+            self.frame_size_hint.setText(text)
+            self.frame_size_hint.setStyleSheet("color: #9AA0AC;")
+            _set_apply(True)
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
         """Repopulate the preset combo. Pass current=None to leave selection unchanged.
@@ -393,38 +519,49 @@ class ControlPanel(QWidget):
         self.zoom_spin.blockSignals(False)
 
     def _sync_type_enabled(self) -> None:
-        """Re-apply type-specific enabled states without changing formats.
+        """Re-apply type/format-appropriate visibility + enabled states.
 
-        Called after set_enabled(True) to restore type-appropriate controls.
+        Called after set_enabled(True) / type change / format change / tab switch.
+        规则（用户需求 1/2）：
+        - Type=RAW：显示 RAW 高级参数（Alignment/Endianness/RAW preview/Bayer）；
+          Bit depth 隐藏。
+        - Type=YUV 且 Format=YOnly：显示 Bit depth + Alignment + Endianness
+          （YOnly 多 bit 的 16-bit 存储需要）；隐藏 RAW preview/Bayer。
+        - 其它（YUV 非 YOnly / Standard Image）：全部隐藏。
         """
+        fmt = self.format_combo.currentText()
         image_type = self.type_combo.currentText()
         if image_type == "RAW":
-            self.align_combo.setEnabled(True)
-            self.endian_combo.setEnabled(True)
-            self.raw_preview_combo.setEnabled(True)
-            self.bayer_pattern_combo.setEnabled(
-                self.raw_preview_combo.currentText().startswith("Bayer")
+            # 位深下拉是 YOnly 专用（需求 1/2）；RAW 用 Format 自身（RAW8/10/12/16）
+            # 表达位深，不应显示 Bit depth 行。
+            self._set_advanced_visible(
+                bit=False, align=True, endian=True, preview=True, bayer=(
+                    self.raw_preview_combo.currentText().startswith("Bayer")
+                ), section=True,
             )
-            if hasattr(self, "adv_btn"):
-                self.adv_btn.setChecked(True)
-        elif image_type == "YUV":
-            # YUV 默认禁用位对齐/大小端；YOnly 多 bit（16-bit 存储）除外——
-            # 它们的有效位位置（lsb/msb）与大小端由这几个控件控制。
-            is_yonly_16 = self.format_combo.currentText() in self._YONLY_16BIT
-            self.align_combo.setEnabled(is_yonly_16)
-            self.endian_combo.setEnabled(is_yonly_16)
-            self.raw_preview_combo.setEnabled(False)
-            self.bayer_pattern_combo.setEnabled(False)
-            if hasattr(self, "adv_btn"):
-                # 仅当 YOnly 多 bit 需要位控时才展开，否则收起
-                self.adv_btn.setChecked(is_yonly_16)
+        elif image_type == "YUV" and fmt == "YOnly":
+            self._set_advanced_visible(
+                bit=True, align=True, endian=True, preview=False, bayer=False, section=True,
+            )
         else:
-            self.align_combo.setEnabled(False)
-            self.endian_combo.setEnabled(False)
-            self.raw_preview_combo.setEnabled(False)
-            self.bayer_pattern_combo.setEnabled(False)
-            if hasattr(self, "adv_btn"):
-                self.adv_btn.setChecked(False)
+            self._set_advanced_visible(False, False, False, False, False, section=False)
+
+    def _set_advanced_visible(self, bit, align, endian, preview, bayer, section) -> None:
+        """统一控制条件显隐区各控件与容器的显隐/可用性。
+
+        显隐优先：section 为 False 时整组行隐藏；为 True 时按各控件 flag 控制
+        可见性与 enabled（其中隐藏的控件同时禁用，避免 tab 焦点/键盘可达）。
+        """
+        self.advanced_section.setVisible(section)
+        for widget, visible in (
+            (self.bit_depth_combo, bit),
+            (self.align_combo, align),
+            (self.endian_combo, endian),
+            (self.raw_preview_combo, preview),
+            (self.bayer_pattern_combo, bayer),
+        ):
+            widget.setVisible(section and visible)
+            widget.setEnabled(section and visible)
 
     # ── internal slots ───────────────────────────────────────────────
 
@@ -462,27 +599,20 @@ class ControlPanel(QWidget):
         elif image_type == "YUV":
             self.format_combo.addItems(self.YUV_FORMATS)
             self.format_combo.setCurrentText("YUYV")
-            self.align_combo.setEnabled(False)
-            self.endian_combo.setEnabled(False)
-            self.raw_preview_combo.setEnabled(False)
-            self.bayer_pattern_combo.setEnabled(False)
         else:
             self.format_combo.addItems(["N/A"])
-            self.align_combo.setEnabled(False)
-            self.endian_combo.setEnabled(False)
-            self.raw_preview_combo.setEnabled(False)
-            self.bayer_pattern_combo.setEnabled(False)
-        # 类型联动折叠组：RAW 时自动展开（位对齐等有意义）；YUV/Standard 时收起
-        if hasattr(self, "adv_btn"):
-            self.adv_btn.setChecked(image_type == "RAW")
+        # 类型/格式联动条件显隐（RAW 显示高级参数 / YOnly 显示位深+对齐+端序）
+        self._sync_type_enabled()
+        self._refresh_frame_size_hint()
         self.typeChanged.emit(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:
+        # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件
         is_raw = self.type_combo.currentText() == "RAW"
-        self.bayer_pattern_combo.setEnabled(is_raw and value.startswith("Bayer"))
+        self.bayer_pattern_combo.setVisible(
+            is_raw and self.advanced_section.isVisible() and value.startswith("Bayer")
+        )
+        self.bayer_pattern_combo.setEnabled(
+            is_raw and self.advanced_section.isVisible() and value.startswith("Bayer")
+        )
         self.rawPreviewChanged.emit(value)
-
-    def _on_adv_toggled(self, checked: bool) -> None:
-        """展开/收起"RAW 高级参数"折叠组（箭头方向随状态变化）。"""
-        self.adv_container.setVisible(checked)
-        self.adv_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
