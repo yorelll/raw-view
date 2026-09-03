@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.4.2** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.4.3** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
