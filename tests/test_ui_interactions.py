@@ -12,8 +12,8 @@
   Ctrl+Left/Right 快捷键保留。
 - 需求 5：标签右键菜单 —— custom context menu 装配、close-all / close-right
   索引稳定性与行为。
-- 需求 6：Help 新增 Keyboard Shortcuts 小节（Up/Down/Home/End、
-  Ctrl+Left/Right、Ctrl++/Ctrl+-/Ctrl+0/Ctrl+1、F11/Escape、
+- 需求 6：快捷键从 Format Help 独立为 SHORTCUTS 数据源 + KeyboardShortcutsDialog
+  （Up/Down/Home/End、Ctrl+Left/Right、Ctrl+0/Ctrl+1、F11/Escape、
   Ctrl+R/Ctrl+Shift+R/Ctrl+H/Ctrl+Shift+V），不含 [ ] / * 翻帧快捷键。
 
 全部用例用 QT_QPA_PLATFORM=offscreen + 共享 QApplication，不依赖真实桌面。
@@ -284,21 +284,31 @@ class AdvancedFormLayoutTests(unittest.TestCase):
         self.p.deleteLater()
 
     def test_rows_are_direct_form_rows(self):
-        """每个高级控件都能在**主** QFormLayout 里用 labelForField 定位。"""
+        """可见的高级控件是主 QFormLayout 的直接行（labelForField 可定位）。
+
+        0.4.1 起隐藏的条件行会被 takeRow 移出主表单（彻底不占高度），因此只有
+        **当前可见**的行才要求是直接行；隐藏行应返回 None（证明已从表单移出）。
+        默认状态为 RAW，Bit depth 隐藏、其余 4 行可见。
+        """
         p = self.p
         for combo in (
             p.align_combo, p.endian_combo, p.raw_preview_combo,
-            p.bayer_pattern_combo, p.bit_depth_combo,
+            p.bayer_pattern_combo,
         ):
             self.assertIsNotNone(_label_for(p, combo), f"{combo} 应为主表单直接行")
+        # Bit depth 在 RAW 下隐藏 → 已从表单移出，labelForField 返回 None
+        self.assertIsNone(_label_for(p, p.bit_depth_combo))
 
     def test_expected_labels(self):
         p = self.p
-        self.assertEqual(_label_for(p, p.bit_depth_combo), "Bit depth")
         self.assertEqual(_label_for(p, p.align_combo), "Alignment")
         self.assertEqual(_label_for(p, p.endian_combo), "Endianness")
         self.assertEqual(_label_for(p, p.raw_preview_combo), "RAW preview")
         self.assertEqual(_label_for(p, p.bayer_pattern_combo), "Bayer pattern")
+        # YOnly 下 Bit depth 显示，标签仍是 "Bit depth"
+        p.set_type("YUV")
+        p.set_format("YOnly")
+        self.assertEqual(_label_for(p, p.bit_depth_combo), "Bit depth")
 
     def test_widths_not_forced_wider_than_normal(self):
         """高级框不显著宽于 Type/Format 等普通框。
@@ -629,39 +639,62 @@ class TabMenuDispatchTests(unittest.TestCase):
 class HelpShortcutSectionTests(unittest.TestCase):
     """Keyboard Shortcuts 小节存在、文案齐全，且不含 [ ] / * 翻帧快捷键。"""
 
-    def _shortcut_section(self) -> str:
+    def _shortcut_keys(self) -> set[str]:
         import raw_view.help_content as hc
 
-        return hc.HELP_HTML.partition("<h3>Keyboard Shortcuts</h3>")[2]
+        return {keys for _cat, items in hc.SHORTCUTS for keys, _desc in items}
 
     def test_help_adds_shortcuts_section(self):
+        """快捷键已从 Format Help HTML 独立为 SHORTCUTS 数据源（0.4.1）。"""
         import raw_view.help_content as hc
 
-        html = hc.HELP_HTML
-        self.assertIn("Keyboard Shortcuts", html)
+        self.assertNotIn("Keyboard Shortcuts", hc.HELP_HTML)
+        self.assertTrue(len(hc.SHORTCUTS) >= 5, "应有分类：帧/文件/缩放/视图/变换")
+        keys = set()
+        for _cat, items in hc.SHORTCUTS:
+            for k, _d in items:
+                keys.add(k)
         for needle in (
             "Up / Left", "Down / Right", "Home", "End",
             "Ctrl+Left", "Ctrl+Right",
-            "Zoom In", "Zoom Out", "Ctrl+0", "Ctrl+1",
+            "Ctrl+0", "Ctrl+1",
             "F11", "Escape",
             "Ctrl+R", "Ctrl+Shift+R",
             "Ctrl+H", "Ctrl+Shift+V",
         ):
-            self.assertIn(needle, html, f"快捷键 {needle} 应出现在 Help 中")
+            self.assertIn(needle, keys, f"快捷键 {needle} 应出现在 SHORTCUTS 中")
+
+    def test_shortcuts_dialog_builds_from_source(self):
+        """KeyboardShortcutsDialog 能从 SHORTCUTS 数据源构造（不依赖 HTML 解析）。"""
+        from raw_view.gui.dialogs import KeyboardShortcutsDialog
+
+        dlg = KeyboardShortcutsDialog()
+        self.assertEqual(dlg.windowTitle(), "Keyboard Shortcuts")
+        # 每个分类都渲染成一个 QGroupBox
+        import raw_view.help_content as hc
+
+        from PyQt5.QtWidgets import QGroupBox
+
+        boxes = dlg.findChildren(QGroupBox)
+        titles = {b.title() for b in boxes}
+        for cat, _items in hc.SHORTCUTS:
+            self.assertIn(cat, titles, f"分类 {cat} 应渲染到对话框")
+        dlg.deleteLater()
 
     def test_no_removed_shortcuts_documented(self):
-        """被取消的 [ ] 与不存在的 / * 翻帧快捷键不得写入快捷键小节。"""
-        sec = self._shortcut_section()
-        self.assertNotIn("[", sec)
-        self.assertNotIn("]", sec)
-        # "*" 不作为单键翻帧；"/" 不单独成键（文案里的 "/" 是措辞分隔符）
-        self.assertNotIn("*", sec)
-        self.assertNotIn("<li>/", sec)
+        """被取消的 [ ] 与不存在的 / * 翻帧快捷键不得写入快捷键数据。"""
+        import raw_view.help_content as hc
+
+        keys = " ".join(self._shortcut_keys())
+        self.assertNotIn("[", keys)
+        self.assertNotIn("]", keys)
+        # "*" 不作为单键翻帧；"/" 不单独成键
+        self.assertNotIn("*", keys)
 
     def test_shortcuts_match_source_truth(self):
-        """Help 中的核心快捷键必须真实存在于 app.py（防描述与实现脱节）。"""
+        """快捷键描述必须真实存在于 app.py（防描述与实现脱节）。"""
         src = inspect.getsource(MainWindow)
-        short = self._shortcut_section()
+        short = self._shortcut_keys()
         # app.py 里所有字符串形式的 setShortcut(...)
         impl_shortcuts: set[str] = set()
         for m in re.finditer(r'setShortcut\(["\']([^"\']+)["\']\)', src):
@@ -680,12 +713,12 @@ class HelpShortcutSectionTests(unittest.TestCase):
                 self.assertIn(sc, impl_shortcuts, f"{sc} 应通过 setShortcut 注册")
         self.assertIn("QKeySequence.ZoomIn", src)
         self.assertIn("QKeySequence.ZoomOut", src)
-        # Help 写出的每个字符串快捷键都要出现在实现里（Zoom +/- 由常量提供，
-        # 通过 QKeySequence.ZoomIn/Out 校验）
+        # 快捷键数据源写出的每个字符串快捷键都要出现在实现里（Zoom +/- 由
+        # 常量提供，通过 QKeySequence.ZoomIn/Out 校验）
         for sc in ("Ctrl+Left", "Ctrl+Right", "F11",
                    "Ctrl+0", "Ctrl+1",
                    "Ctrl+R", "Ctrl+Shift+R", "Ctrl+H", "Ctrl+Shift+V"):
-            self.assertIn(sc, short, f"Help 应写出 {sc}")
+            self.assertIn(sc, short, f"SHORTCUTS 应写出 {sc}")
 
 
 if __name__ == "__main__":

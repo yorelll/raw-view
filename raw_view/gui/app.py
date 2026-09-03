@@ -57,18 +57,6 @@ from raw_view.models import (
 logger = get_logger(__name__)
 
 
-def _format_bytes(num_bytes: int) -> str:
-    """Return a compact human-readable size while retaining exact bytes."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            if unit == "B":
-                return f"{int(num_bytes):,} B"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
 def resource_path(relative: str) -> str:
     """Resolve a bundled resource path in both dev and PyInstaller runs."""
     base = getattr(sys, "_MEIPASS", None)
@@ -88,6 +76,7 @@ def app_icon() -> QIcon:
 
 
 from raw_view.gui.framenav import FrameNavBar
+from raw_view.gui.image_utils import qimage_from_grayscale, qimage_from_rgb
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import (
@@ -96,6 +85,7 @@ from raw_view.gui.dialogs import (
     ConvertDialog,
     FourCCDialog,
     HelpDialog,
+    KeyboardShortcutsDialog,
     PresetManagerDialog,
     SettingsDialog,
 )
@@ -573,6 +563,9 @@ class MainWindow(QMainWindow):
         fmt_help = QAction("Format Help", self)
         fmt_help.triggered.connect(self.show_help)
         help_menu.addAction(fmt_help)
+        kb_help = QAction("Keyboard Shortcuts", self)
+        kb_help.triggered.connect(self.show_shortcuts)
+        help_menu.addAction(kb_help)
         about_action = QAction("About raw-view", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
@@ -705,13 +698,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _qimage_from_gray(gray: np.ndarray) -> QImage:
-        h, w = gray.shape
-        return QImage(gray.data, w, h, gray.strides[0], QImage.Format_Grayscale8).copy()
+        return qimage_from_grayscale(gray)
 
     @staticmethod
     def _qimage_from_rgb(rgb: np.ndarray) -> QImage:
-        h, w = rgb.shape[:2]
-        return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+        return qimage_from_rgb(rgb)
 
     @staticmethod
     def _warn_size_mismatch(parent, actual: int, expected: int) -> bool:
@@ -1167,14 +1158,12 @@ class MainWindow(QMainWindow):
             except OSError:
                 self.file_status.setText(f"File: {os.path.basename(path)}")
                 self.file_status.setToolTip(path)
-        # Show image data size (frame size) in a compact human-readable form;
-        # the exact byte count remains available from the tooltip.
+        # Show image data size (frame size) as a concrete byte count.
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {item.options.width}x{item.options.height} ({_format_bytes(frame_size)}/frame) | Format: {item.options.format_name}"
+                f"Image: {item.options.width}x{item.options.height} ({frame_size:,} bytes/frame) | Format: {item.options.format_name}"
             )
-            self.image_status.setToolTip(f"Exact frame size: {frame_size:,} bytes")
         else:
             self.image_status.setText(
                 f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
@@ -1578,9 +1567,8 @@ class MainWindow(QMainWindow):
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {width}x{height} ({_format_bytes(frame_size)}/frame) | Format: {format_name}"
+                f"Image: {width}x{height} ({frame_size:,} bytes/frame) | Format: {format_name}"
             )
-            self.image_status.setToolTip(f"Exact frame size: {frame_size:,} bytes")
         else:
             self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
         self._set_state("Decoded", "ok")
@@ -1831,6 +1819,10 @@ class MainWindow(QMainWindow):
 
     def show_help(self) -> None:
         dlg = HelpDialog(self)
+        dlg.exec_()
+
+    def show_shortcuts(self) -> None:
+        dlg = KeyboardShortcutsDialog(self)
         dlg.exec_()
 
     def show_about(self) -> None:

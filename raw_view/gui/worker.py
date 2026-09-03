@@ -17,6 +17,7 @@ from raw_view.formats import (
     raw_to_display_gray,
 )
 from raw_view.converter import bayer8_to_rgb
+from raw_view.gui.image_utils import qimage_from_grayscale, qimage_from_rgb
 from raw_view.logger import get_logger
 
 # P1-1 解码缓存的容量上限：总字节（默认 ~250MB，约半帧 512MB 上限）与条目数。
@@ -206,7 +207,7 @@ class DecodeWorker(QObject):
                     endianness=self._endianness,
                 )
                 h, w = rgb.shape[:2]
-                qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+                qimg = qimage_from_rgb(rgb)
                 result = DecodeResult(rgb, qimg, w, h, self._format_name)
             else:
                 # ── RAW path ────────────────────────────────────────
@@ -228,21 +229,17 @@ class DecodeWorker(QObject):
                     try:
                         rgb = bayer8_to_rgb(raw8, pattern=self._bayer_pattern)
                         h, w = rgb.shape[:2]
-                        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+                        qimg = qimage_from_rgb(rgb)
                         result = DecodeResult(rgb, qimg, w, h, self._format_name)
                     except ValueError as exc:
                         logger.warning("Bayer demosaic failed (%s), falling back to grayscale", exc)
                         fallback = raw8
                         h, w = fallback.shape
-                        qimg = QImage(
-                            fallback.data, w, h, fallback.strides[0], QImage.Format_Grayscale8
-                        ).copy()
+                        qimg = qimage_from_grayscale(fallback)
                         result = DecodeResult(fallback, qimg, w, h, self._format_name)
                 else:
                     h, w = raw8.shape
-                    qimg = QImage(
-                        raw8.data, w, h, raw8.strides[0], QImage.Format_Grayscale8
-                    ).copy()
+                    qimg = qimage_from_grayscale(raw8)
                     result = DecodeResult(raw8, qimg, w, h, self._format_name)
 
             # 注意：这里**不能**因 cancel 而 suppress finished/error——主窗口的

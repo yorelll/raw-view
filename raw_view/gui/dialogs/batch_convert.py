@@ -176,15 +176,13 @@ class BatchConvertDialog(QDialog):
 
         params_layout.addLayout(params_right, 1)
 
-        # ── Progress ──
-        self._progress = QProgressDialog("Batch conversion in progress...", "Cancel", 0, 100, self)
-        self._progress.setWindowTitle("Batch Convert")
-        self._progress.setMinimumDuration(0)
-        self._progress.setAutoClose(True)
-        self._progress.setAutoReset(True)
-        self._progress.setModal(True)
-        self._progress.canceled.connect(self._on_cancel_batch)
-        self._progress.hide()
+        # ── Progress ──────────────────────────────────────────────────
+        # 刻意不在这里构造 QProgressDialog：QProgressDialog(minimumDuration=0,
+        # modal=True) 在构造后即使 hide()，也会在下一个嵌套事件循环（例如
+        # Add Files 的 QFileDialog / Clear / Start 的窗体重绘）中闪现 "Batch
+        # conversion in progress"（0.4.1 用户反馈）。改为在 _run_batch 真正开始
+        # 时按需创建，且 minimumDuration 稍大，只有任务真正耗时才显示。
+        self._progress: QProgressDialog | None = None
         self._batch_cancelled = False
         # P1-6：会话内"全部覆盖"开关（选中后本次对话框不再问覆盖策略）。
         self._overwrite_all = False
@@ -362,10 +360,6 @@ class BatchConvertDialog(QDialog):
             self._file_table.item(row, 3).setText("")
 
         self._batch_cancelled = False
-        self._progress.setMaximum(len(files))
-        self._progress.setValue(0)
-        self._progress.setLabelText("Batch conversion in progress...")
-        self._progress.show()
 
         # P1-6 覆盖策略：默认 "rename"（不覆盖不丢文件）；用户选过"全部覆盖"
         # 则覆盖。先一次性询问所有冲突文件（会话内记住选择）。
@@ -387,6 +381,22 @@ class BatchConvertDialog(QDialog):
             if os.path.exists(out):
                 existing_paths.append(out)
         self._collision_policy = self._ask_overwrite_strategy(existing_paths)
+
+        # 按需创建进度框：等冲突策略询问（QMessageBox 模态 event loop）结束后
+        # 才构造，避免它在 Add Files 的 QFileDialog 或冲突确认框等嵌套事件循环
+        # 中闪现 "Batch conversion in progress..."（0.4.1 用户反馈）。
+        # minimumDuration 300ms——很短的批量直接完成时不弹框。
+        self._progress = QProgressDialog(
+            "Batch conversion in progress...", "Cancel", 0, len(files), self
+        )
+        self._progress.setWindowTitle("Batch Convert")
+        self._progress.setMinimumDuration(300)
+        self._progress.setAutoClose(True)
+        self._progress.setAutoReset(True)
+        self._progress.setModal(True)
+        self._progress.canceled.connect(self._on_cancel_batch)
+        self._progress.setValue(0)
+        self._progress.setLabelText("Batch conversion in progress...")
 
         success_count = 0
         fail_count = 0
@@ -500,7 +510,11 @@ class BatchConvertDialog(QDialog):
                 if self._batch_cancelled:
                     break
         finally:
-            self._progress.close()
+            if self._progress is not None:
+                self._progress.close()
+                self._progress.setParent(None)
+                self._progress.deleteLater()
+                self._progress = None
 
         # Report
         total = len(files)

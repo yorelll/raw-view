@@ -1,4 +1,51 @@
-"""Help HTML content for format explanation."""
+"""Help content: format explanation HTML + standalone keyboard shortcuts."""
+
+# ── 快捷键（独立数据源，供 Help 菜单的 Keyboard Shortcuts 对话框展示）──
+# (类别, [(按键, 说明), ...])；返回一个常量列表，测试直接引用它做文案校验，
+# 不再依赖 HELP_HTML 里的 HTML 小节（0.4.1 把快捷键从 Format Help 独立出来）。
+SHORTCUTS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "Frame navigation",
+        [
+            ("Up / Left", "previous frame"),
+            ("Down / Right", "next frame"),
+            ("Home", "first frame"),
+            ("End", "last frame"),
+        ],
+    ),
+    (
+        "File navigation",
+        [
+            ("Ctrl+Left", "previous file in the same folder"),
+            ("Ctrl+Right", "next file in the same folder"),
+        ],
+    ),
+    (
+        "Zoom",
+        [
+            ("Ctrl++", "Zoom In"),
+            ("Ctrl+-", "Zoom Out"),
+            ("Ctrl+0", "fit to window"),
+            ("Ctrl+1", "actual size (100%)"),
+        ],
+    ),
+    (
+        "View",
+        [
+            ("F11", "toggle fullscreen"),
+            ("Escape", "exit fullscreen"),
+        ],
+    ),
+    (
+        "Transform",
+        [
+            ("Ctrl+R", "rotate clockwise"),
+            ("Ctrl+Shift+R", "rotate counter-clockwise"),
+            ("Ctrl+H", "flip horizontally"),
+            ("Ctrl+Shift+V", "flip vertically"),
+        ],
+    ),
+]
 
 HELP_HTML = """
 <h2>RAW/YUV Format Help</h2>
@@ -43,13 +90,5 @@ HELP_HTML = """
 <li>Support dragging files into the main window to open quickly.</li>
 <li>Conversion input supports drag-and-drop; output defaults to the folder configured in <b>Settings</b> (默认 <code>convert_out</code>，可自定义).</li>
 <li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
-</ul>
-<h3>Keyboard Shortcuts</h3>
-<ul>
-<li><b>Frame navigation</b> &mdash; Up / Left: previous frame; Down / Right: next frame; Home: first frame; End: last frame.</li>
-<li><b>File navigation</b> &mdash; Ctrl+Left: previous file in the same folder; Ctrl+Right: next file in the same folder.</li>
-<li><b>Zoom</b> &mdash; Ctrl++ (Zoom In); Ctrl+- (Zoom Out); Ctrl+0: fit to window; Ctrl+1: actual size (100%).</li>
-<li><b>View</b> &mdash; F11: toggle fullscreen; Escape: exit fullscreen.</li>
-<li><b>Transform</b> &mdash; Ctrl+R: rotate clockwise; Ctrl+Shift+R: rotate counter-clockwise; Ctrl+H: flip horizontally; Ctrl+Shift+V: flip vertically.</li>
 </ul>
 """

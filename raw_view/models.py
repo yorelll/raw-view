@@ -733,6 +733,22 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["accent_light"]};
             border: 1px solid {p["accent"]};
         }}
+        QPushButton#infoButton, QPushButton#variantInfoButton {{
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+        }}
+        QPushButton#infoButton:hover, QPushButton#variantInfoButton:hover {{
+            background: {p["accent_light"]};
+            border: none;
+        }}
+        QPushButton#infoButton:pressed, QPushButton#variantInfoButton:pressed {{
+            background: {p["button_hover_bg"]};
+            border: none;
+        }}
+        QPushButton#infoButton:focus, QPushButton#variantInfoButton:focus {{
+            border: none;
+        }}
         QPushButton#dangerButton {{
             background: transparent;
             color: #E53935;

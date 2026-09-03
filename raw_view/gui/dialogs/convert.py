@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -39,6 +39,7 @@ from raw_view.models import (
     BAYER_PATTERNS,
     format_output_template,
 )
+from raw_view.gui.image_utils import qimage_from_rgb
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
 
@@ -467,10 +468,8 @@ class ConvertDialog(QDialog):
             else:
                 thumb = bgr
             rgb_thumb = cv2.cvtColor(thumb, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_thumb.shape
-            bytes_per_line = w * ch
-            qimg = QImage(rgb_thumb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            self._preview_thumb.setPixmap(QPixmap.fromImage(qimg.copy()))
+            qimg = qimage_from_rgb(rgb_thumb)
+            self._preview_thumb.setPixmap(QPixmap.fromImage(qimg))
 
             # Frame size info
             target_type = self.target_type.currentText()

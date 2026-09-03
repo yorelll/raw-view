@@ -232,9 +232,9 @@ class ControlPanel(QWidget):
         # ── Layout ──
         form = QFormLayout(content)
         form.setVerticalSpacing(10)
-        # 供条件显隐（_set_row_visibility）隐藏控件时同步隐藏其行标签——
-        # 主 QFormLayout 直接行：只隐藏 field 时 QFormLayout 的行 label 仍会
-        # 留在表单里占一行（实测验证），必须 field+label 一起隐藏行才真正收起。
+        # 条件行显隐由 _apply_cond_rows 统一管理：用 takeRow/insertRow 把隐藏行
+        # 彻底移出表单（仅 setVisible 时本机 PyQt5 的 QFormLayout 仍保留行几何，
+        # 会在 Format 与 Width 之间留出大段空白，0.4.1 修复）。
         self._main_form = form
         form.addRow("Preset", preset_row)
 
@@ -541,31 +541,88 @@ class ControlPanel(QWidget):
     def _set_advanced_visible(self, bit, align, endian, preview, bayer) -> None:
         """统一控制条件显隐区（主 QFormLayout 直接行）各控件的显隐/可用性。
 
-        隐藏的控件同时禁用，避免 tab 焦点/键盘可达。因这些行是主 QFormLayout
-        的直接行，隐藏 field 必须**连带隐藏其行 label** 行才会真正从表单中收起
-        （实测：只隐藏 field，QFormLayout 仍会把 label 留在原位占一行）。
+        隐藏的行通过 ``takeRow`` 从主表单移出（field 与 label 都不再占用表单
+        高度——实测 QFormLayout 对 ``setVisible(False)`` 的隐藏行仍会保留其
+        行几何，导致 YUV 普通格式下 Format 与 Width 之间出现一大段空白，
+        0.4.1 用户反馈）；显示的行再按顺序 ``insertRow`` 回表单。因此隐藏的
+        条件行在布局上“彻底消失”，可见行仍通过 ``labelForField`` 定位。
         """
-        self._set_row_visibility((self.bit_depth_combo, bit))
-        self._set_row_visibility((self.align_combo, align))
-        self._set_row_visibility((self.endian_combo, endian))
-        self._set_row_visibility((self.raw_preview_combo, preview))
-        self._set_row_visibility((self.bayer_pattern_combo, bayer))
+        names = {
+            "bit_depth_combo": bit,
+            "align_combo": align,
+            "endian_combo": endian,
+            "raw_preview_combo": preview,
+            "bayer_pattern_combo": bayer,
+        }
+        self._apply_cond_rows(names)
 
-    def _set_row_visibility(self, item: tuple) -> None:
-        """``(field, visible)`` 的行的 field 与 label 同步显隐/启用。
+    # 条件行规范顺序：(属性名, label 文本)。_apply_cond_rows 按此顺序把需要显示
+    # 的行插回 Width 行之前，保证 RAW / YOnly / 其它状态下的行序一致。
+    _COND_ROW_SPECS = [
+        ("bit_depth_combo", "Bit depth"),
+        ("align_combo", "Alignment"),
+        ("endian_combo", "Endianness"),
+        ("raw_preview_combo", "RAW preview"),
+        ("bayer_pattern_combo", "Bayer pattern"),
+    ]
 
-        不依赖 Qt 自动同步（实测只藏 field 不会收起 label 行），手动把主表单里
-        该 field 的 label 一起 setVisible / setEnabled，保证行整体收起、不残留
-        孤零零的 label 占位。
+    def _apply_cond_rows(self, desired: dict) -> None:
+        """按 ``{属性名: visible}`` 重建主表单的条件行段。
+
+        每次先把当前已在表单中的条件行全部 ``takeRow`` 移出，再按
+        ``_COND_ROW_SPECS`` 顺序把需要显示的行 ``insertRow`` 回 ``Width`` 行
+        之前。移出/移入都不删除 field 与 label 对象；隐藏的 field 同时禁用，
+        避免 tab 焦点可达。
+
+        背景：实测本机 PyQt5 的 QFormLayout 对 ``setVisible(False)`` 的隐藏行
+        仍保留行几何（YUV 普通格式下 Format 与 Width 之间因此有大段空白）。
+        ``takeRow`` 把它们从布局里摘下后，隐藏行彻底不占高度，可见行仍可通过
+        ``labelForField`` 定位（0.4.1 修复）。
         """
-        field, visible = item
-        visible = bool(visible)
-        field.setVisible(visible)
-        field.setEnabled(visible)
-        label = self._main_form.labelForField(field) if self._main_form else None
-        if label is not None:
-            label.setVisible(visible)
-            label.setEnabled(visible)
+        form = self._main_form
+        if form is None:
+            return
+
+        def _row_of(widget) -> int | None:
+            pos = form.getWidgetPosition(widget)
+            return pos[0] if pos[0] >= 0 else None
+
+        # 1) 先把当前在表单里的条件行全部移出（takeRow 摘下但不删除）。
+        labels: dict[str, object] = {}
+        fields: dict[str, object] = {}
+        for name, _lbl in self._COND_ROW_SPECS:
+            field = getattr(self, name)
+            fields[name] = field
+            r = _row_of(field)
+            if r is not None:
+                took = form.takeRow(r)
+                lw = took.labelItem.widget() if took.labelItem is not None else None
+                if lw is not None:
+                    labels[name] = lw
+
+        # 2) 找到 Width 行（固定行）当前的插入位置，条件行段统一插在它前面。
+        anchor = _row_of(self.width_spin)
+        insert_at = anchor if anchor is not None else form.rowCount()
+
+        # 3) 按规范顺序插入需要显示的条件行，隐藏的只禁用。
+        for name, label_text in self._COND_ROW_SPECS:
+            field = fields[name]
+            visible = bool(desired.get(name, False))
+            field.setEnabled(visible)
+            if not visible:
+                field.setVisible(False)
+                continue
+            label_widget = labels.get(name)
+            if label_widget is not None:
+                form.insertRow(insert_at, label_widget, field)
+            else:
+                form.insertRow(insert_at, label_text, field)
+            new_label = form.labelForField(field)
+            if new_label is not None:
+                new_label.setVisible(True)
+                new_label.setEnabled(True)
+            field.setVisible(True)
+            insert_at += 1
 
     # ── internal slots ───────────────────────────────────────────────
 
@@ -611,8 +668,7 @@ class ControlPanel(QWidget):
         self.typeChanged.emit(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:
-        # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件（连同行 label 一起显隐，
-        # 否则隐藏 field 后 label 仍占一行，见 _set_row_visibility 注释）
-        is_bayer = self.type_combo.currentText() == "RAW" and value.startswith("Bayer")
-        self._set_row_visibility((self.bayer_pattern_combo, is_bayer))
+        # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件。复用 _sync_type_enabled 的
+        # 条件行重建（它会按当前 RAW preview 值重新计算 Bayer 行的显隐）。
+        self._sync_type_enabled()
         self.rawPreviewChanged.emit(value)
