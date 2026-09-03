@@ -22,17 +22,8 @@ from raw_view.formats import (
     expected_frame_size_raw,
     expected_frame_size_yuv,
 )
+from raw_view.gui.image_utils import _format_size
 from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS
-
-
-def _format_size(num_bytes: int) -> str:
-    """Format a byte count as a compact human-readable string (UI-9)."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
 
 
 def _qta_icon(name: str):
@@ -261,6 +252,18 @@ class ControlPanel(QWidget):
         form.addRow("Endianness", self.endian_combo)
         form.addRow("RAW preview", self.raw_preview_combo)
         form.addRow("Bayer pattern", self.bayer_pattern_combo)
+
+        # 条件行 label 缓存：_apply_cond_rows 用 takeRow/insertRow 搬移这些行时
+        # 总是优先复用首次 addRow 创建的 QLabel（0.4.1-L-2），保证 label 的样式
+        # /对齐/属性不被按文本重建丢失。必须在 addRow 之后采集（labelForField 只
+        # 对标已在表单中的 field 生效）。
+        self._cond_row_labels: dict[str, QLabel] = {
+            name: form.labelForField(getattr(self, name))
+            for name, _lbl in self._COND_ROW_SPECS
+        }
+        self._cond_row_labels = {
+            k: v for k, v in self._cond_row_labels.items() if v is not None
+        }
 
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
@@ -612,7 +615,9 @@ class ControlPanel(QWidget):
             if not visible:
                 field.setVisible(False)
                 continue
-            label_widget = labels.get(name)
+            # 0.4.1-L-2：优先复用 __init__ 缓存的首建 label（样式/对齐得以保持），
+            # 其次复用本次 takeRow 摘下的既有 label，最后才按文本重建。
+            label_widget = self._cond_row_labels.get(name) or labels.get(name)
             if label_widget is not None:
                 form.insertRow(insert_at, label_widget, field)
             else:

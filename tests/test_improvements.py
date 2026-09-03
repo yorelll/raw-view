@@ -18,6 +18,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -307,6 +308,175 @@ class BatchBaseDirGlobTests(unittest.TestCase):
         }
         self._run_batch(spec)  # 不抛错即通过
 
+    def test_glob_with_explicit_output_derives_unique_paths(self):
+        """glob 展开 + entry 显式 ``output`` 时每个匹配都得到独立输出名。
+
+        0.3.0-M-1 回归：旧的 ``{**entry, "input": m}`` 展开会保留同一个
+        ``output``，N 个匹配写同一个文件、后面覆盖前面（静默丢数据）。现在
+        显式 ``output`` 参与展开的每个匹配时，以 ``{stem}_{input_name}`` 派生
+        唯一输出名，绝不让多个输入共享一个输出路径。
+        """
+        import raw_view.__main__ as main_mod
+
+        for name in ("a.png", "b.png", "c.png"):
+            np.zeros((4, 4, 3), dtype=np.uint8).tofile(os.path.join(self._tmp, name))
+
+        calls: list[tuple[str, str]] = []
+
+        def fake_conv(input_path, output_path, raw_type, width, height, **kw):
+            calls.append((input_path, output_path))
+            return 1
+
+        sink = os.path.join(self._tmp, "sink.raw")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "base_dir": self._tmp,
+            # 只匹配 a/b/c（避免 setUp 的 input.png 也被展开）。output 要放在
+            # entry 级——这才是 0.3.0-M-1 复现的写法（批量文档里 output 是 per-file）。
+            "files": [{"input": "[abc].png", "output": sink}],
+        }
+        with mock.patch("raw_view.converter.image_file_to_raw", side_effect=fake_conv):
+            self._run_batch(spec)
+
+        self.assertEqual(len(calls), 3, "glob 应展开为 3 个匹配")
+        # 3 条输出路径互不相同（绝不回退到 0.3.0 的两个/多个输入共享同一 output）
+        outs = [out for _inp, out in calls]
+        self.assertEqual(len(set(outs)), 3, f"每个匹配的输出必须唯一: {outs}")
+
+        for in_path, out_path in calls:
+            self.assertEqual(
+                os.path.dirname(out_path), os.path.dirname(sink),
+                "显式 output 目录仍是所在目录",
+            )
+            self.assertNotEqual(
+                out_path, sink,
+                "首个匹配也不应原样占用用户给的 sink.raw",
+            )
+            self.assertIn(
+                Path(in_path).stem, Path(out_path).name,
+                "命名应含输入文件名以便区分",
+            )
+
+    def test_output_stem_sanitizer(self):
+        """派生输出名的 stem 消毒：Windows 非法字符/控制字符 → '_'。
+
+        输入文件名可在其它平台含 ``<>:"/\\|?*`` 与控制字符；直接拼进输出名会让
+        写入失败或写错位置。
+        """
+        from raw_view import __main__ as main_mod
+
+        self.assertEqual(
+            main_mod._sanitize_output_stem("a:b<c>d"),
+            "a_b_c_d",
+        )
+        self.assertNotIn(
+            "/", main_mod._sanitize_output_stem("x/y"),
+            "正斜杠也是目录分隔符，必须消毒",
+        )
+        self.assertNotIn(
+            "\x00", main_mod._sanitize_output_stem("a\x00b"),
+            "控制字符应消毒",
+        )
+        self.assertEqual(
+            main_mod._sanitize_output_stem("normal"),
+            "normal",
+            "普通文件名保持不变",
+        )
+
+    def test_glob_output_applies_sanitizer_to_derived_name(self):
+        """0.3.0-M-1：glob+显式 output 派生名应经 stem 消毒器。
+
+        用一个 Unix 风格非法名（mock 输入，真实 Windows 无法建该文件）验证派生
+        路径里只有消毒后的名字；输出目录仍是用户给的目录。
+        """
+        import raw_view.__main__ as main_mod
+
+        calls: list[tuple[str, str]] = []
+        fake_match = os.path.join(self._tmp, "a:b<c>d.png")
+        with mock.patch(
+            "raw_view.converter.image_file_to_raw",
+            side_effect=lambda i, o, *a, **k: (calls.append((i, o)), 1)[1],
+        ), mock.patch.object(
+            main_mod.glob, "glob",
+            return_value=[fake_match],
+        ), mock.patch.object(
+            main_mod.os.path, "isfile",
+            side_effect=lambda p: p == fake_match,
+        ):
+            self._run_batch({
+                "mode": "convert",
+                "target": "RAW",
+                "raw_type": "RAW8",
+                "width": 4,
+                "height": 4,
+                "base_dir": self._tmp,
+                "files": [{"input": "*.png", "output": os.path.join(self._tmp, "sink.raw")}],
+            })
+        self.assertEqual(len(calls), 1)
+        _inp, out = calls[0]
+        out_name = Path(out).name
+        # 关键不变量：派生名不得再含任何非法字符（具体前缀随平台而变——Windows 的
+        # pathlib 会把 "a:..." 的 "a:" 当盘符吃掉，因此断言“无非法字符 + 有 given
+        # 文件名”即可，跨平台稳定）。
+        for ch in ('<', '>', ':', '"', '\\', '|', '?', '*'):
+            self.assertNotIn(ch, out_name, f"派生名不应含非法字符 {ch!r}")
+        self.assertTrue(
+            out_name.endswith("_sink.raw"),
+            f"派生名应保留用户给的输出文件名后缀: {out_name!r}",
+        )
+        self.assertIn(
+            main_mod._sanitize_output_stem(Path(fake_match).stem), out_name,
+            "派生名应含消毒后的输入 stem",
+        )
+        self.assertEqual(
+            os.path.dirname(out), os.path.dirname(os.path.join(self._tmp, "sink.raw")),
+            "显式 output 的目录保持不变",
+        )
+
+    def test_glob_output_collision_same_stem_gets_unique_suffix(self):
+        """0.3.0-M-1：不同扩展名同 stem 的输入不能派生出同一输出名。
+
+        ``a.png`` 与 ``a.jpg`` 的 stem 都是 ``a``，若只做 ``{stem}_{given}`` 派生
+        会都落到 ``a_sink.raw``，第二个静默覆盖第一个（与 M-1 同类的丢数据）。
+        展开必须对同入口内已占用的输出名追加序号，保证两两不同。
+        """
+        import raw_view.__main__ as main_mod
+
+        calls: list[tuple[str, str]] = []
+        fake_matches = [
+            os.path.join(self._tmp, "a.png"),
+            os.path.join(self._tmp, "a.jpg"),
+        ]
+        with mock.patch(
+            "raw_view.converter.image_file_to_raw",
+            side_effect=lambda i, o, *a, **k: (calls.append((i, o)), 1)[1],
+        ), mock.patch.object(
+            main_mod.glob, "glob",
+            return_value=fake_matches,
+        ), mock.patch.object(
+            main_mod.os.path, "isfile",
+            side_effect=lambda p: p in fake_matches,
+        ):
+            self._run_batch({
+                "mode": "convert",
+                "target": "RAW",
+                "raw_type": "RAW8",
+                "width": 4,
+                "height": 4,
+                "base_dir": self._tmp,
+                "files": [{"input": "a.*", "output": os.path.join(self._tmp, "sink.raw")}],
+            })
+        self.assertEqual(len(calls), 2, "两个匹配都应转换")
+        outs = [o for _i, o in calls]
+        self.assertEqual(len(set(outs)), 2, f"同 stem 碰撞也必须产生唯一输出: {outs}")
+        names = sorted(Path(o).name for o in outs)
+        self.assertEqual(names[0], "a_sink.raw")
+        self.assertEqual(names[1], "a_sink_2.raw")
+
 
 class VersionSingleSourceTests(unittest.TestCase):
     """P2-4 / ENG-6：版本号单一来源一致性。"""
@@ -330,17 +500,52 @@ class VersionSingleSourceTests(unittest.TestCase):
         self.assertNotIn(APP_VERSION, "")  # 语法占位：help 不硬编码版本
         self.assertTrue(isinstance(hc.HELP_HTML, str))
 
+    def test_readme_current_version_matches_app_version(self):
+        """0.2.2-L-2 / 0.4.0-L-4：README「当前版本」不得滞后于 APP_VERSION。
+
+        曾多次出现版本号只改 APP_VERSION、README 忘同步的人工失配；这里直接读
+        README 的「当前版本：x.y.z」行与单一来源比对。
+        """
+        import re
+
+        from raw_view.models import APP_VERSION
+
+        readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(
+            encoding="utf-8"
+        )
+        m = re.search(r"当前版本：([0-9]+\.[0-9]+\.[0-9]+)", readme)
+        self.assertIsNotNone(m, "README 应有「当前版本：x.y.z」行")
+        self.assertEqual(
+            m.group(1), APP_VERSION,
+            "README 当前版本应与 models.APP_VERSION 保持一致（发布流程检查项）",
+        )
+
 
 class FrameSizeFormatTests(unittest.TestCase):
     """UI-9：_format_size 人类可读格式化 + Apply 门禁（超大帧禁用）。"""
 
     def test_format_size(self):
-        from raw_view.gui.panels import _format_size
+        from raw_view.gui.image_utils import _format_size
 
         self.assertIn("B", _format_size(1023))
         self.assertIn("KB", _format_size(2048))
         self.assertIn("MB", _format_size(1024 * 1024))
         self.assertIn("GB", _format_size(2 * 1024 * 1024 * 1024))
+
+    def test_byte_formatter_is_single_source(self):
+        """0.3.0-L-4 / 0.4.0-L-1 / 0.4.1-L-1：三份字节格式化并存已收敛为一处。
+
+        面板 Estimated frame、Convert/Batch 预览、主窗状态共用
+        ``image_utils._format_size``，不再有独立的 ``_human_size`` / panels 内
+        ``_format_size`` 拷贝。
+        """
+        from raw_view.gui.image_utils import _format_size as shared
+        import raw_view.gui.panels as panels
+        import raw_view.gui.dialogs.convert as convert
+
+        self.assertIs(panels._format_size, shared, "panels 应复用共享 helper")
+        self.assertIs(convert._format_size, shared, "convert 应复用共享 helper")
+        self.assertFalse(hasattr(convert, "_human_size"), "_human_size 已删除")
 
     def test_apply_gate_disables_oversize_and_reenables(self):
         # UI-9 门禁：单帧超 512MB 禁用 Apply；参数改回合法时重新启用。

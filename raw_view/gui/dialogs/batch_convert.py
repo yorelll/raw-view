@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -108,6 +108,26 @@ class BatchConvertDialog(QDialog):
         self._file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._file_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._file_table.verticalHeader().setVisible(False)
+        # 0.4.0-L-2：空表引导。QTableWidget 没有 setPlaceholderText；用一个只读
+        # 覆盖标签提示“Add Files 或拖放文件”，随表格行数/尺寸变化显隐与定位，
+        # 不改变 QTableWidget 的行列语义。
+        self._empty_hint = QLabel("Add files with Add Files or drag & drop here", self._file_table.viewport())
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setStyleSheet(
+            "color: #9AA0AC; font-style: italic;"
+            "background: transparent; border: none;"
+        )
+        self._empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._empty_hint.hide()
+        # 事件过滤器必须装在 **viewport** 上：Qt 只把某个对象的自身事件交给装在该
+        # 对象上的过滤器（装到 table 上收不到 viewport 的 Resize），否则窗口尺寸变化
+        # 时空表提示不会重新居中（0.4.0-L-2 实测：先装 table 侧 → viewport Resize
+        # 永远匹配不到）。
+        self._file_table.viewport().installEventFilter(self)
+        self._update_empty_hint()
+        # 行数变化（Add/Clear）与窗口尺寸变化时都要重新定位/显隐。
+        self._file_table.model().rowsInserted.connect(lambda *_: self._update_empty_hint())
+        self._file_table.model().rowsRemoved.connect(lambda *_: self._update_empty_hint())
 
         # ── Output parameters ──
         params_group = QFrame()
@@ -256,6 +276,34 @@ class BatchConvertDialog(QDialog):
         self._file_table.setRowCount(0)
         self._run_btn.setEnabled(False)
         self._run_btn.setToolTip("Add at least one image before starting the batch conversion.")
+
+    # ── 0.4.0-L-2：空表引导覆盖标签 ─────────────────────────────────────
+
+    def _update_empty_hint(self) -> None:
+        """按表格行数显隐空表提示，并把它对齐到 viewport 可视区中央。
+
+        有行时隐藏；无行时显示并随 viewport resize 重新居中。覆盖 label 在
+        viewport 上（不占行列），鼠标事件透明（WA_TransparentForMouseEvents），
+        不干扰拖放/点击。
+        """
+        if self.__dict__.get("_file_table") is None:
+            return
+        empty = self._file_table.rowCount() == 0
+        hint = self.__dict__.get("_empty_hint")
+        if hint is None:
+            return
+        hint.setVisible(empty)
+        if empty:
+            vp = self._file_table.viewport()
+            hint.setGeometry(vp.rect())
+            hint.raise_()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 — Qt override
+        """viewport resize 时重排空表提示；其余事件交给默认处理。"""
+        if obj is self._file_table.viewport() and event.type() == QEvent.Resize:
+            if self._file_table.rowCount() == 0:
+                self._update_empty_hint()
+        return super().eventFilter(obj, event)
 
     def _on_files_dropped(self, path: str) -> None:
         """Handle dropped file (single path from FileDropLineEdit)."""

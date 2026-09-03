@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
@@ -254,8 +256,10 @@ class FourCCDialog(QDialog):
 
         query = self._search_edit.text().strip()
         if query:
+            # 0.4.0-L-3：QLabel 默认 Qt.AutoText 会把 <b> 等片段当富文本解析；把
+            # 用户原始查询转义后再拼接，避免 "<" / ">" / "&" 显示错乱或注入。
             self._status_label.setText(
-                f'Showing {len(entries)} result(s) for "{query}" ({custom_count} custom)'
+                f'Showing {len(entries)} result(s) for "{html.escape(query)}" ({custom_count} custom)'
             )
         else:
             self._status_label.setText(

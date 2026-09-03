@@ -810,11 +810,21 @@ class MainWindow(QMainWindow):
         self._open_item(os.path.join(directory, siblings[new_idx]), decode=True)
 
     def _refresh_file_nav_actions(self) -> None:
-        """打开/关闭标签后刷新上一/下一文件动作的可用性。"""
-        count = len(self._same_dir_items())
-        both = count >= 1
-        self.prev_file_action.setEnabled(both)
-        self.next_file_action.setEnabled(both)
+        """打开/关闭标签后刷新上一/下一文件动作的可用性（0.3.0-L-1 / 0.3.1-L-2）。
+
+        按当前文件在「同目录有序支持文件列表」中的精确位置启用：至少有一个位于
+        当前文件前者才启用 prev，至少有一个后者才启用 next——首尾边界不再出现
+        “键可点但无任何操作”的无效动作。
+        """
+        item = self._current_item()
+        if item is None or not item.options.file_path:
+            self.prev_file_action.setEnabled(False)
+            self.next_file_action.setEnabled(False)
+            return
+        siblings = self._same_dir_items()
+        rank = sum(1 for s in siblings if s < os.path.basename(item.options.file_path))
+        self.prev_file_action.setEnabled(rank > 0)
+        self.next_file_action.setEnabled(rank < len(siblings))
 
     # ── Tab navigation ──────────────────────────────────────────────
 
@@ -1002,12 +1012,20 @@ class MainWindow(QMainWindow):
     def close_item(self, index: int) -> None:
         if not (0 <= index < len(self.items)):
             return
-        # 先按对象身份保存被关闭项的未 Apply 参数（若有）——不能依赖索引
-        # 在 pop 之后仍有效。
+        # 被关闭项即将销毁：**不要**把它当“当前项”执行 _save_panel_to_item——
+        # 面板此刻可能正显示其它/新当前标签的值（对象身份已随 _active_item_ref
+        # 走，见 _on_tab_changed）；对它“保存未 Apply 参数”既无意义（对象要销毁）
+        # 也会把面板误写进不相关的 item。未 Apply 编辑的丢弃已在关闭前由标签 ●
+        # 标记提示（UI-4），此处不做静默写回（0.2.2-M-1）。
+        closing = self.items[index]
         self._loading_item = True
         self.item_tabs.removeTab(index)
         self.items.pop(index)
         self._loading_item = False
+        # 0.2.2-L-1 / 0.3.1-M-1 / 0.4.1-M-2：若被关闭项正是当前在途解码目标，
+        # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
+        # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
+        self._cancel_decode_for(closing)
         if not self.items:
             self._active_item_index = -1
             self._active_item_ref = None
@@ -1391,10 +1409,18 @@ class MainWindow(QMainWindow):
             # 与 _on_decode_finished 一致：命中时也要回填当前显示数组，
             # 否则 save_display / 后续帧缓存写回会读到过期数据。
             item.current_display = cached.display_array
-            self._on_decode_success(item, cached.qimage, cached.width, cached.height, cached.format_name)
+            # 关键顺序：先落宽/高、再 _on_decode_success。_on_decode_success 内用
+            # _get_frame_size(item.options) 计算状态栏帧字节数，若仍读旧宽高，
+            # 缓存命中的状态栏会显示过期帧大小（0.3.0-M-3 / 0.4.0-M-1 /
+            # 0.4.1-M-1 三版沿用）；先更新 options 与 _on_decode_finished 一致。
             item.options.width = cached.width
             item.options.height = cached.height
+            # 0.3.0-L-3：命中时若先前有同参数 worker 仍在跑，其完成信号会因
+            # pending 置空而不再绘制（_should_apply_decode 拒绝），但让旧线程
+            # 继续跑完 + 重复写缓存仍是浪费；解引用/断开它，避免重复消费。
+            self._cancel_async_decode()
             self._pending_decode_item = None
+            self._on_decode_success(item, cached.qimage, cached.width, cached.height, cached.format_name)
             self._set_state("Decoded (cached)", "ok")
             return
 
@@ -1509,11 +1535,78 @@ class MainWindow(QMainWindow):
         若未来需要真正停止 CPU 工作：把 decode 拆成分块循环并检查
         ``threading.Event``（各循环间是一个安全的中断点）。
         """
-        if self._thread is not None:
+        # 用 __dict__.get：MainWindow.__new__ 测试桩可能没有 _thread/_worker /
+        # _pending_decode_item 属性（直接 self._thread 会因 Qt 包装层未初始化抛
+        # RuntimeError）。
+        if self.__dict__.get("_thread") is not None:
             logger.debug("Detached from in-flight decode thread")
         self._thread = None
         self._worker = None
         self._pending_decode_item = None
+
+    def _disconnect_decode(self) -> None:
+        """彻底断开主窗口与在途解码 worker/thread 的连接。
+
+        关闭标签/窗口时调用：先解引用（``_cancel_async_decode`` 本体），再断开
+        曾经连回 ``_on_decode_finished``/``_on_decode_error`` 的槽——防止被关闭
+        item 的 worker 迟到信号把结果画到**新**的当前标签上。``thread.deleteLater``
+        /``thread.quit()`` 的连接保留，线程与 worker 的生命周期仍由
+        finished/error → quit()/deleteLater 保证（绝不 suppress 信号，否则线程
+        /worker 永久泄漏，0.1.1-M-1 复查结论）。断开只在存在 worker 值时执行，
+        避免在 PyQt 包装层之外（``MainWindow.__new__`` 测试桩）触碰 ``Signal``
+        对象抛 RuntimeError。
+        """
+        worker = self._worker
+        self._cancel_async_decode()
+        if worker is not None:
+            try:
+                worker.finished.disconnect(self._on_decode_finished)
+                worker.error.disconnect(self._on_decode_error)
+            except (TypeError, RuntimeError):
+                pass
+
+    def _cancel_decode_for(self, item: ViewerItem | None) -> None:
+        """若 *item* 正是当前在途解码的目标，则断开其 worker 的连接。
+
+        ``_should_apply_decode`` 用「代数一致 + item 对象身份」判定结果是否
+        应用；一旦断开并把 ``_pending_decode_item`` 置空（``_cancel_async_decode``
+        内部），代数不需要变化也能让迟到的信号被丢弃（``item is None`` 或
+        ``id(pending) != id(item)``）。这里不递增代数，避免无谓地让其它在途
+        结果作废；等价于 0.3.0 审查 L-3 建议的“命中/关闭时也清理在途引用”。
+        """
+        if item is None:
+            return
+        # 用 __dict__.get：MainWindow.__new__ 测试桩可能没有该属性。
+        if self.__dict__.get("_pending_decode_item") is item:
+            self._disconnect_decode()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 — Qt override
+        """窗口关闭/退出：断开在途解码的信号（0.2.2-L-1 / 0.3.1-L-1 / 0.4.x-M-2）。
+
+        worker 是纯 CPU 计算且无事件循环，``quit()`` 无法中止（见
+        ``_cancel_async_decode`` 注释）；这里做的三件事：
+        1. 断开 finished/error → ``_on_decode_*`` 连接，防止被关闭窗口的迟到
+           结果在窗口销毁期间触碰即将失效的 QLabel/QWidget（Qt 对象销毁后的
+           访问是崩溃点）。
+        2. 解引用（``_cancel_async_decode``），让 ``_pending_decode_item`` 置空。
+        3. 对仍在跑的线程做**有界**等待（短超时）——小图帧在窗口关闭时即完成并
+           走正常的 quit()/deleteLater 清理；大帧超时则不做无界阻塞（不在 UI
+           线程长时间等待），线程/worker 生命周期仍由 finished/error →
+           quit()/deleteLater 连接保证继续收尾。
+        """
+        thread = self.__dict__.get("_thread")
+        self._disconnect_decode()
+        if thread is not None:
+            try:
+                if thread.isRunning():
+                    thread.wait(400)
+            except RuntimeError:
+                # 已完成解码的 QThread 经 deleteLater 释放 C++ 对象后，Python 侧
+                # 包装仍可能被 self._thread 引用（_on_decode_finished 不置空）；
+                # 对已删除对象调用 isRunning/wait 会抛 RuntimeError，这里静默跳过
+                # ——线程已退出，无需等待。
+                pass
+        super().closeEvent(event)
 
     def _should_apply_decode(self, generation: int, item: ViewerItem | None) -> bool:
         """Whether a worker result/error carrying *generation* should be applied.

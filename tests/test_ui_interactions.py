@@ -78,6 +78,15 @@ def _label_for(p: ControlPanel, combo) -> str | None:
     return label.text() if label is not None else None
 
 
+def _label_widget(p: ControlPanel, combo):
+    """主表单中控件行的 label **控件对象**（QFormLayout.labelForField，0.4.1-L-2
+    对象身份复用断言用）。"""
+    form = _main_form(p)
+    if form is None:
+        return None
+    return form.labelForField(combo)
+
+
 def _main_form_label_hidden(p: ControlPanel, combo) -> bool:
     """主表单中 *combo* 对应行 label 是否隐藏（真隐藏 = field 隐藏时 label 不残留）。"""
     form = _main_form(p)
@@ -310,6 +319,39 @@ class AdvancedFormLayoutTests(unittest.TestCase):
         p.set_format("YOnly")
         self.assertEqual(_label_for(p, p.bit_depth_combo), "Bit depth")
 
+    def test_cond_row_labels_are_reused_not_rebuilt(self):
+        """0.4.1-L-2：_apply_cond_rows 反复 takeRow/insertRow 时 label 必须复用。
+
+        每次 RAW↔YOnly↔YUYV 切换都会触发整段条件行搬移；若按文本重建 QLabel，
+        用户/主题对 label 的样式设置会丢失。构造后把缓存 label 打上标记，切换
+        若干次状态后，当前可见行的 label 仍应是同一个对象。
+        """
+        p = self.p
+        # 状态先切到 YUV/YOnly：Bit depth/Alignment/Endianness 可见
+        p.set_type("YUV")
+        p.set_format("YOnly")
+        align_label = _label_widget(p, p.align_combo)
+        self.assertIsNotNone(align_label)
+        self.assertIs(
+            _label_widget(p, p.align_combo), p._cond_row_labels.get("align_combo"),
+            "可见条件行 label 应来自 __init__ 缓存的首建对象",
+        )
+        # 反复切换（每次都会 takeRow + insertRow 重建布局）
+        for _ in range(3):
+            p.set_type("RAW")
+            p.format_combo.setCurrentText("RAW12")
+            p.set_type("YUV")
+            p.set_format("YOnly")
+        self.assertIs(
+            _label_widget(p, p.align_combo), align_label,
+            "多次条件行搬移后 label 必须仍是同一对象（不按文本重建）",
+        )
+        # Bit depth 的 label 在 RAW/YUV 切换间也应复用
+        self.assertIs(
+            _label_widget(p, p.bit_depth_combo), p._cond_row_labels.get("bit_depth_combo"),
+            "Bit depth label 应复用首次 addRow 创建的对象",
+        )
+
     def test_widths_not_forced_wider_than_normal(self):
         """高级框不显著宽于 Type/Format 等普通框。
 
@@ -441,6 +483,31 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             finally:
                 dialog.deleteLater()
 
+    def test_fourcc_status_label_escapes_rich_text_query(self):
+        """0.4.0-L-3：搜索状态字符串对用户查询做 HTML 转义。
+
+        QLabel 默认 Qt.AutoText 会把 ``<b>`` 之类片段当富文本解析；查询原样
+        落进状态栏会有显示错乱/注入口径。构造真实对话框、用带尖括号的查询搜索
+        后，状态文本中必须只剩转义后的字面量。
+        """
+        from raw_view.gui.dialogs.fourcc import FourCCDialog
+        from raw_view.models import AppSettings
+
+        dlg = FourCCDialog(AppSettings())
+        try:
+            dlg._search_edit.setText("A<B & C")
+            dlg._on_search()
+            text = dlg._status_label.text()
+            self.assertNotIn("A<B", text, "原始 < 不应被 QLabel 当标签解析")
+            self.assertIn("A&lt;B", text)
+            self.assertIn("&amp;", text)
+            # 空查询不带 'result(s) for' 也无转义问题
+            dlg._search_edit.clear()
+            dlg._on_search()
+            self.assertNotIn("result(s) for", dlg._status_label.text())
+        finally:
+            dlg.deleteLater()
+
     def test_batch_start_follows_file_table_state(self):
         from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
         from raw_view.models import AppSettings
@@ -452,6 +519,84 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             self.assertTrue(dialog._run_btn.isEnabled())
             dialog._clear_files()
             self.assertFalse(dialog._run_btn.isEnabled())
+        finally:
+            dialog.deleteLater()
+
+    def test_batch_empty_table_placeholder_visible_only_when_empty(self):
+        """0.4.0-L-2：空表显示“Add Files 或拖放”引导，有行后隐藏。"""
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        dialog = BatchConvertDialog(AppSettings())
+        try:
+            # 对话框未 show 时 isVisible() 恒为 False（父级隐藏）；用 isHidden()
+            # 追踪显式 setVisible 状态。
+            self.assertFalse(dialog._empty_hint.isHidden(), "空表应显示引导文字")
+            self.assertTrue(
+                dialog._empty_hint.text(),
+                "空表引导文字非空",
+            )
+            hint_text = dialog._empty_hint.text()
+            self.assertIn("Add Files", hint_text)
+            self.assertIn("drag", hint_text.lower())
+            dialog._add_files(["missing-input.png"])
+            self.assertTrue(dialog._empty_hint.isHidden(), "有行后引导应隐藏")
+            dialog._clear_files()
+            self.assertFalse(dialog._empty_hint.isHidden(), "清空后引导恢复显示")
+        finally:
+            dialog.deleteLater()
+
+    def test_batch_empty_hint_recenters_on_viewport_resize(self):
+        """0.4.0-L-2：空表提示必须随 viewport 尺寸变化重新定位。
+
+        事件过滤器必须装在 **viewport** 上（Qt 只把对象自身事件交给装在该对象
+        上的过滤器）；曾错装在 table 上导致 viewport 的 Resize 永远匹配不到、
+        窗口拉大时空表提示不再居中。这里不依赖对话框 show 后的真实布局（未显示
+        窗口的 viewport 尺寸会被布局引擎异步重算，直接比较尺寸会抖动），改为核对
+        机制本身：过滤器挂在 viewport 上 + 空表收到 viewport Resize 会触发重排。
+        """
+        from PyQt5.QtCore import QEvent
+
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        dialog = BatchConvertDialog(AppSettings())
+        try:
+            # 机制自证：修复前过滤器误挂在 table 上，viewport 的 Resize 事件到不到
+            # eventFilter（obj is viewport 恒不匹配），下面 2) 的 sendEvent 就不会
+            # 触发 _update_empty_hint —— 该断言即回归探测器。
+            with mock.patch.object(
+                dialog, "_update_empty_hint",
+                wraps=dialog._update_empty_hint,
+            ) as upd:
+                # 2) 空表 + viewport Resize → 触发重排
+                QApplication.sendEvent(
+                    dialog._file_table.viewport(),
+                    QEvent(QEvent.Resize),
+                )
+                self.assertGreaterEqual(
+                    upd.call_count, 1,
+                    "空表 + viewport resize 必须触发空表提示重新定位",
+                )
+                # 3) 重排本身把 hint 铺满当前 viewport 矩形
+                dialog._update_empty_hint()
+                self.assertFalse(dialog._empty_hint.isHidden())
+                self.assertEqual(
+                    dialog._empty_hint.geometry(), dialog._file_table.viewport().rect(),
+                    "空表提示应铺满 viewport（随尺寸重排）",
+                )
+                # 4) 有行后 resize 不再触发重排
+                dialog._add_files(["missing-input.png"])
+                upd.reset_mock()
+                QApplication.sendEvent(
+                    dialog._file_table.viewport(),
+                    QEvent(QEvent.Resize),
+                )
+                self.assertEqual(
+                    upd.call_count, 0,
+                    "有行时 viewport resize 不应触发空表提示",
+                )
+                self.assertTrue(dialog._empty_hint.isHidden())
         finally:
             dialog.deleteLater()
 
@@ -497,6 +642,45 @@ class ToolbarNavRemovedTests(unittest.TestCase):
             toolbar_actions = [a.text() for a in toolbar.actions()]
             self.assertNotIn("Previous File", toolbar_actions)
             self.assertNotIn("Next File", toolbar_actions)
+        finally:
+            w.close()
+            w.deleteLater()
+
+    def test_nav_action_precise_boundary_enablement(self):
+        """0.3.0-L-1 / 0.3.1-L-2：首/尾文件只启用可用的那一个方向。
+
+        首文件（无前驱）prev 禁用、next 启用；末文件相反；只有既非首又非末才
+        两个都启用。
+        """
+        import tempfile
+
+        w = MainWindow()
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="rv-nav-boundary-")
+            try:
+                for name in ("a.raw", "b.raw", "c.raw"):
+                    open(os.path.join(tmpdir, name), "w").close()
+
+                item = ViewerItem()
+                item.options.file_path = os.path.join(tmpdir, "b.raw")
+                w._current_item = lambda: item
+                w._refresh_file_nav_actions()
+                self.assertTrue(w.prev_file_action.isEnabled(), "中间文件 prev 应可用")
+                self.assertTrue(w.next_file_action.isEnabled(), "中间文件 next 应可用")
+
+                item.options.file_path = os.path.join(tmpdir, "a.raw")
+                w._refresh_file_nav_actions()
+                self.assertFalse(w.prev_file_action.isEnabled(), "首文件 prev 应禁用")
+                self.assertTrue(w.next_file_action.isEnabled(), "首文件 next 应可用")
+
+                item.options.file_path = os.path.join(tmpdir, "c.raw")
+                w._refresh_file_nav_actions()
+                self.assertTrue(w.prev_file_action.isEnabled(), "末文件 prev 应可用")
+                self.assertFalse(w.next_file_action.isEnabled(), "末文件 next 应禁用")
+            finally:
+                import shutil
+
+                shutil.rmtree(tmpdir, ignore_errors=True)
         finally:
             w.close()
             w.deleteLater()
@@ -691,6 +875,26 @@ class HelpShortcutSectionTests(unittest.TestCase):
         # "*" 不作为单键翻帧；"/" 不单独成键
         self.assertNotIn("*", keys)
 
+    def test_help_zoom_keys_match_runtime_normalization(self):
+        """0.3.1-L-3：Help 文案与实现按键必须运行时一致。
+
+        实现用 ``QKeySequence.ZoomIn/Out``（平台强相关的常量）；Help 写
+        ``Ctrl++``/``Ctrl+-``。仅比对源码字符串会产生“源码里有文本就算一致”的
+        假阳性——这里用 ``QKeySequence(...).toString()`` 把实现按键归一后与 Help
+        文案比对，防止个别键盘布局下常量解析结果漂移。
+        """
+        from PyQt5.QtGui import QKeySequence
+
+        impl = {
+            "Ctrl++": QKeySequence(QKeySequence.ZoomIn).toString(),
+            "Ctrl+-": QKeySequence(QKeySequence.ZoomOut).toString(),
+        }
+        for help_keys, impl_keys in impl.items():
+            self.assertEqual(
+                impl_keys, help_keys,
+                f"QKeySequence 归一结果应等于 Help 文案 {help_keys!r}（实际 {impl_keys!r}）",
+            )
+
     def test_shortcuts_match_source_truth(self):
         """快捷键描述必须真实存在于 app.py（防描述与实现脱节）。"""
         src = inspect.getsource(MainWindow)
@@ -719,6 +923,262 @@ class HelpShortcutSectionTests(unittest.TestCase):
                    "Ctrl+0", "Ctrl+1",
                    "Ctrl+R", "Ctrl+Shift+R", "Ctrl+H", "Ctrl+Shift+V"):
             self.assertIn(sc, short, f"SHORTCUTS 应写出 {sc}")
+
+
+# ── 0.3.0-M-3 / 0.4.0-M-1 / 0.4.1-M-1：缓存命中状态栏帧大小 ────────────
+
+
+class DecodeCacheHitStatusTests(unittest.TestCase):
+    """解码缓存命中后，状态栏帧字节数必须由**当前**宽高算出。
+
+    缓存命中分支曾先 ``_on_decode_success`` 再回填 ``item.options.width/height``，
+    导致 ``_on_decode_success`` 里的 ``_get_frame_size(item.options)`` 读到旧宽高
+    （真实图片缩到曾缓存的组合时，状态栏显示的是旧帧大小的字节数）。
+    """
+
+    def _new_window(self):
+        from raw_view.gui.app import MainWindow
+
+        w = MainWindow.__new__(MainWindow)
+        w.state_status = SimpleNamespace(setText=lambda _t: None)
+        w.image_status = SimpleNamespace(setText=lambda _t: None)
+        w.file_status = SimpleNamespace(
+            setText=lambda _t: None,
+            setToolTip=lambda _t: None,
+        )
+        w._set_tab_dirty = lambda *_a, **_k: None
+        w._update_frame_display = lambda _item: None
+        w._set_state = lambda *_a, **_k: None
+        w.decode_cache = None
+        return w
+
+    def test_cache_hit_status_uses_current_dimensions(self):
+        import tempfile
+
+        from raw_view.gui.app import DecodeCache
+        from raw_view.gui.worker import DecodeResult
+        from raw_view.models import DecodeOptions, ViewerItem
+        from raw_view.formats import expected_frame_size_raw
+
+        # 真实文件：decode_current 会经 _remaining_bytes 读文件大小（文件不存在会
+        # 走 QMessageBox 分支，__new__ 桩无真实父类会崩）。命中路径其实不读内容。
+        _tf = tempfile.NamedTemporaryFile(suffix=".raw", delete=False)
+        _tf.close()
+        try:
+            with open(_tf.name, "wb") as f:
+                f.write(b"\x00" * 4096)
+            self._run_cache_hit_assertions(_tf.name)
+        finally:
+            os.unlink(_tf.name)
+
+    def _run_cache_hit_assertions(self, path: str):
+        from raw_view.gui.app import DecodeCache
+        from raw_view.gui.worker import DecodeResult
+        from raw_view.models import DecodeOptions, ViewerItem
+        from raw_view.formats import expected_frame_size_raw
+
+        w = self._new_window()
+        item = ViewerItem()
+        item.options = DecodeOptions(
+            file_path=path, image_type="RAW",
+            format_name="RAW8", width=2, height=2,
+            alignment="msb", endianness="little",
+        )
+        item.current_frame = 0
+
+        # 假缓存：命中一个 4x4 RAW8 的结果（显示器按缓存宽高 4x4 展示）。
+        # qimage 必须是真 QImage——_on_decode_success 会 QPixmap.fromImage(qimg)。
+        from PyQt5.QtGui import QImage
+
+        cache = DecodeCache(max_bytes=10_000_000, max_items=10)
+        w.decode_cache = cache
+        cached = DecodeResult(
+            display_array=None,
+            qimage=QImage(4, 4, QImage.Format_RGB888),
+            width=4,
+            height=4,
+            format_name="RAW8",
+        )
+        cache.store(DecodeCache.key(item.options, 0), cached)
+
+        w._current_item = lambda: item
+        w._start_async_decode = lambda *a: None
+        w._read_frame_data = lambda *a: b"\x00" * 16
+        # _on_decode_success 会调 view.set_pixmap/fit_image → 给个桩视图。
+        item.view = SimpleNamespace(
+            set_pixmap=lambda _p: None,
+            fit_image=lambda: None,
+        )
+        # decode_current 先 _save_panel_to_item（从面板读参数）；给出一个平板桩。
+        w.panel = SimpleNamespace(
+            get_values=lambda: {
+                "image_type": "RAW", "format_name": "RAW8",
+                "width": 2, "height": 2,
+                "alignment": "msb", "endianness": "little", "offset": 0,
+                "preview_mode": "Bayer Color", "bayer_pattern": "RGGB",
+            }
+        )
+        w._loading_item = False
+        w.zoom_status = SimpleNamespace(setText=lambda _t: None)
+        w._compute_frame_info = lambda _item: None
+
+        # 现在的 options 是 2x2；缓存中是 4x4 → 命中后状态应显示 4x4 的帧大小。
+        seen: list[str] = []
+
+        def _capture(text, *a):
+            seen.append(text)
+
+        w.image_status.setText = _capture
+        w.decode_current()
+
+        self.assertTrue(seen, "命中路径应写状态栏")
+        status = seen[-1]
+        expected = expected_frame_size_raw("RAW8", 4, 4)
+        self.assertIn("4x4", status)
+        self.assertIn(f"{expected:,} bytes/frame", status)
+        # 旧 bug：显示的会是 2x2 的帧大小。"bytes/frame" 前的数字必须精确等于
+        # 4x4 的帧大小，而不是 `4`（stale）这种会被子串误判的裸数字。
+        import re as _re
+
+        m = _re.search(r"\(([\d,]+) bytes/frame\)", status)
+        self.assertIsNotNone(m, f"状态栏应有 bytes/frame 数字: {status!r}")
+        self.assertEqual(
+            int(m.group(1).replace(",", "")), expected,
+            f"状态栏帧大小必须按当前宽高 4x4 计算: {status!r}",
+        )
+        # 选项已回填为缓存的 4x4（与 _on_decode_finished 非缓存路径一致）
+        self.assertEqual(item.options.width, 4)
+        self.assertEqual(item.options.height, 4)
+
+
+# ── 0.2.2-L-1 / 0.3.1-M-1,L-1 / 0.4.0-M-2 / 0.4.1-M-2：关闭回收在途解码 ──
+
+
+class DecodeTeardownTests(unittest.TestCase):
+    """关闭标签/窗口时必须断开在途解码的信号，防迟到结果画到新标签。"""
+
+    def test_close_item_cancels_inflight_decode_for_closed_item(self):
+        w = _new_window_with_tabs()
+        items = [_add_tab(w, n) for n in ("a", "b", "c")]
+        # 模拟：items[1] 是当前在途解码目标
+        w._pending_decode_item = items[1]
+        w._cancel_decode_for = MainWindow._cancel_decode_for.__get__(w, MainWindow)
+        w._disconnect_decode = mock.Mock()
+        MainWindow.close_item(w, 1)
+        w._disconnect_decode.assert_called_once_with()
+
+    def test_close_item_not_cancelled_for_other_inflight(self):
+        """关闭非在途 item 时不应误断开其它 item 的解码信号。"""
+        w = _new_window_with_tabs()
+        items = [_add_tab(w, n) for n in ("a", "b", "c")]
+        w._pending_decode_item = items[0]   # 在途目标是 a
+        w._cancel_decode_for = MainWindow._cancel_decode_for.__get__(w, MainWindow)
+
+        def _boom():
+            raise AssertionError("不应断开非在途 item 的解码")
+        w._disconnect_decode = lambda: _boom()
+        MainWindow.close_item(w, 2)   # 关 c → a 的在途不受影响
+        # 不抛错即通过
+
+    def test_close_all_reaps_each_inflight_item(self):
+        """批量关闭（close-all）应逐个回收在途解码。"""
+        w = _new_window_with_tabs()
+        items = [_add_tab(w, n) for n in ("a", "b", "c")]
+        w._pending_decode_item = items[1]
+        w._cancel_decode_for = MainWindow._cancel_decode_for.__get__(w, MainWindow)
+        w._disconnect_decode = mock.Mock()
+        MainWindow.close_all_items(w)
+        self.assertTrue(w._disconnect_decode.called, "close-all 应触发在途解码回收")
+
+    def test_cancel_decode_for_uses_identity(self):
+        """_cancel_decode_for 只在对象身份一致时断开（拖拽重排后仍正确）。"""
+        from raw_view.gui.app import MainWindow
+
+        w = MainWindow.__new__(MainWindow)
+        w._pending_decode_item = None
+        w._cancel_decode_for = MainWindow._cancel_decode_for.__get__(w, MainWindow)
+
+        def _boom():
+            raise AssertionError("无在途时不��断开")
+        w._disconnect_decode = lambda: _boom()
+        item = ViewerItem()
+        w._cancel_decode_for(item)      # pending 为 None → 不动作
+        w._cancel_decode_for(None)      # item None → 不动作
+
+    def _qclose_event(self):
+        """真实 QCloseEvent：closeEvent 的 super() 需要它（_Evt 桩会被拒绝）。"""
+        from PyQt5.QtGui import QCloseEvent
+
+        return QCloseEvent()
+
+    def test_close_event_disconnects_and_waits_bounded(self):
+        """closeEvent 应断开在途解码，并对存活线程做有界等待。
+
+        用真实 MainWindow（完整 QWidget 初始化，super().closeEvent 才可调）；
+        closeEvent 的 super() 在 ``__new__`` 桩上会因“本类 __init__ 未调用”抛
+        RuntimeError，生产路径窗口总是完整初始化，行为不受影响。
+        """
+        from raw_view.gui.app import MainWindow
+
+        w = MainWindow()
+        # 假线程：isRunning=True、wait 记录调用
+        class _FakeThread:
+            def __init__(self):
+                self.waited = 0
+            def isRunning(self):
+                return True
+            def wait(self, ms):
+                self.waited = ms
+                return True
+        fake = _FakeThread()
+        w._thread = fake
+        with mock.patch.object(w, "_disconnect_decode") as dis, \
+             mock.patch.object(w, "_cancel_async_decode") as canc:
+            MainWindow.closeEvent(w, self._qclose_event())
+            dis.assert_called_once_with()
+            self.assertEqual(fake.waited, 400, "关闭时应留下有界短超时")
+            # 别在这里 w.close()——会再次进入 closeEvent 重复触发断言；
+            # 真实窗口用 hide+deleteLater 清理即可。
+            w.hide()
+            w.deleteLater()
+
+    def test_close_event_tolerates_no_inflight(self):
+        """真实窗口无在途解码（_thread/_pending_decode_item 均 None）关闭不崩。"""
+        from raw_view.gui.app import MainWindow
+
+        w = MainWindow()
+        try:
+            MainWindow.closeEvent(w, self._qclose_event())
+        finally:
+            w.close()
+            w.deleteLater()
+
+    def test_close_event_tolerates_deleted_qthread_due_to_runtime_error(self):
+        """"已完成解码的线程对象已 deleteLater（C++ 对象销毁）后关闭不崩。
+
+        解码完成后 ``_thread`` 仍被引用，但 QThread 的 C++ 对象已被
+        finished→deleteLater 释放；对已删包装调用 isRunning()/wait() 会抛
+        RuntimeError。closeEvent 必须静默跳过，否则关窗崩（e2e 实测发现）。
+        """
+        from unittest.mock import MagicMock
+
+        from raw_view.gui.app import MainWindow
+
+        w = MainWindow()
+        class _GoneThread:
+            def isRunning(self):
+                raise RuntimeError("wrapped C/C++ object of type QThread has been deleted")
+            def wait(self, ms):
+                raise AssertionError("已删线程不应 wait")
+        w._thread = _GoneThread()
+        try:
+            with mock.patch.object(w, "_disconnect_decode") as dis:
+                MainWindow.closeEvent(w, self._qclose_event())
+                dis.assert_called_once_with()
+        finally:
+            w._thread = None
+            w.close()
+            w.deleteLater()
 
 
 # ── 0.4.1 回归：Batch 进度框不闪现（进度框延迟显式创建）────────────────

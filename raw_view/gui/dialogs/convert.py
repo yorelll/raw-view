@@ -39,7 +39,7 @@ from raw_view.models import (
     BAYER_PATTERNS,
     format_output_template,
 )
-from raw_view.gui.image_utils import qimage_from_rgb
+from raw_view.gui.image_utils import _format_size, qimage_from_rgb
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
 
@@ -48,16 +48,6 @@ from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
 # 与查看端默认对齐）。仅影响对话框默认值，不改动既有 CLI 默认。
 DEFAULT_CONVERT_WIDTH = 2560
 DEFAULT_CONVERT_HEIGHT = 1440
-
-
-def _human_size(num_bytes: int) -> str:
-    """Format a byte count as a human-readable string (e.g. 14.5 MB)."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
 
 
 class ConvertDialog(QDialog):
@@ -495,7 +485,7 @@ class ConvertDialog(QDialog):
 
             source_info = f"Source: {Path(input_path).name} ({src_w}x{src_h})"
             output_info = f"Output specification: {out_w}x{out_h}"
-            frame_info = f"Frame size: {_human_size(fsize)} ({fsize:,} B)" if fsize > 0 else "Frame size: -"
+            frame_info = f"Frame size: {_format_size(fsize)} ({fsize:,} B)" if fsize > 0 else "Frame size: -"
             self._preview_info.setText(f"{source_info}\n{output_info}\n{frame_info}")
         except Exception:
             self._preview_thumb.setText("(preview unavailable)")
@@ -571,7 +561,7 @@ class ConvertDialog(QDialog):
             self.output_edit.setText(output_path)
             try:
                 size = Path(output_path).stat().st_size
-                size_str = f" ({_human_size(size)})"
+                size_str = f" ({_format_size(size)})"
             except OSError:
                 size_str = ""
             QMessageBox.information(

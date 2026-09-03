@@ -27,6 +27,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +35,17 @@ from raw_view.formats import FormatError
 from raw_view.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Windows 文件名非法字符（含不可见控制字符）。glob 展开 + 显式 output 派生输出
+# 名时，输入 stem 可能含这些字符（如 Unix 侧创建的 "a:b<c>.png"）；直接拼进
+# 输出名会在 Windows 上创建失败。统一替换为 "_"（0.3.0-M-1 相关路径健壮性）。
+_OUTPUT_STEM_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_output_stem(stem: str) -> str:
+    """把输入文件名 stem 消毒为跨平台合法的输出名字符串。"""
+    return _OUTPUT_STEM_ILLEGAL.sub("_", stem)
 
 
 def get_app_version() -> str:
@@ -195,6 +207,12 @@ still apply). With "base_dir" set, relative "input" paths resolve from it
 
 If "output" is omitted, the path is auto-generated from the input name
 + resolution into the "output_dir" (or a default dir next to the input).
+
+Explicit "output" + glob magic in the same entry (0.3.0-M-1): each expansion
+gets a UNIQUE output name derived as "<stem>_<given output name>" in the same
+directory (same-stem collisions are auto-suffixed "_2", "_3", ...; Windows-
+illegal filename characters in the stem are replaced with "_"), so a batch
+never silently overwrites one file with the previous match's result.
 """)
     sys.exit(0)
 
@@ -534,9 +552,54 @@ def _run_batch(args: argparse.Namespace) -> None:
             if not matches:
                 expanded_files.append(entry)
             else:
-                expanded_files.extend(
-                    {**entry, "input": m} for m in matches
-                )
+                # 0.3.0-M-1：若 entry 显式给了 "output"，展开的每个匹配都必须派生
+                # 唯一输出名——旧的 ``{**entry, "input": m}`` 会保留同一个 output，
+                # N 个匹配写同一文件、后写覆盖先写（静默丢数据）。派生规则：把
+                # 用户给的 output 文件名前插入输入 stem，目录保持不变。
+                explicit_output = entry.get("output")
+                if explicit_output:
+                    _out_dir = os.path.dirname(explicit_output) or "."
+                    _out_path = Path(explicit_output)
+                    _out_suffix = _out_path.suffix  # "" 表示无扩展名
+                    # 同一入口内已派生过的输出名：不同输入可能映射到同一派生名
+                    # （同 stem 不同扩展名，如 a.png/a.jpg → 都派生 a_sink.raw）
+                    # ——若不做去重，后一个会静默覆盖前一个（M-1 同类问题）。
+                    # 碰撞时对后来者追加序号，保证本入口内输出路径两两不同。
+                    _used_outputs: set[str] = set()
+
+                    # 输入 stem 可能含 Windows 非法字符（'a:b.png' 等）；直接拼进
+                    # 输出名会创建失败或写错位置，这里把它消毒成合法文件名字符，
+                    # 保证派生名对 Windows / ext4 都可用（0.2.2-L-3 相关路径健壮性）。
+                    def _unique_output(match: str) -> str:
+                        stem = _sanitize_output_stem(Path(match).stem)
+                        base = os.path.join(
+                            _out_dir,
+                            f"{stem}_{_out_path.stem}{_out_suffix}",
+                        )
+                        if base not in _used_outputs:
+                            _used_outputs.add(base)
+                            return base
+                        # 同 stem 碰撞（如 a.png / a.jpg）：追加序号保证唯一，绝不
+                        # 让两个输入共享同一输出路径。
+                        n = 2
+                        while True:
+                            cand = os.path.join(
+                                _out_dir,
+                                f"{stem}_{_out_path.stem}_{n}{_out_suffix}",
+                            )
+                            if cand not in _used_outputs:
+                                _used_outputs.add(cand)
+                                return cand
+                            n += 1
+
+                    for m in matches:
+                        e = {**entry, "input": m}
+                        e["output"] = _unique_output(m)
+                        expanded_files.append(e)
+                else:
+                    expanded_files.extend(
+                        {**entry, "input": m} for m in matches
+                    )
         elif os.path.isabs(raw_input):
             expanded_files.append({**entry, "input": raw_input})
         else:
@@ -598,13 +661,13 @@ def _run_batch(args: argparse.Namespace) -> None:
                 alignment=params.get("alignment", ""),
                 endianness=params.get("endianness", ""),
             )
-            # 未显式指定 output_dir（JSON 全局/entry 均未给）且无显式 output 时，
-            # 保持旧行为：把自动输出放到输入文件同目录。一旦用户显式给了
-            # output_dir 或 output，就尊重它，绝不覆盖（0.2.1 review M-2）。
+            # 未显式指定 output_dir（JSON 全局/entry 均未给）时，保持旧行为：把
+            # 自动输出放到输入文件同目录。显式 output 不可能走到这里（上方分支已
+            # 消费），因此 has_explicit_dir 只由 output_dir 判定——output 与输出
+            # 目录两条语义严格分离（0.2.2-L-3）：只要给了目录就尊重，绝不覆盖。
             has_explicit_dir = (
                 entry.get("output_dir") is not None
                 or spec.get("output_dir") is not None
-                or entry.get("output")  # 已由上方分支覆盖，这里不会命中 output
             )
             if not has_explicit_dir:
                 output_path = str(Path(input_path).parent / Path(output_path).name)

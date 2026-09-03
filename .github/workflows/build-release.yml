@@ -196,22 +196,24 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**269 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**289 passed**）。
 
-            ### 🐛 修复（0.4.1）
+            ### 🐛 修复（0.4.2）
 
-            - **真实图片打开报错**：numpy 2.x 下 `QImage(arr.data, ...)` 收到 `memoryview` 导致 "argument 1 has unexpected type 'memoryview'"。
-              **修复**：新增 `raw_view/gui/image_utils.py`（`qimage_from_grayscale`/`qimage_from_rgb`，用 `np.ascontiguousarray(...).tobytes()`），
-              app/worker/Convert 预览全部改用它，真实 PNG/RAW/YUV 均可正常解码（回归测试覆盖）。
-            - **面板条件行间距**：YUV 普通格式下 Format 与 Width 之间出现大段空白、RAW 下 Alignment 间距不一致。
-              **修复**：条件行改用 `QFormLayout.takeRow/insertRow` 把隐藏行彻底移出表单（本机 PyQt5 对 `setVisible(False)` 的隐藏行仍保留行几何）。
-            - **Batch 进度框闪现**：首次进入 Batch，Add Files 取消 / Clear / Start 有概率闪现 "Batch conversion in progress..."。
-              **修复**：QProgressDialog 改为在冲突确认后按需创建（不再 `__init__` 里 `minimumDuration=0 + modal + hide()`）、
-              不显式 `show()`（deferred-show 由 `setValue` 触发）、`finally` 清理置回 None；短批量(<300ms)不弹框。
-            - **状态栏信息**：帧大小改回具体字节数 `(N,NNN bytes/frame)`（撤销上一版 `7.0 MB/frame` 缩写）。
-            - **info 按钮 hover 外框**：Settings/Variant 说明按钮 hover 不再出现外部边框（仅背景色变化）。
-            - **快捷键独立**：Keyboard Shortcuts 从 Format Help 拆分为独立模块——`SHORTCUTS` 数据源 + 全新
-              `Keyboard Shortcuts` 对话框（Help 菜单新条目），Format Help 不再混入快捷键。
+            **5 份 code review 处置落地（0.2.2 / 0.3.0 / 0.3.1 / 0.4.0 / 0.4.1，由独立子 agent 严格复查）**
+            - **解码缓存命中状态栏失真**（沿用 3 版）：缓存命中时先更新 `item.options.width/height` 再刷新状态栏，
+              帧字节数与当前宽高一致
+            - **关闭/退出回收在途解码线程**（沿用 4 版）：标签关闭/批量关闭/窗口关闭统一取消在途 worker，
+              新增 `closeEvent` 有界等待（`thread.quit()+wait(400)`），不 suppress 信号、无线程泄漏
+            - **batch glob + 显式 output**：不再静默覆盖——逐匹配派生唯一输出名，且处理同 stem 碰撞
+              （自动追加 `_2/_3`）与 Windows 非法字符消毒
+            - **batch 空表引导**：空表叠加只读占位提示（修复事件过滤器装在 QTableWidget 而非 viewport，
+              尺寸变化时提示正确重居中）
+            - **文件字节格式化收敛**：三套助手统一为 `image_utils._format_size` 单一来源
+            - **FourCC 搜索状态富文本加固**：查询串 `html.escape` 防误解析
+            - **面板条件行 label 复用**：`_apply_cond_rows` 优先复用已建 label（避免样式丢失）
+            - **Prev/Next 文件边界**：按精确位置启用，首尾不再"两键可点却无操作"
+            - **README 版本与 `APP_VERSION` 一致性**：新增自动化断言防滞后
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
