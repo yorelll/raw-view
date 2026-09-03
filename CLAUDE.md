@@ -61,6 +61,15 @@ docs/review/
   2. **打 tag 前填好**：发布者把当前版本的修复/新功能清单按模板填入 `.github/workflows/build-release.yml` 的 `body:`（Workflow 的 `Create or update GitHub Release` 步骤），连同版本号/文件名占位符一并更新。这样打 tag 后 Release **直接生成即最终版**，**不依赖事后 `gh release edit`**。
   3. **确需事后修改时**：`gh release edit <tag> --notes-file - <<'EOF' ... EOF` 覆盖整个 body，内容仍必须与 `docs/release-template.md` 格式一致。
   4. body 中版本号、zip 文件名、`name:` 中的版本号必须与 tag 一致（可用 `${{ steps.version.outputs.version }}` 动态占位符）。
+- **远程监控一律用 `gh.exe`（必守）**：监控远端状态（CI / Build & Release 运行、Release 资产与 body、tag/远程 ref）时，统一使用 GitHub CLI 完整路径：
+  ```powershell
+  "D:\Program Files\GitHub CLI\gh.exe" run list --limit N
+  "D:\Program Files\GitHub CLI\gh.exe" run view <run-id> --json status,conclusion
+  "D:\Program Files\GitHub CLI\gh.exe" release view <tag> --json tagName,name,assets,body
+  "D:\Program Files\GitHub CLI\gh.exe" release list --limit N
+  ```
+  - 不要再用 `curl https://api.github.com/...` 手拼 JSON（已踩过解析/限流/编码坑）；如需解析 JSON，让 gh 输出经 Python `json.load` 或写临时文件后读。
+  - 说明：本机 `gh` 因 PATH 代理（rtk）有时解析不到，务必用全路径调用。
 
 ## 3. 常用命令（本地）
 
