@@ -1180,7 +1180,7 @@ class MainWindow(QMainWindow):
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {item.options.width}x{item.options.height} ({frame_size:,} bytes/frame) | Format: {item.options.format_name}"
+                f"Image: {item.options.width}x{item.options.height} ({frame_size:,} bytes) | Format: {item.options.format_name}"
             )
         else:
             self.image_status.setText(
@@ -1660,7 +1660,7 @@ class MainWindow(QMainWindow):
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {width}x{height} ({frame_size:,} bytes/frame) | Format: {format_name}"
+                f"Image: {width}x{height} ({frame_size:,} bytes) | Format: {format_name}"
             )
         else:
             self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")

@@ -602,6 +602,20 @@ class ControlPanel(QWidget):
                 lw = took.labelItem.widget() if took.labelItem is not None else None
                 if lw is not None:
                     labels[name] = lw
+                    # takeRow() detaches the label from the form but does not
+                    # change its visibility.  Hide the label explicitly while
+                    # the row is out of the layout; otherwise its text remains
+                    # painted in the old position (the field itself is hidden
+                    # but the QLabel is still a child of the content widget).
+                    lw.setVisible(False)
+            else:
+                # A row may already have been taken out by an earlier sync.
+                # The cached QLabel is still a live child and must remain
+                # hidden until this call inserts its row again.
+                cached_label = self._cond_row_labels.get(name)
+                if cached_label is not None:
+                    cached_label.setVisible(False)
+            field.setVisible(False)
 
         # 2) 找到 Width 行（固定行）当前的插入位置，条件行段统一插在它前面。
         anchor = _row_of(self.width_spin)

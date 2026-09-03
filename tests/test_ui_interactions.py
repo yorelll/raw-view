@@ -174,17 +174,110 @@ class AdvancedVisibilityTests(unittest.TestCase):
         p = self.p
         p.set_type("YUV")
         p.set_format("YUYV")
-        for combo in (
-            p.bit_depth_combo, p.align_combo, p.endian_combo,
-            p.raw_preview_combo, p.bayer_pattern_combo,
+        for name in (
+            "bit_depth_combo", "align_combo", "endian_combo",
+            "raw_preview_combo", "bayer_pattern_combo",
         ):
+            combo = getattr(p, name)
             self.assertTrue(combo.isHidden(), f"{combo} 应隐藏")
             self.assertFalse(combo.isEnabled())
-            # 行 label 必须同步隐藏——只藏 field 会让 QFormLayout 留下孤立 label
+            # 条件行从 QFormLayout 移出后，field 与缓存 QLabel 都必须隐藏，
+            # 否则标签会作为 content widget 的孤立子控件残留。
+            self.assertIsNone(_label_for(p, combo))
             self.assertTrue(
-                _main_form_label_hidden(p, combo),
-                f"{combo} 的行 label 应同时隐藏（不留孤立标签行）",
+                p._cond_row_labels[name].isHidden(),
+                f"{combo} 的行 label 应彻底隐藏（不留孤立标签）",
             )
+        labels = [label for label in p._cond_row_labels.values() if not label.isHidden()]
+        self.assertEqual(labels, [], "YUYV 不应留下任何条件行 label")
+
+    def test_rapid_type_format_flips_leave_no_stale_labels(self):
+        """快速 RAW/YUV/YOnly/Standard 切换不应残留标签或破坏表单行。"""
+        p = self.p
+        for _ in range(12):
+            p.set_type("RAW")
+            p.set_type("YUV")
+            p.set_format("YOnly")
+            p.set_format("YUYV")
+            p.set_type("Standard Image")
+            p.set_type("YUV")
+            p.set_format("I420")
+
+        self.assertEqual(p._main_form.rowCount(), 8)
+        for name, _label in p._COND_ROW_SPECS:
+            field = getattr(p, name)
+            self.assertIsNone(_label_for(p, field))
+            self.assertTrue(field.isHidden())
+            self.assertTrue(p._cond_row_labels[name].isHidden())
+        # Fixed rows remain in their expected order and still have labels.
+        self.assertEqual(_label_for(p, p.type_combo), "Type")
+        self.assertEqual(_label_for(p, p.format_combo), "Format")
+        self.assertEqual(_label_for(p, p.width_spin), "Width")
+        self.assertEqual(_label_for(p, p.height_spin), "Height")
+        self.assertEqual(_label_for(p, p.offset_spin), "Offset")
+        zoom_row = p.zoom_spin.parentWidget()
+        zoom_label = p._main_form.labelForField(zoom_row)
+        self.assertIsNotNone(zoom_label)
+        self.assertEqual(zoom_label.text(), "Zoom")
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 6)
+        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 5)
+        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 4)
+        self.assertEqual(p._main_form.getWidgetPosition(p.format_combo)[0], 3)
+        self.assertEqual(p._main_form.getWidgetPosition(p.type_combo)[0], 2)
+        self.assertEqual(p._main_form.rowCount(), 8)
+        self.assertEqual(len(p._cond_row_labels), 5)
+        self.assertTrue(all(label.isHidden() for label in p._cond_row_labels.values()))
+        self.assertTrue(all(getattr(p, name).isHidden() for name, _ in p._COND_ROW_SPECS))
+        self.assertTrue(all(not getattr(p, name).isEnabled() for name, _ in p._COND_ROW_SPECS))
+        self.assertIsNotNone(p._main_form.labelForField(zoom_row))
+        self.assertIsNotNone(p._main_form.labelForField(p.type_combo))
+        self.assertIsNotNone(p._main_form.labelForField(p.format_combo))
+        self.assertIsNotNone(p._main_form.labelForField(p.width_spin))
+        self.assertIsNotNone(p._main_form.labelForField(p.height_spin))
+        self.assertIsNotNone(p._main_form.labelForField(p.offset_spin))
+        self.assertIsNotNone(p._main_form.labelForField(p.preset_combo.parentWidget()))
+        self.assertEqual(p._main_form.getWidgetPosition(p.preset_combo.parentWidget())[0], 0)
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
+        self.assertIsNotNone(p.type_combo.nextInFocusChain())
+        self.assertIsNotNone(p.format_combo.nextInFocusChain())
+        # The widgets remain owned by the panel for later reinsertion, but are
+        # disabled and not reachable through the active form, so Qt skips them
+        # during Tab focus traversal.
+        p.set_type("YUV")
+        self.assertIsNotNone(p.type_combo.focusPolicy())
+        self.assertIsNotNone(p.format_combo.focusPolicy())
+        self.assertFalse(p.align_combo.isEnabled())
+        self.assertTrue(p.align_combo.isHidden())
+        self.assertIsNone(_label_for(p, p.align_combo))
+        p.set_format("YOnly")
+        self.assertEqual(p._main_form.rowCount(), 11)
+        self.assertEqual(p._main_form.getWidgetPosition(p.bit_depth_combo)[0], 4)
+        self.assertEqual(p._main_form.getWidgetPosition(p.align_combo)[0], 5)
+        self.assertEqual(p._main_form.getWidgetPosition(p.endian_combo)[0], 6)
+        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 8)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 9)
+        # Switch back to a plain YUV format and verify the same hidden-row
+        # invariant survives reinsertion/removal once more.
+        p.set_format("YUYV")
+        self.assertFalse(p.align_combo.isEnabled())
+        self.assertTrue(p.align_combo.isHidden())
+        self.assertIsNone(_label_for(p, p.align_combo))
+        p.set_type("YUV")
+        p.set_format("YOnly")
+        for name in ("bit_depth_combo", "align_combo", "endian_combo"):
+            self.assertIsNotNone(_label_for(p, getattr(p, name)))
+            self.assertTrue(getattr(p, name).isEnabled())
+        p.set_format("YUYV")
+        self.assertIsNone(_label_for(p, p.align_combo))
+        self.assertFalse(p.align_combo.isEnabled())
+        self.assertTrue(p._cond_row_labels["align_combo"].isHidden())
+        self.assertIsNotNone(p.type_combo.nextInFocusChain())
+        self.assertIsNotNone(p.format_combo.nextInFocusChain())
+        p.close()
+        p.deleteLater()
+        QApplication.processEvents()
 
     def test_standard_image_hides_all_advanced(self):
         p = self.p
@@ -457,18 +550,41 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
     def test_info_buttons_are_focusable_and_use_non_clipping_icon_size(self):
         from raw_view.gui.dialogs.settings import SettingsDialog
         from raw_view.gui.widgets.variant_selector import _info_icon
-        from raw_view.models import AppSettings
+        from raw_view.models import AppSettings, build_ui_stylesheet
 
         settings_dialog = SettingsDialog(AppSettings())
         variant_button = _info_icon("Example help")
         try:
-            for button in (settings_dialog.template_help_icon, variant_button):
+            buttons = (
+                settings_dialog.template_help_icon,
+                settings_dialog.findChild(QPushButton, "variantHelp"),
+                variant_button,
+            )
+            for button in buttons:
                 self.assertIsInstance(button, QPushButton)
+                self.assertTrue(button.isFlat(), "info 按钮不能由原生 QPushButton 绘制外框")
                 self.assertEqual(button.iconSize(), QSize(16, 16))
                 self.assertLessEqual(button.iconSize().width(), button.width())
                 self.assertLessEqual(button.iconSize().height(), button.height())
                 self.assertTrue(button.accessibleName())
                 self.assertTrue(button.accessibleDescription())
+                self.assertNotEqual(button.focusPolicy(), Qt.NoFocus)
+
+            for theme in ("light", "dark"):
+                sheet = build_ui_stylesheet(theme, 13)
+                for object_name in (
+                    "infoButton", "variantInfoButton", "templateHelp", "variantHelp",
+                ):
+                    self.assertIn(
+                        f"QPushButton#{object_name}:hover", sheet,
+                        f"{theme} 样式必须覆盖 {object_name} 的 hover 状态",
+                    )
+                # Hover/focus/pressed selectors all explicitly clear the border;
+                # this protects against the native button frame reappearing.
+                self.assertGreaterEqual(
+                    sheet.count("border: none;"), 8,
+                    f"{theme} info 状态不应有外部边框",
+                )
         finally:
             settings_dialog.deleteLater()
             variant_button.deleteLater()
@@ -1035,13 +1151,14 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
         status = seen[-1]
         expected = expected_frame_size_raw("RAW8", 4, 4)
         self.assertIn("4x4", status)
-        self.assertIn(f"{expected:,} bytes/frame", status)
-        # 旧 bug：显示的会是 2x2 的帧大小。"bytes/frame" 前的数字必须精确等于
+        self.assertIn(f"{expected:,} bytes", status)
+        # 旧 bug：显示的会是 2x2 的帧大小。括号内的数字必须精确等于
         # 4x4 的帧大小，而不是 `4`（stale）这种会被子串误判的裸数字。
         import re as _re
 
-        m = _re.search(r"\(([\d,]+) bytes/frame\)", status)
-        self.assertIsNotNone(m, f"状态栏应有 bytes/frame 数字: {status!r}")
+        m = _re.search(r"\(([\d,]+) bytes\)", status)
+        self.assertIsNotNone(m, f"状态栏应有 bytes 数字: {status!r}")
+        self.assertNotIn("bytes/frame", status, "状态栏不应再显示 /frame")
         self.assertEqual(
             int(m.group(1).replace(",", "")), expected,
             f"状态栏帧大小必须按当前宽高 4x4 计算: {status!r}",

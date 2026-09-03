@@ -733,21 +733,37 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["accent_light"]};
             border: 1px solid {p["accent"]};
         }}
-        QPushButton#infoButton, QPushButton#variantInfoButton {{
+        /*
+         * Help icons are deliberately borderless in every native state.  The
+         * Settings dialog gives the buttons a more specific object name after
+         * construction (templateHelp/variantHelp), so style the shared
+         * suffix as well as the factory names.  ``outline: none`` is included
+         * for native styles that paint a focus ring outside the widget rect.
+         * Focus remains enabled; keyboard activation and the accessible name
+         * are intentionally unaffected.
+         */
+        QPushButton#infoButton, QPushButton#variantInfoButton,
+        QPushButton#templateHelp, QPushButton#variantHelp {{
             background: transparent;
             border: none;
+            outline: none;
             border-radius: 4px;
         }}
-        QPushButton#infoButton:hover, QPushButton#variantInfoButton:hover {{
-            background: {p["accent_light"]};
+        QPushButton#infoButton:hover, QPushButton#variantInfoButton:hover,
+        QPushButton#templateHelp:hover, QPushButton#variantHelp:hover,
+        QPushButton#infoButton:focus, QPushButton#variantInfoButton:focus,
+        QPushButton#templateHelp:focus, QPushButton#variantHelp:focus,
+        QPushButton#infoButton:pressed, QPushButton#variantInfoButton:pressed,
+        QPushButton#templateHelp:pressed, QPushButton#variantHelp:pressed {{
+            background: transparent;
             border: none;
+            outline: none;
         }}
-        QPushButton#infoButton:pressed, QPushButton#variantInfoButton:pressed {{
-            background: {p["button_hover_bg"]};
+        QPushButton#infoButton:disabled, QPushButton#variantInfoButton:disabled,
+        QPushButton#templateHelp:disabled, QPushButton#variantHelp:disabled {{
+            background: transparent;
             border: none;
-        }}
-        QPushButton#infoButton:focus, QPushButton#variantInfoButton:focus {{
-            border: none;
+            outline: none;
         }}
         QPushButton#dangerButton {{
             background: transparent;

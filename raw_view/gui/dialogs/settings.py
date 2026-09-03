@@ -239,6 +239,7 @@ class SettingsDialog(QDialog):
         """Return a keyboard-accessible info button with the same tooltip help."""
         button = QPushButton()
         button.setObjectName("infoButton")
+        button.setFlat(True)
         button.setAccessibleName("More information")
         button.setAccessibleDescription(tooltip)
         button.setToolTip(tooltip)
