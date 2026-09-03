@@ -58,6 +58,7 @@ class SettingsDialog(QDialog):
             "  e.g. image_2560x1440_BGGR10P.raw"
         )
         self.template_help_icon = self._info_icon(template_help_text)
+        self.template_help_icon.setObjectName("templateHelp")
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(72, 2400)
         self.dpi_spin.setValue(settings.save_dpi)
@@ -118,6 +119,7 @@ class SettingsDialog(QDialog):
             "different formats × bayer patterns × sizes.\n"
             "Adds a checkbox grid to the Convert and Batch Convert dialogs."
         )
+        variant_help.setObjectName("variantHelp")
         variant_row = QHBoxLayout()
         variant_row.setContentsMargins(0, 0, 0, 0)
         variant_row.setSpacing(6)
@@ -233,20 +235,26 @@ class SettingsDialog(QDialog):
     def _on_template_changed(self, text: str) -> None:
         self.template_edit.setToolTip(text)
 
-    def _info_icon(self, tooltip: str) -> QLabel:
-        """A small ⓘ icon label that reveals *tooltip* on hover."""
-        label = QLabel()
-        label.setToolTip(tooltip)
-        label.setCursor(Qt.WhatsThisCursor)
+    def _info_icon(self, tooltip: str) -> QPushButton:
+        """Return a keyboard-accessible info button with the same tooltip help."""
+        button = QPushButton()
+        button.setObjectName("infoButton")
+        button.setAccessibleName("More information")
+        button.setAccessibleDescription(tooltip)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.WhatsThisCursor)
+        button.setFixedSize(24, 24)
         try:
             import qtawesome as qta
 
             from raw_view.models import ACTION_ICON_COLOR
 
-            label.setPixmap(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR).pixmap(16, 16))
+            button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
         except Exception:
-            label.setText("(i)")
-        return label
+            button.setText("i")
+        button.setIconSize(button.sizeHint())
+        button.clicked.connect(lambda: QMessageBox.information(button, "More information", tooltip))
+        return button
 
     def _browse_output_dir(self) -> None:
         """Pick a default output folder via the system dialog."""

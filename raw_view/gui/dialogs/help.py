@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDialog, QLabel, QTextBrowser, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QDialog, QLabel, QPushButton, QTextBrowser, QVBoxLayout, QWidget
 
 from raw_view.help_content import HELP_HTML
 from raw_view.models import APP_VERSION
@@ -15,10 +15,17 @@ class HelpDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Format Help")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         layout = QVBoxLayout(self)
         browser = QTextBrowser()
+        browser.setAccessibleName("Format help")
+        browser.setAccessibleDescription("Read-only help for RAW and YUV format layout rules.")
         browser.setHtml(HELP_HTML)
         layout.addWidget(browser)
+        close_btn = QPushButton("Close")
+        close_btn.setAccessibleName("Close format help")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
         self.resize(760, 560)
 
 
@@ -53,3 +60,7 @@ class AboutDialog(QDialog):
         layout.addWidget(desc)
 
         layout.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.setAccessibleName("Close about")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)

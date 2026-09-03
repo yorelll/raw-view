@@ -147,9 +147,16 @@ class FourCCDialog(QDialog):
         # Search bar
         search_row = QHBoxLayout()
         self._search_edit = QLineEdit()
+        self._search_edit.setAccessibleName("Search formats")
+        self._search_edit.setAccessibleDescription(
+            "Search FourCC, alias, description, MBUS name, or value."
+        )
         self._search_edit.setPlaceholderText("Search by FourCC, alias, description, MBUS name, or value…")
+        self._search_edit.setToolTip("Search FourCC, alias, description, MBUS name, or value")
         self._search_edit.textChanged.connect(self._on_search)
         clear_btn = QPushButton("Clear")
+        clear_btn.setAccessibleName("Clear format search")
+        clear_btn.setToolTip("Clear the format search")
         clear_btn.clicked.connect(self._clear_search)
         search_row.addWidget(self._search_edit, 1)
         search_row.addWidget(clear_btn)
@@ -243,9 +250,15 @@ class FourCCDialog(QDialog):
             if not entry.builtin:
                 custom_count += 1
 
-        self._status_label.setText(
-            f"{len(entries)} format(s) shown ({custom_count} custom)"
-        )
+        query = self._search_edit.text().strip()
+        if query:
+            self._status_label.setText(
+                f'Showing {len(entries)} result(s) for "{query}" ({custom_count} custom)'
+            )
+        else:
+            self._status_label.setText(
+                f"{len(entries)} format(s) shown ({custom_count} custom)"
+            )
 
     def _set_row(self, row: int, entry: FourCCEntry) -> None:
         alias_str = ", ".join(entry.aliases) if entry.aliases else "-"

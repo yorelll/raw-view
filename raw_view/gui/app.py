@@ -57,6 +57,18 @@ from raw_view.models import (
 logger = get_logger(__name__)
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Return a compact human-readable size while retaining exact bytes."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(num_bytes):,} B"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def resource_path(relative: str) -> str:
     """Resolve a bundled resource path in both dev and PyInstaller runs."""
     base = getattr(sys, "_MEIPASS", None)
@@ -1150,15 +1162,19 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 size = os.path.getsize(path)
-                self.file_status.setText(f"File: {os.path.basename(path)} ({size} bytes)")
+                self.file_status.setText(f"File: {os.path.basename(path)} ({size:,} bytes)")
+                self.file_status.setToolTip(path)
             except OSError:
                 self.file_status.setText(f"File: {os.path.basename(path)}")
-        # Show image data size (frame size)
+                self.file_status.setToolTip(path)
+        # Show image data size (frame size) in a compact human-readable form;
+        # the exact byte count remains available from the tooltip.
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {item.options.width}x{item.options.height} ({frame_size}) | Format: {item.options.format_name}"
+                f"Image: {item.options.width}x{item.options.height} ({_format_bytes(frame_size)}/frame) | Format: {item.options.format_name}"
             )
+            self.image_status.setToolTip(f"Exact frame size: {frame_size:,} bytes")
         else:
             self.image_status.setText(
                 f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
@@ -1557,12 +1573,14 @@ class MainWindow(QMainWindow):
             size = os.path.getsize(path)
         except OSError:
             size = 0
-        self.file_status.setText(f"File: {os.path.basename(path)} ({size} bytes)")
+        self.file_status.setText(f"File: {os.path.basename(path)} ({size:,} bytes)")
+        self.file_status.setToolTip(path)
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {width}x{height} ({frame_size}) | Format: {format_name}"
+                f"Image: {width}x{height} ({_format_bytes(frame_size)}/frame) | Format: {format_name}"
             )
+            self.image_status.setToolTip(f"Exact frame size: {frame_size:,} bytes")
         else:
             self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
         self._set_state("Decoded", "ok")

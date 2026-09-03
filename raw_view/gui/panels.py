@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -137,12 +138,20 @@ class ControlPanel(QWidget):
         # panel (text buttons got truncated to "MANAC" etc.).
         self.preset_save_btn = QPushButton()
         self.preset_save_btn.setObjectName("iconButton")
+        self.preset_save_btn.setAccessibleName("Save sensor preset")
+        self.preset_save_btn.setAccessibleDescription(
+            "Save the current panel values as a named sensor preset."
+        )
         self.preset_save_btn.setIcon(_qta_icon("fa5s.save"))
         self.preset_save_btn.setToolTip(
             "Save the current panel values as a named sensor preset for reuse."
         )
         self.preset_manage_btn = QPushButton()
         self.preset_manage_btn.setObjectName("iconButton")
+        self.preset_manage_btn.setAccessibleName("Manage sensor presets")
+        self.preset_manage_btn.setAccessibleDescription(
+            "Open sensor preset management to rename, delete, import, or export presets."
+        )
         self.preset_manage_btn.setIcon(_qta_icon("fa5s.cog"))
         self.preset_manage_btn.setToolTip("Manage presets: rename, delete, import/export.")
         for btn in (self.preset_save_btn, self.preset_manage_btn):
@@ -200,6 +209,10 @@ class ControlPanel(QWidget):
         zoom_layout.setContentsMargins(0, 0, 0, 0)
         self.zoom_slider = QSlider()
         self.zoom_slider.setOrientation(1)  # Horizontal
+        self.zoom_slider.setAccessibleName("Zoom level")
+        self.zoom_slider.setAccessibleDescription(
+            "Adjust the image zoom from 10% to 1000%."
+        )
         self.zoom_slider.setRange(10, 1000)
         self.zoom_slider.setValue(100)
         self.zoom_slider.setTickPosition(QSlider.NoTicks)

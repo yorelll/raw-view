@@ -45,9 +45,13 @@ class FrameNavBar(QWidget):
         # Icon mapping: │◀  ◀  ▶  ▶│
         self.first_btn = QPushButton("\u2502\u25C0")   # │◀
         self.first_btn.setFixedSize(_NAV_W, _NAV_H)
+        self.first_btn.setAccessibleName("First frame")
+        self.first_btn.setAccessibleDescription("Go to the first frame (Home).")
         self.first_btn.setToolTip("First frame (Home)")
         self.prev_btn = QPushButton("\u25C0")           # ◀
         self.prev_btn.setFixedSize(_NAV_W, _NAV_H)
+        self.prev_btn.setAccessibleName("Previous frame")
+        self.prev_btn.setAccessibleDescription("Go to the previous frame (Left or Up).")
         self.prev_btn.setToolTip("Previous frame (Left / Up)")
 
         # Current frame / total
@@ -57,16 +61,24 @@ class FrameNavBar(QWidget):
         self.frame_spin.setFixedHeight(_NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
         self.frame_spin.setEnabled(False)
+        self.frame_spin.setAccessibleName("Current frame")
+        self.frame_spin.setAccessibleDescription("Current frame number.")
 
         self._total_label = QLabel("/ 0")
         self._total_label.setFixedHeight(_NAV_H)
         self._total_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._total_label.setAccessibleName("Total frames")
+        self._total_label.setAccessibleDescription("Total number of frames in the file.")
 
         self.next_btn = QPushButton("\u25B6")           # ▶
         self.next_btn.setFixedSize(_NAV_W, _NAV_H)
+        self.next_btn.setAccessibleName("Next frame")
+        self.next_btn.setAccessibleDescription("Go to the next frame (Right or Down).")
         self.next_btn.setToolTip("Next frame (Right / Down)")
         self.last_btn = QPushButton("\u25B6\u2502")     # ▶│
         self.last_btn.setFixedSize(_NAV_W, _NAV_H)
+        self.last_btn.setAccessibleName("Last frame")
+        self.last_btn.setAccessibleDescription("Go to the last frame (End).")
         self.last_btn.setToolTip("Last frame (End)")
 
         # Note: button/spin/label colours are themed globally via

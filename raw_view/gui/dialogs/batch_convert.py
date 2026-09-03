@@ -78,6 +78,10 @@ class BatchConvertDialog(QDialog):
 
         # ── Source file list (drag-drop or browse) ──
         self.input_edit = FileDropLineEdit()
+        self.input_edit.setAccessibleName("Images to convert")
+        self.input_edit.setAccessibleDescription(
+            "Drop image files here or use Add Files to build the batch list."
+        )
         self.input_edit.setPlaceholderText(
             "Drop files here or use Browse to add multiple images..."
         )
@@ -188,6 +192,8 @@ class BatchConvertDialog(QDialog):
         # ── Buttons ──
         self._run_btn = QPushButton("Start Batch Convert")
         self._run_btn.setObjectName("accentButton")
+        self._run_btn.setEnabled(False)
+        self._run_btn.setToolTip("Add at least one image before starting the batch conversion.")
         self._run_btn.clicked.connect(self._run_batch)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
@@ -250,6 +256,8 @@ class BatchConvertDialog(QDialog):
 
     def _clear_files(self) -> None:
         self._file_table.setRowCount(0)
+        self._run_btn.setEnabled(False)
+        self._run_btn.setToolTip("Add at least one image before starting the batch conversion.")
 
     def _on_files_dropped(self, path: str) -> None:
         """Handle dropped file (single path from FileDropLineEdit)."""
@@ -278,7 +286,14 @@ class BatchConvertDialog(QDialog):
             self._file_table.setItem(row, 2, QTableWidgetItem("Pending"))
             self._file_table.setItem(row, 3, QTableWidgetItem(""))
 
-        self.input_edit.setText(f"{self._file_table.rowCount()} file(s) loaded")
+        count = self._file_table.rowCount()
+        self.input_edit.setText(f"{count} file(s) loaded")
+        self._run_btn.setEnabled(count > 0)
+        self._run_btn.setToolTip(
+            "Start converting the loaded images."
+            if count > 0 else
+            "Add at least one image before starting the batch conversion."
+        )
 
     # ── Control sync ───────────────────────────────────────────────────
 

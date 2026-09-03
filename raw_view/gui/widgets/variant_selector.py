@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -30,18 +31,30 @@ from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS, COMMON_SIZES
 _CUSTOM_SIZE_COLOR = "#5B8DEF"
 
 
-def _info_icon(tooltip: str) -> QLabel:
-    """A small ⓘ icon label that reveals *tooltip* on hover."""
-    label = QLabel()
-    label.setToolTip(tooltip)
-    label.setCursor(Qt.WhatsThisCursor)
+def _info_icon(tooltip: str) -> QPushButton:
+    """Return a keyboard-accessible info button with the same tooltip help."""
+    button = QPushButton()
+    button.setObjectName("variantInfoButton")
+    button.setAccessibleName("More information")
+    button.setAccessibleDescription(tooltip)
+    button.setToolTip(tooltip)
+    button.setCursor(Qt.WhatsThisCursor)
+    button.setFixedSize(24, 24)
     try:
         import qtawesome as qta
 
-        label.setPixmap(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR).pixmap(15, 15))
+        button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
     except Exception:
-        label.setText("(i)")
-    return label
+        button.setText("i")
+    button.setIconSize(button.sizeHint())
+
+    def _show_help() -> None:
+        from PyQt5.QtWidgets import QMessageBox
+
+        QMessageBox.information(button, "More information", tooltip)
+
+    button.clicked.connect(_show_help)
+    return button
 
 
 class VariantSelector(QWidget):

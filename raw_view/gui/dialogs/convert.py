@@ -70,8 +70,16 @@ class ConvertDialog(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self.input_edit = FileDropLineEdit()
+        self.input_edit.setAccessibleName("Input image")
+        self.input_edit.setAccessibleDescription(
+            "Select a PNG, JPG, or BMP input image, or drag one here."
+        )
         self.input_edit.setPlaceholderText("Select an input image (PNG/JPG/BMP), or drag one here...")
         self.output_edit = QLineEdit()
+        self.output_edit.setAccessibleName("Output file")
+        self.output_edit.setAccessibleDescription(
+            "Path for the RAW or YUV output file."
+        )
         self.output_edit.setPlaceholderText("Output path — auto-filled from the template if left blank")
 
         self.target_type = QComboBox()
@@ -134,20 +142,29 @@ class ConvertDialog(QDialog):
         preview_layout.setContentsMargins(8, 8, 8, 8)
         preview_layout.setSpacing(6)
 
-        preview_title = QLabel("Preview")
+        preview_title = QLabel("Source preview")
+        preview_title.setAccessibleName("Source preview")
         preview_title.setStyleSheet("font-weight: bold; font-size: 12px;")
         preview_title.setAlignment(Qt.AlignLeft)
 
         preview_content = QHBoxLayout()
         self._preview_thumb = QLabel("Drop an image\nor click Browse")
         self._preview_thumb.setObjectName("previewThumb")
+        self._preview_thumb.setAccessibleName("Source image preview")
+        self._preview_thumb.setAccessibleDescription(
+            "Thumbnail of the source image; it does not represent decoded output bytes."
+        )
         self._preview_thumb.setFixedSize(160, 120)
         self._preview_thumb.setAlignment(Qt.AlignCenter)
 
         self._preview_info = QLabel(
             "Source: -\n"
-            "Output size: -\n"
+            "Output specification: -\n"
             "Frame size: -"
+        )
+        self._preview_info.setAccessibleName("Output specification")
+        self._preview_info.setAccessibleDescription(
+            "Target dimensions and estimated encoded frame size."
         )
         self._preview_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
@@ -433,7 +450,7 @@ class ConvertDialog(QDialog):
         input_path = self.input_edit.text().strip()
         if not input_path or not Path(input_path).is_file():
             self._preview_thumb.setText("Drop an image\nor click Browse")
-            self._preview_info.setText("Source: -\nOutput size: -\nFrame size: -")
+            self._preview_info.setText("Source: -\nOutput specification: -\nFrame size: -")
             return
 
         try:
@@ -478,12 +495,12 @@ class ConvertDialog(QDialog):
                     fsize = 0
 
             source_info = f"Source: {Path(input_path).name} ({src_w}x{src_h})"
-            output_info = f"Output size: {out_w}x{out_h}"
-            frame_info = f"Frame size: {fsize}" if fsize > 0 else "Frame size: -"
+            output_info = f"Output specification: {out_w}x{out_h}"
+            frame_info = f"Frame size: {_human_size(fsize)} ({fsize:,} B)" if fsize > 0 else "Frame size: -"
             self._preview_info.setText(f"{source_info}\n{output_info}\n{frame_info}")
         except Exception:
             self._preview_thumb.setText("(preview unavailable)")
-            self._preview_info.setText("Source: -\nOutput size: -\nFrame size: -")
+            self._preview_info.setText("Source: -\nOutput specification: -\nFrame size: -")
 
     def _convert(self) -> None:
         # Busy feedback: disable the button and show progress text so the user
