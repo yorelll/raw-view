@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -252,7 +252,7 @@ class SettingsDialog(QDialog):
             button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
         except Exception:
             button.setText("i")
-        button.setIconSize(button.sizeHint())
+        button.setIconSize(QSize(16, 16))
         button.clicked.connect(lambda: QMessageBox.information(button, "More information", tooltip))
         return button
 

@@ -30,11 +30,12 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import Qt  # noqa: E402
+from PyQt5.QtCore import QSize, Qt  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QFormLayout,
     QLabel,
+    QPushButton,
     QTabWidget,
     QWidget,
 )
@@ -369,6 +370,80 @@ class FrameHintRemovedTests(unittest.TestCase):
 
 
 # ── 需求 4：工具栏移除 Prev/Next File 箭头按钮 ────────────────────────
+
+
+class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
+    """Regression checks for the 0.3.1 accessibility and dialog fixes."""
+
+    def test_control_panel_accessible_names_match_actions(self):
+        panel = _panel()
+        try:
+            self.assertEqual(panel.preset_save_btn.accessibleName(), "Save sensor preset")
+            self.assertEqual(panel.preset_manage_btn.accessibleName(), "Manage sensor presets")
+            self.assertEqual(panel.zoom_slider.accessibleName(), "Zoom level")
+            self.assertIn("10%", panel.zoom_slider.accessibleDescription())
+            self.assertIn("1000%", panel.zoom_slider.accessibleDescription())
+        finally:
+            panel.deleteLater()
+
+    def test_frame_navigation_names_match_shortcuts(self):
+        from raw_view.gui.framenav import FrameNavBar
+
+        nav = FrameNavBar()
+        try:
+            self.assertEqual(nav.first_btn.accessibleName(), "First frame")
+            self.assertEqual(nav.prev_btn.accessibleName(), "Previous frame")
+            self.assertEqual(nav.next_btn.accessibleName(), "Next frame")
+            self.assertEqual(nav.last_btn.accessibleName(), "Last frame")
+            self.assertIn("Home", nav.first_btn.toolTip())
+            self.assertIn("Left", nav.prev_btn.toolTip())
+            self.assertIn("Right", nav.next_btn.toolTip())
+            self.assertIn("End", nav.last_btn.toolTip())
+        finally:
+            nav.deleteLater()
+
+    def test_info_buttons_are_focusable_and_use_non_clipping_icon_size(self):
+        from raw_view.gui.dialogs.settings import SettingsDialog
+        from raw_view.gui.widgets.variant_selector import _info_icon
+        from raw_view.models import AppSettings
+
+        settings_dialog = SettingsDialog(AppSettings())
+        variant_button = _info_icon("Example help")
+        try:
+            for button in (settings_dialog.template_help_icon, variant_button):
+                self.assertIsInstance(button, QPushButton)
+                self.assertEqual(button.iconSize(), QSize(16, 16))
+                self.assertLessEqual(button.iconSize().width(), button.width())
+                self.assertLessEqual(button.iconSize().height(), button.height())
+                self.assertTrue(button.accessibleName())
+                self.assertTrue(button.accessibleDescription())
+        finally:
+            settings_dialog.deleteLater()
+            variant_button.deleteLater()
+
+    def test_fourcc_dialogs_remove_unbound_context_help_button(self):
+        from raw_view.gui.dialogs.fourcc import FourCCDialog, FourCCEditDialog
+        from raw_view.models import AppSettings
+
+        for dialog in (FourCCDialog(AppSettings()), FourCCEditDialog()):
+            try:
+                self.assertFalse(dialog.windowFlags() & Qt.WindowContextHelpButtonHint)
+            finally:
+                dialog.deleteLater()
+
+    def test_batch_start_follows_file_table_state(self):
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        dialog = BatchConvertDialog(AppSettings())
+        try:
+            self.assertFalse(dialog._run_btn.isEnabled())
+            dialog._add_files(["missing-input.png"])
+            self.assertTrue(dialog._run_btn.isEnabled())
+            dialog._clear_files()
+            self.assertFalse(dialog._run_btn.isEnabled())
+        finally:
+            dialog.deleteLater()
 
 
 class ToolbarNavRemovedTests(unittest.TestCase):

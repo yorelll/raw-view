@@ -7,7 +7,7 @@ outputs at once (e.g. RAW8/RAW10/RAW12 × RGGB/BGGR × several resolutions).
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QSize, Qt, QTimer
 from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -46,7 +46,7 @@ def _info_icon(tooltip: str) -> QPushButton:
         button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
     except Exception:
         button.setText("i")
-    button.setIconSize(button.sizeHint())
+    button.setIconSize(QSize(16, 16))
 
     def _show_help() -> None:
         from PyQt5.QtWidgets import QMessageBox

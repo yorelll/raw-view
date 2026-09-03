@@ -44,6 +44,7 @@ class FourCCEditDialog(QDialog):
                  entry: FourCCEntry | None = None) -> None:
         super().__init__(parent)
         self._entry = entry
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Edit FourCC Entry" if entry else "Add FourCC Entry")
         self.setMinimumWidth(480)
 
@@ -132,6 +133,7 @@ class FourCCDialog(QDialog):
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self._store = FourCCStore(
             custom_entries=settings.fourcc_custom_formats,
         )
