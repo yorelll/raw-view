@@ -386,6 +386,10 @@ class BatchConvertDialog(QDialog):
         # 才构造，避免它在 Add Files 的 QFileDialog 或冲突确认框等嵌套事件循环
         # 中闪现 "Batch conversion in progress..."（0.4.1 用户反馈）。
         # minimumDuration 300ms——很短的批量直接完成时不弹框。
+        # 注意：这里**不能**显式 show()——QProgressDialog 的 deferred-show 由
+        # 后续的 setValue() 触发（内部 setMinimumDuration 只在 setValue 后真正
+        # 生效）；显式 show() 会立刻绘制并让短批量重新闪现（0.4.1 复核实测，
+        # PyQt5 5.15.11）。
         self._progress = QProgressDialog(
             "Batch conversion in progress...", "Cancel", 0, len(files), self
         )

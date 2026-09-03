@@ -721,5 +721,108 @@ class HelpShortcutSectionTests(unittest.TestCase):
             self.assertIn(sc, short, f"SHORTCUTS 应写出 {sc}")
 
 
+# ── 0.4.1 回归：Batch 进度框不闪现（进度框延迟显式创建）────────────────
+
+
+class BatchProgressDialogTests(unittest.TestCase):
+    """0.4.1 修复：QProgressDialog 不在 __init__ 预创建，避免 Add Files /
+    冲突确认等嵌套事件循环中闪现 "Batch conversion in progress..."。
+
+    关键契约（实测 PyQt5 5.15.11）：
+    - 对话框构造时 ``self._progress`` 必须为 None（未创建任何进度框）；
+    - ``_run_batch`` 在冲突确认**之后**才按需创建，``minimumDuration`` 不小于
+      300ms，且创建后**不立即显式 show()**——deferred show 由后续 setValue()
+      触发，短批量不闪现、长批量 300ms 后出现；
+    - ``finally`` 清理后 ``self._progress`` 回到 None（无残留对象、无泄漏）。
+    """
+
+    def _make_dialog(self):
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        dlg = BatchConvertDialog(AppSettings())
+        # 关闭多变体分支，让 _run_batch 走单文件转换路径（进度框逻辑相同）
+        dlg._variant_selector = None
+        return dlg
+
+    def test_no_progress_dialog_at_construction(self):
+        """进度框不得在 __init__ 创建（杜绝 Add Files/Clear 的闪现源头）。"""
+        dlg = self._make_dialog()
+        try:
+            self.assertIsNone(dlg._progress)
+        finally:
+            dlg.deleteLater()
+
+    def test_run_batch_creates_deferred_progress_and_cleans_up(self):
+        """_run_batch 在冲突确认后创建进度框，deferred-show、结束后清空。"""
+        from unittest import mock
+
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+
+        dlg = self._make_dialog()
+        try:
+            # 用一张真实存在的小图驱动 _run_batch；转换函数打桩避免实际写文件。
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                temp_png = tf.name
+            try:
+                dlg._add_files([temp_png])
+                self.assertIsNone(dlg._progress, "运行前不应有进度框")
+                # 默认目标类型为 RAW → 走 image_file_to_raw；打桩避免实际写文件
+                with mock.patch.object(bc_mod, "image_file_to_raw") as conv, \
+                     mock.patch.object(bc_mod.QMessageBox, "information"):
+                    dlg._run_batch()
+                # 运行中创建过进度框，结束后清理干净
+                self.assertIsNone(dlg._progress, "run 结束后 _progress 应清空")
+                self.assertTrue(conv.called, "转换桩应被调用")
+            finally:
+                os.unlink(temp_png)
+        finally:
+            dlg.deleteLater()
+
+    def test_progress_dialog_config_deferred_show(self):
+        """进度框配置：minimumDuration>=300ms，且创建后不立即 show（防闪现）。"""
+        from unittest import mock
+
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+
+        dlg = self._make_dialog()
+        created = {}
+
+        class _Spy(bc_mod.QProgressDialog):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                created["instance"] = self
+
+            def show(self):
+                created["show_called"] = True
+                super().show()
+
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                temp_png = tf.name
+            try:
+                dlg._add_files([temp_png])
+                with mock.patch.object(bc_mod, "QProgressDialog", _Spy), \
+                     mock.patch.object(bc_mod, "image_file_to_raw") as conv, \
+                     mock.patch.object(bc_mod.QMessageBox, "information"):
+                    dlg._run_batch()
+                self.assertIn("instance", created, "应创建进度框")
+                self.assertFalse(
+                    created.get("show_called", False),
+                    "进度框创建后不应立即 show()（靠 setValue 延迟显示防短批量闪现）",
+                )
+                inst = created["instance"]
+                self.assertGreaterEqual(inst.minimumDuration(), 300)
+                self.assertTrue(inst.wasCanceled() or not inst.isVisible())
+            finally:
+                os.unlink(temp_png)
+        finally:
+            dlg.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

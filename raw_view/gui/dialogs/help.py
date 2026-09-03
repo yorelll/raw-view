@@ -76,7 +76,6 @@ class KeyboardShortcutsDialog(QDialog):
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-
 class HelpDialog(QDialog):
     """Read-only dialog that explains RAW/YUV format layout rules."""
 
