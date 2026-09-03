@@ -423,6 +423,12 @@ class ControlPanel(QWidget):
             self.apply_btn,
         ]:
             widget.setEnabled(enabled)
+        # The list above deliberately treats every field uniformly, but the
+        # conditional rows have a second invariant: hidden fields must stay
+        # disabled and visible rows must follow the current type/format.  This
+        # matters when set_enabled(True) is called after set_values() or when a
+        # tab is opened (the caller may invoke set_enabled more than once).
+        self._sync_type_enabled()
 
     def _refresh_frame_size_hint(self) -> None:
         """按当前宽高/格式估算单帧字节数并刷新 Apply 门禁（UI-9 内部逻辑）。
@@ -622,10 +628,16 @@ class ControlPanel(QWidget):
         insert_at = anchor if anchor is not None else form.rowCount()
 
         # 3) 按规范顺序插入需要显示的条件行，隐藏的只禁用。
+        # ``set_enabled(True)`` is allowed to run independently of the
+        # type/format sync (for example while a tab is being loaded), so the
+        # panel-wide state must participate in the conditional-row decision.
+        # Otherwise a hidden field can become enabled and a disabled panel can
+        # leak keyboard focus to a visible conditional field.
+        panel_enabled = getattr(self, "_panel_enabled", True)
         for name, label_text in self._COND_ROW_SPECS:
             field = fields[name]
             visible = bool(desired.get(name, False))
-            field.setEnabled(visible)
+            field.setEnabled(visible and panel_enabled)
             if not visible:
                 field.setVisible(False)
                 continue

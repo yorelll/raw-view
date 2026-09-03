@@ -513,6 +513,37 @@ class FrameHintRemovedTests(unittest.TestCase):
         p.height_spin.setValue(100)
         self.assertFalse(p.apply_btn.isEnabled())
 
+    def test_set_enabled_preserves_conditional_row_state(self):
+        """面板启用/禁用不能让隐藏行重新可用或破坏焦点门禁。"""
+        p = self.p
+        p.set_type("YUV")
+        p.set_format("YUYV")
+        p.set_enabled(False)
+        self.assertTrue(all(
+            not getattr(p, name).isEnabled()
+            for name, _ in p._COND_ROW_SPECS
+        ))
+        p.set_enabled(True)
+        self.assertTrue(all(
+            getattr(p, name).isHidden() and not getattr(p, name).isEnabled()
+            and p._cond_row_labels[name].isHidden()
+            for name, _ in p._COND_ROW_SPECS
+        ))
+
+        p.set_format("YOnly")
+        p.set_enabled(False)
+        self.assertTrue(all(
+            getattr(p, name).isHidden() or not getattr(p, name).isEnabled()
+            for name, _ in p._COND_ROW_SPECS
+        ))
+        p.set_enabled(True)
+        for name in ("bit_depth_combo", "align_combo", "endian_combo"):
+            self.assertFalse(getattr(p, name).isHidden())
+            self.assertTrue(getattr(p, name).isEnabled())
+        for name in ("raw_preview_combo", "bayer_pattern_combo"):
+            self.assertTrue(getattr(p, name).isHidden())
+            self.assertFalse(getattr(p, name).isEnabled())
+
 
 # ── 需求 4：工具栏移除 Prev/Next File 箭头按钮 ────────────────────────
 
@@ -1086,6 +1117,53 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
             self._run_cache_hit_assertions(_tf.name)
         finally:
             os.unlink(_tf.name)
+
+    def test_item_status_path_uses_bytes_without_changing_other_fields(self):
+        """切换标签的状态同步路径也应使用字节数格式并保留其它状态。"""
+        import tempfile
+
+        from raw_view.models import DecodeOptions, ViewerItem
+        from raw_view.formats import expected_frame_size_raw
+
+        with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as tf:
+            tf.write(b"\x00" * 19)
+            path = tf.name
+        try:
+            w = self._new_window()
+            statuses: dict[str, str] = {}
+            w.file_status.setText = lambda text: statuses.__setitem__("file", text)
+            w.image_status.setText = lambda text: statuses.__setitem__("image", text)
+            w.zoom_status = SimpleNamespace(
+                setText=lambda text: statuses.__setitem__("zoom", text),
+            )
+            w.frame_status = SimpleNamespace(
+                setText=lambda text: statuses.__setitem__("frame", text),
+            )
+            item = ViewerItem()
+            item.options = DecodeOptions(
+                file_path=path,
+                image_type="RAW",
+                format_name="RAW8",
+                width=4,
+                height=4,
+            )
+            item.zoom_percent = 125
+            item.total_frames = 1
+            item.current_frame = 0
+
+            w._sync_status_from_item(item)
+
+            expected = expected_frame_size_raw("RAW8", 4, 4)
+            self.assertEqual(
+                statuses["image"],
+                f"Image: 4x4 ({expected:,} bytes) | Format: RAW8",
+            )
+            self.assertNotIn("/frame", statuses["image"])
+            self.assertEqual(statuses["file"], f"File: {os.path.basename(path)} (19 bytes)")
+            self.assertEqual(statuses["zoom"], "Zoom: 125%")
+            self.assertEqual(statuses["frame"], "Frame: -")
+        finally:
+            os.unlink(path)
 
     def _run_cache_hit_assertions(self, path: str):
         from raw_view.gui.app import DecodeCache
