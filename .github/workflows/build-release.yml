@@ -196,24 +196,26 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**260 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**265 passed**）。
 
-            ### 🆕 0.3.1 主要变更
+            ### 🆕 0.4.0 主要变更
 
-            **UI 面板优化**
-            - Bit depth 仅属 YOnly：RAW 界面不再显示 Bit depth（仅 Type=YUV+Format=YOnly 时显示）
-            - 高级控件（Alignment/Endianness/RAW preview/Bayer/Bit depth）改为主表单直接行，
-              宽度与间距统一（消除嵌套容器造成的宽窄不一与 YUYV 下 Format→Width 的多余空白）
-            - 移除面板内与状态栏重复的 "Estimated frame" 标签（超大帧 512MB 禁用 Apply 的门禁保留）
+            **无障碍（UI Review 0.3.1 处置，13+3 项）**
+            - 控件语义：Preset 保存/管理按钮、Zoom slider、帧导航（First/Previous/Next/Last frame）、
+              Convert/Batch 输入字段、FourCC 搜索结果、Settings/Variant 说明图标等补齐 accessible name/description，
+              读屏/语音控制/纯键盘可识别并操作（UI-01/02/10/11/14/16 等）
+            - 只读对话框一致性：Help/About 新增显式 Close 按钮；Settings/FourCC/Help/About 移除无绑定 context-help `?`
+              （UI-07）
+            - Hover-only 信息图标改为可聚焦、可 Enter/Space 激活的信息按钮（UI-10/16）
 
-            **交互优化**
-            - 工具栏不再常驻 Prev/Next File 箭头（保留 Navigate 菜单与 `Ctrl+←/→` 快捷键）
-            - 标签页右键菜单：`Close All Items` / `Close Items to the Right`（无需快捷键，英文）
-            - Help 新增 **Keyboard Shortcuts** 章节，列示全部已支持快捷键
+            **状态与信息**
+            - 状态栏帧大小改为人类可读单位（如 `7.0 MB/frame`），精确字节数保留于 tooltip；文件字节数千位分隔（UI-04/09）
+            - Batch Convert：无文件时禁用 Start 并提示“先添加文件”，添加/清空后同步启用（UI-06/15）
+            - Convert 预览改名 `Source preview`，明确是源图缩略图而非目标编码结果（UI-12）
 
-            **清理**
-            - 移除 `[`/`]` 翻帧快捷键（此前误加）：翻帧仅保留方向键（←/↑ 上一、→/↓ 下一、Home 首、End 末）
-            - 本版经独立 agent 双重审查确认：Help 所列快捷键与真实代码一致，无残留/过期描述
+            **Review 处置**
+            - 完整处置记录见 `docs/ui-review/ui-review-response-0-3-1.md`：报告 13 项 → 已修复 10 / 无需修改 3（均有详细原因），
+              自审新增 UI-14~16 → 已修复 3；经独立 code review 复核并直接修复（265 passed）
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
