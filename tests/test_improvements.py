@@ -83,6 +83,62 @@ class DecodeCacheTests(unittest.TestCase):
         self.assertNotEqual(opts(0, 0), opts(4096, 0))
         self.assertNotEqual(opts(0, 2), opts(4096, 2))
 
+    def test_key_changes_when_same_path_is_overwritten(self):
+        """同路径、同大小替换文件后不得命中旧解码缓存。
+
+        用户关闭 item 后用外部程序覆盖同名 .bin，再重开时，路径/参数虽相同，
+        文件的 mtime_ns/ctime_ns 指纹必须使缓存 key 变化。
+        """
+        from raw_view.gui.worker import DecodeCache
+
+        fd, path = tempfile.mkstemp(prefix="rv-cache-replace-", suffix=".bin")
+        os.close(fd)
+        try:
+            Path(path).write_bytes(b"old-frame")
+            opts = self._make_options(path=path)
+            old_key = DecodeCache.key(opts, 0)
+            st = os.stat(path)
+            # 同大小覆盖，并强制推进 mtime，避免文件系统时间粒度造成的测试偶然性。
+            Path(path).write_bytes(b"new-frame")
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            new_key = DecodeCache.key(opts, 0)
+            self.assertNotEqual(old_key, new_key)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def test_remove_file_drops_all_frames_for_closed_item(self):
+        """关闭 item 时按路径清缓存；其它文件的帧必须保留。"""
+        from raw_view.gui.worker import DecodeCache
+
+        fd_a, path_a = tempfile.mkstemp(prefix="rv-cache-a-", suffix=".bin")
+        fd_b, path_b = tempfile.mkstemp(prefix="rv-cache-b-", suffix=".bin")
+        os.close(fd_a)
+        os.close(fd_b)
+        try:
+            Path(path_a).write_bytes(b"a")
+            Path(path_b).write_bytes(b"b")
+            cache = DecodeCache(max_bytes=100_000, max_items=10)
+            key_a0 = DecodeCache.key(self._make_options(path=path_a), 0)
+            key_a1 = DecodeCache.key(self._make_options(path=path_a), 1)
+            key_b0 = DecodeCache.key(self._make_options(path=path_b), 0)
+            cache.store(key_a0, self._make_result(4))
+            cache.store(key_a1, self._make_result(4))
+            cache.store(key_b0, self._make_result(4))
+
+            self.assertEqual(cache.remove_file(path_a), 2)
+            self.assertIsNone(cache.get(key_a0))
+            self.assertIsNone(cache.get(key_a1))
+            self.assertIsNotNone(cache.get(key_b0))
+        finally:
+            for path in (path_a, path_b):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
     def test_get_after_store_returns_same(self):
         from raw_view.gui.worker import DecodeCache
 

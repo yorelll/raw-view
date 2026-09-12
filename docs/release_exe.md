@@ -28,6 +28,25 @@
 
 ---
 
+## 0.5 建议：双击 `release.bat` 本地打包
+
+仓库根目录的 [`release.bat`](../release.bat) 是推荐的**本地发布打包助手**。在
+Windows 中双击（或在 `cmd` 中执行 `release.bat`）会自动：
+
+1. 激活项目 `.venv`；
+2. 运行 `python -m pytest tests/ -q`，测试失败则中止；
+3. 读取 `raw_view.models.APP_VERSION`；
+4. 分别构建 onedir 目录包与单文件 exe（使用 staging 目录避免两次 `--clean` 互删）；
+5. 生成 `dist/raw-view.exe`、`dist/raw-view-<版本>-windows-x64.zip` 及各自 `.sha256`。
+
+> 这是**本地打包**工具，不会提交、推送或创建 GitHub Release。正式远程发布仍应按上文流程：
+> 提交 → push main → CI 通过 → 打 `v<版本>` tag，使 GitHub Actions 生成官方 Release。
+>
+> 前提：已创建 `.venv` 并安装依赖与 PyInstaller（见下方准备环境）。脚本根据当前
+> `APP_VERSION` 自动命名产物，避免手工修改版本号。
+
+---
+
 ## 1. 准备环境
 
 ```bash
@@ -63,9 +82,9 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
 
 ---
 
-### 方式二：目录打包（需要目标电脑安装 Python 环境）
+### 方式二：目录打包（onedir，解压即用）
 
-打包为目录形式，文件较小，但**目标电脑需要安装 Python 3.12** 和相同版本的依赖库。
+打包为目录形式，`raw-view.exe` 与 `_internal/` 依赖目录一起分发。**目标电脑无需安装 Python**，只需保留整个目录结构；其优点是启动不必像单文件版一样先解压到临时目录。
 
 ```powershell
 # 打包命令

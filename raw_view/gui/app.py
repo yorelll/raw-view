@@ -282,10 +282,13 @@ class MainWindow(QMainWindow):
         # the generation counter, this lets us drop results that belong to a
         # different tab (item identity check in ``_should_apply_decode``).
         self._pending_decode_item: ViewerItem | None = None
-        # P1-1 解码缓存：同一 (文件/格式/尺寸/位对齐/端序/帧) 的重复解码直接复用，
-        # 避免来回翻帧时反复全量解码。数据在后台线程计算，缓存键由主线程生成并
-        # 于结果返回后写入（缓存本身只在主线程访问，无需跨线程锁）。
+        # P1-1 解码缓存：同一 (文件版本/格式/尺寸/位对齐/端序/帧) 的重复解码直接复用。
+        # 键含文件 size + mtime_ns + ctime_ns，外部覆盖同路径文件不会命中旧像素。
         self.decode_cache = DecodeCache()
+        # 异步 worker 启动时的缓存 key 快照。结果返回后必须用此 key 写缓存：
+        # 解码期间用户翻帧/改参数/外部替换文件时，不能用“当前 item 状态”给旧结果
+        # 错绑一个新 key。
+        self._pending_cache_key: str | None = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -1018,6 +1021,13 @@ class MainWindow(QMainWindow):
         # 也会把面板误写进不相关的 item。未 Apply 编辑的丢弃已在关闭前由标签 ●
         # 标记提示（UI-4），此处不做静默写回（0.2.2-M-1）。
         closing = self.items[index]
+        # 用户明确关闭 item 后，即使外部覆盖同路径文件再重开，也必须从磁盘重读。
+        # 清除该路径的所有帧/参数缓存（文件签名键是第二道保险）。
+        cache = self.__dict__.get("decode_cache")
+        if cache is not None:
+            removed = cache.remove_file(closing.options.file_path)
+            if removed:
+                logger.debug("Dropped %d cached decode frame(s) for closed item: %s", removed, closing.options.file_path)
         self._loading_item = True
         self.item_tabs.removeTab(index)
         self.items.pop(index)
@@ -1402,6 +1412,8 @@ class MainWindow(QMainWindow):
         cache_key = DecodeCache.key(opts, item.current_frame)
         cached = cache.get(cache_key)
         if cached is not None:
+            # 缓存命中直接复用，不存在“等待 worker 写缓存”的状态。
+            self._pending_cache_key = None
             logger.debug(
                 "Decode cache hit: frame=%d format=%s %dx%d",
                 item.current_frame, opts.format_name, opts.width, opts.height,
@@ -1433,8 +1445,9 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # RAW/YUV — async
-        self._start_async_decode(data, item, opts, effective_offset)
+        # RAW/YUV — async. The exact key representing these bytes is passed to
+        # the starter; it is saved only after any old worker is disconnected.
+        self._start_async_decode(data, item, opts, effective_offset, cache_key)
 
     def _decode_standard_image(self, item: ViewerItem, opts: DecodeOptions) -> None:
         try:
@@ -1458,12 +1471,22 @@ class MainWindow(QMainWindow):
             # display; an in-flight async result must not clobber it later.
             self._pending_decode_item = None
 
-    def _start_async_decode(self, data: bytes, item: ViewerItem, opts: DecodeOptions, effective_offset: int) -> None:
+    def _start_async_decode(
+        self,
+        data: bytes,
+        item: ViewerItem,
+        opts: DecodeOptions,
+        effective_offset: int,
+        cache_key: str | None = None,
+    ) -> None:
         # Detach from any in-flight decode, then bump the generation so its
         # (unavoidably late) results are recognised as stale and dropped.
         self._cancel_async_decode()
         self._decode_generation += 1
         self._pending_decode_item = item
+        # _cancel_async_decode() clears the old request's key; only now is it
+        # safe to associate the new worker with the exact bytes/key it reads.
+        self._pending_cache_key = cache_key
 
         # Preview/bayer come from the item's own saved options — not whatever
         # the shared panel currently shows — so tab switches can't leak values
@@ -1543,6 +1566,7 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self._pending_decode_item = None
+        self._pending_cache_key = None
 
     def _disconnect_decode(self) -> None:
         """彻底断开主窗口与在途解码 worker/thread 的连接。
@@ -1635,12 +1659,14 @@ class MainWindow(QMainWindow):
         item.current_display = result.display_array
         item.options.width = result.width
         item.options.height = result.height
-        # P1-1：把这份刚算好的帧写入解码缓存，供前后翻帧复用
-        # （键覆盖当前参数，只对相同配置的再次请求命中）。
-        # 测试（MainWindow.__new__）未建缓存属性 → 用 __dict__ 探测并惰性补建。
+        # P1-1：把这份刚算好的帧写入解码缓存。必须使用 decode 启动时快照的
+        # cache key，而非从当前 item.options/current_frame 重算：用户可能已经
+        # 翻帧、改参数或外部覆盖同路径文件，重算会把旧字节绑定为新请求的缓存。
         cache = self.__dict__.get("decode_cache")
-        if cache is not None:
-            cache.store(DecodeCache.key(item.options, item.current_frame), result)
+        cache_key = self.__dict__.get("_pending_cache_key")
+        self._pending_cache_key = None
+        if cache is not None and cache_key is not None:
+            cache.store(cache_key, result)
         self._on_decode_success(item, result.qimage, result.width, result.height, result.format_name)
 
     def _on_decode_success(self, item: ViewerItem, qimg: QImage, width: int, height: int, format_name: str) -> None:

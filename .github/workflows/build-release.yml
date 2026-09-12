@@ -196,22 +196,28 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**292 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**294 passed**）。
 
-            ### 🐛 修复（0.4.3）
+            ### 🐛 修复（0.4.4）
 
-            - **RAW → YUYV 条件行残留**：切换格式时旧的 Bit depth、Alignment、Endianness、RAW preview、Bayer label
-              会作为脱离布局的子控件继续绘制。**修复**：`takeRow()` 移出行时同步隐藏 field 与缓存 QLabel，
-              快速 RAW/YUV/YOnly/Standard 来回切换不再残留文字或重复行。
-            - **状态栏精简**：帧大小由 `N,NNN bytes/frame` 改为 `N,NNN bytes`，保留精确字节数并减少固定状态栏占用。
-            - **信息按钮 hover 外框**：Settings/Variant info button 统一 `setFlat(True)`，并覆盖实际 objectName 的
-              normal/hover/focus/pressed/disabled 样式，移除原生外框，同时保留图标、焦点、键盘激活和无障碍语义。
-            - **Review 回归加固**：补充 200 轮条件行压力切换、面板启用/禁用状态及两条状态栏同步路径测试；
-              独立 code review 后全量测试 **292 passed, 47 subtests**。
+            - **外部覆盖同路径 RAW/BIN 后仍显示旧图**：关闭 item 后覆盖同路径文件、重新打开且参数相同，
+              GUI 曾命中进程内旧解码缓存；退出 exe 后缓存清空才恢复正常。
+              **修复**：DecodeCache key 加入规范化路径、文件大小、`mtime_ns` 与 `ctime_ns` 文件版本指纹；
+              关闭 item 时清除该路径全部帧缓存。文件覆盖后必重新读取磁盘。
+            - **异步缓存写入时序**：解码期间若用户改参数、翻帧或外部覆盖文件，旧 worker 可能按当前 UI 状态
+              重算缓存 key。**修复**：启动解码时快照 cache key，结果返回时按快照写入，避免旧字节绑定新状态。
+            - **缓存容量统计**：同一 key 覆盖存储未先扣旧 entry 字节数，可能导致 LRU 容量虚高、过早淘汰。
+              **修复**：覆盖前扣除旧结果容量。
+            - 新增缓存覆盖/关闭清理回归测试；全量测试 **294 passed, 47 subtests**。
+
+            ### 🆕 本地打包助手
+            - 新增 `release.bat`：双击即可激活 `.venv`、跑全量测试、按 `APP_VERSION` 构建单文件 exe、
+              onedir zip 与 SHA-256。它是本地打包助手；正式 GitHub Release 仍由打 tag 的 CI 流程创建。
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
             - **单文件版**：下载 `raw-view.exe` 双击运行。
+            - **本地打包**：开发仓库中双击 `release.bat`（详见 `docs/release_exe.md`）。
             - 命令行示例：`raw-view.exe convert -i img.png --target YUV --yuv-type YOnly12 --width 2560 --height 1440 --alignment lsb --endianness big`；`raw-view.exe --batch-help`。
             - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
@@ -219,7 +225,7 @@ jobs:
             - RAW 查看：RAW8/10/12/16/32、RAW10/12/14 Packed（MIPI CSI-2）、LSB/MSB、大小端、Bayer 彩色/灰度预览
             - YUV 查看：YOnly（+Bit depth 8/10/12/14/16）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
             - 转换：PNG/JPG/BMP → RAW / YUV；批量转换；多变体一键生成（格式×Bayer×分辨率）；覆盖确认
-            - 帧导航（含 LRU 缓存）、缩放/旋转/翻转、多标签页（拖拽排序+关闭+●标记）、Prev/Next 文件
+            - 帧导航（含文件版本感知 LRU 缓存）、缩放/旋转/翻转、多标签页（拖拽排序+关闭+●标记）、Prev/Next 文件
             - CLI 模式（view / convert / batch，支持 glob/base_dir）、日志系统、崩溃日志、Light/Dark 主题
 
             ### 文件

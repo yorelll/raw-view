@@ -60,13 +60,59 @@ class DecodeCache:
         self.store_calls = 0
 
     @staticmethod
-    def key(options, frame_index: int) -> str:
+    def _canonical_path(path: str) -> str:
+        """Return a stable path identity for cache keys/invalidation.
+
+        Windows is case-insensitive in normal use; normalising case plus an
+        absolute real path avoids treating relative/case variants as different
+        cache namespaces.
+        """
+        return os.path.normcase(os.path.abspath(os.path.realpath(path)))
+
+    @classmethod
+    def _file_signature(cls, path: str) -> tuple[str, int | None, int | None, int | None]:
+        """Return a lightweight on-disk version fingerprint for *path*.
+
+        Cache entries must not survive an external overwrite of the same file
+        path.  Size + nanosecond mtime/ctime make a replacement file receive a
+        new key without hashing multi-gigabyte RAW files.  If stat fails, the
+        path still identifies the request; normal file reads will report the
+        actual error later.
+        """
+        canonical = cls._canonical_path(path)
+        try:
+            st = os.stat(canonical)
+        except OSError:
+            return canonical, None, None, None
+        return canonical, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+    @classmethod
+    def key(cls, options, frame_index: int) -> str:
         # offset 决定帧数据在文件中的起始位置（effective_offset = offset + frame*size），
-        # 必须在键里：否则同一文件在 offset=0 与 offset=N 两种设定下会命中同一份缓存，
-        # 把偏移后的帧错加载（0.2.1 review 的 M-2 语义：偏移是跨入口共用的参数）。
-        return f"{options.file_path}\x00{options.format_name}\x00{options.width}x{options.height}" \
+        # 必须在键里：否则同一文件在 offset=0 与 offset=N 两种设定下会命中同一份缓存。
+        # 文件签名（size/mtime_ns/ctime_ns）则防止“关闭 item 后外部覆盖同路径文件、
+        # 重开仍命中旧像素”的陈旧缓存问题。
+        path, size, mtime_ns, ctime_ns = cls._file_signature(options.file_path)
+        return f"{path}\x00{size}\x00{mtime_ns}\x00{ctime_ns}" \
+               f"\x00{options.format_name}\x00{options.width}x{options.height}" \
                f"\x00{options.alignment}\x00{options.endianness}\x00{options.offset}" \
                f"\x00{options.preview_mode}\x00{options.bayer_pattern}\x00{frame_index}"
+
+    def remove_file(self, path: str) -> int:
+        """Drop every cached frame for *path* and return the number removed.
+
+        Closing an item is an explicit user boundary: reopening a path must
+        reread disk rather than reuse its in-process decode result, even before
+        an external writer's timestamp is observed.
+        """
+        prefix = f"{self._canonical_path(path)}\x00"
+        removed = 0
+        for key in list(self._entries):
+            if key.startswith(prefix):
+                result = self._entries.pop(key)
+                self._total_bytes -= self._entry_bytes(result)
+                removed += 1
+        return removed
 
     @staticmethod
     def _entry_bytes(result: DecodeResult) -> int:
@@ -93,7 +139,11 @@ class DecodeCache:
         if nbytes > self._max_bytes:
             return False
         self.store_calls += 1
-        self._entries.pop(key, None)  # 重新插入 → 移到末尾（视为最近使用）
+        # 重新插入同一 key 时先扣掉旧结果，避免 _total_bytes 累积虚高并过早
+        # 淘汰 LRU（文件重复解码/外部覆盖后同签名请求均可能走到这里）。
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self._total_bytes -= self._entry_bytes(old)
         self._entries[key] = result
         self._total_bytes += nbytes
         # 双上限淘汰：条目数 / 总字节数任一超限就淘汰最久未用（首部）。

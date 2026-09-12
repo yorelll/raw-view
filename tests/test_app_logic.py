@@ -209,13 +209,14 @@ class OnDemandReadTests(unittest.TestCase):
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, dec_item, opts, eff = captured[0]
+        data, dec_item, opts, eff, cache_key = captured[0]
         # 4 bytes for one frame, not the whole 40-byte file
         self.assertEqual(data, b"\x02\x02\x02\x02")
         self.assertEqual(len(data), 4)
         self.assertEqual(eff, 8)
         self.assertIs(dec_item, item)
         self.assertIs(opts, item.options)
+        self.assertIsInstance(cache_key, str)
 
     def test_decode_current_frame_offset_with_base_offset(self):
         item = ViewerItem()
@@ -238,9 +239,10 @@ class OnDemandReadTests(unittest.TestCase):
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, _item, _opts, eff = captured[0]
+        data, _item, _opts, eff, cache_key = captured[0]
         self.assertEqual(eff, 8)
         self.assertEqual(data, b"\x02\x02\x02\x02")
+        self.assertIsInstance(cache_key, str)
 
     def test_apply_warn_mismatch_gates_decode(self):
         """Only Apply pops the mismatch dialog; declining aborts the decode."""
