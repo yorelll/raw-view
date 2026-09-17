@@ -196,23 +196,24 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**294 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**324 passed**）。
 
-            ### 🐛 修复（0.4.4）
+            ### 🐛 修复（0.4.5）
 
-            - **外部覆盖同路径 RAW/BIN 后仍显示旧图**：关闭 item 后覆盖同路径文件、重新打开且参数相同，
-              GUI 曾命中进程内旧解码缓存；退出 exe 后缓存清空才恢复正常。
-              **修复**：DecodeCache key 加入规范化路径、文件大小、`mtime_ns` 与 `ctime_ns` 文件版本指纹；
-              关闭 item 时清除该路径全部帧缓存。文件覆盖后必重新读取磁盘。
-            - **异步缓存写入时序**：解码期间若用户改参数、翻帧或外部覆盖文件，旧 worker 可能按当前 UI 状态
-              重算缓存 key。**修复**：启动解码时快照 cache key，结果返回时按快照写入，避免旧字节绑定新状态。
-            - **缓存容量统计**：同一 key 覆盖存储未先扣旧 entry 字节数，可能导致 LRU 容量虚高、过早淘汰。
-              **修复**：覆盖前扣除旧结果容量。
-            - 新增缓存覆盖/关闭清理回归测试；全量测试 **294 passed, 47 subtests**。
+            - **中文/非 ASCII 文件名解码失败**：Windows 下 `cv2.imread`/`cv2.imwrite` 走窄字符路径 API，中文等非 ASCII
+              文件名打开显示 "decode failed"、写 PNG/JPG 静默不生成。**修复**：读侧改 `np.fromfile`+`cv2.imdecode`，
+              写侧改 `cv2.imencode`+`numpy.tofile`（全部在 Python 层处理路径）；写盘失败（编码失败/写失败/0 字节）
+              统一抛显式异常，不再假成功。
+            - **无后缀文件无法打开**：无扩展名的 RAW/BIN（如 `output`）在拖拽/目录扫描/同目录导航中全部被过滤。
+              **修复**：无后缀文件按 RAW 打开；目录扫描/同目录导航对无后缀条目做 4KB 内容嗅探（含 NUL 或非打印控制字符
+              占比较高）判定为二进制候选，纯文本（README/LICENSE）与无后缀文件夹不误入；用户显式选择（对话框/启动参数/
+              最近文件）允许未知后缀（如 `.dat`）按 RAW 打开，但 `.exe/.dll/.bat/.cmd/.sys/.scr/.ps1/.vbs` 等 16 种
+              可执行/脚本后缀一律拒绝，并在状态栏给出明确提示。
+            - 新增中文路径读写、无后缀文件/文件夹区分、危险后缀拦截等回归测试；全量测试 **324 passed, 53 subtests**。
 
-            ### 🆕 本地打包助手
-            - 新增 `release.bat`：双击即可激活 `.venv`、跑全量测试、按 `APP_VERSION` 构建单文件 exe、
-              onedir zip 与 SHA-256。它是本地打包助手；正式 GitHub Release 仍由打 tag 的 CI 流程创建。
+            ### 🆕 功能（0.4.5）
+            - **支持无后缀 RAW/BIN 文件**：无扩展名文件可直接打开与拖入，目录扫描自动纳入二进制、排除纯文本与文件夹。
+            - **危险后缀拦截**：显式打开 `.exe` 等可执行/脚本文件时给出明确拒绝提示，不再无声失败。
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。

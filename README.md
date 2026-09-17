@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.4.4** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.4.5** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -345,7 +345,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.4.4` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.4.5` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 
