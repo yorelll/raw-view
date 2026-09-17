@@ -364,12 +364,20 @@ class UnicodePathImageTests(unittest.TestCase):
             pass
 
     def test_load_bgr_image_reads_chinese_path(self):
-        """中文文件名能被 load_bgr_image 读回（cv2.imread 直接读会得到 None）。"""
+        """中文文件名能被 load_bgr_image 读回（失败场景见下）。
+
+        Windows 专属：OpenCV 窄字符路径 API 对非 ASCII 路径读取返回 None（本仓库修复的
+        bug）；Linux/macOS 路径即 UTF-8 字节，cv2.imread 对中文路径可直接读取。因此
+        "cv2.imread 直接读为 None"仅断言于 win32，产品层 load_bgr_image 必须跨平台读回。
+        """
+        import sys
+
         import cv2
 
         import raw_view.converter as cv_mod
 
-        self.assertIsNone(cv2.imread(self._zh_png, cv2.IMREAD_COLOR))
+        if sys.platform == "win32":
+            self.assertIsNone(cv2.imread(self._zh_png, cv2.IMREAD_COLOR))
         img = cv_mod.load_bgr_image(self._zh_png)
         self.assertEqual(img.shape, (4, 6, 3))
 
