@@ -42,7 +42,9 @@ from raw_view.gui import app as app_module  # noqa: E402
 from raw_view.gui.app import (  # noqa: E402
     SUPPORTED_EXTENSIONS,
     MainWindow,
+    _is_dangerous_extension,
     _is_supported_file,
+    _looks_binary_candidate,
     _scan_directory,
     handle_drop_paths,
 )
@@ -489,6 +491,14 @@ class DirectoryDropTests(unittest.TestCase):
         self.assertTrue(_is_supported_file("x.jpeg"))
         self.assertFalse(_is_supported_file("x.txt"))
 
+    def test_is_supported_file_no_extension(self):
+        """无后缀文件 = 支持（二进制 RAW 候选）。"""
+        self.assertTrue(_is_supported_file("output"))
+        self.assertTrue(_is_supported_file("raw_pic/frame0001"))
+        self.assertFalse(_is_supported_file("output.txt"))
+        self.assertFalse(_is_supported_file("output.exe"))
+        self.assertFalse(_is_supported_file("output.dll"))
+
     def test_scan_directory_filters_extensions(self):
         found = _scan_directory(self.root)
         names = {os.path.basename(p) for p in found}
@@ -504,6 +514,13 @@ class DirectoryDropTests(unittest.TestCase):
         files, _ = handle_drop_paths([_FakeUrl(os.path.join(self.root, "notes.txt"))])
         self.assertEqual(files, [])
 
+    def test_handle_drop_paths_direct_unknown_extension_is_skipped(self):
+        exe = os.path.join(self.root, "tool.exe")
+        with open(exe, "wb") as f:
+            f.write(b"\x00MZbinary")
+        files, _ = handle_drop_paths([_FakeUrl(exe)])
+        self.assertEqual(files, [])
+
     def test_handle_drop_paths_too_many_triggers_flag(self):
         dense = os.path.join(self._tmp, "dense")
         os.makedirs(dense)
@@ -515,6 +532,235 @@ class DirectoryDropTests(unittest.TestCase):
         self.assertTrue(too_many)
         files, too_many = handle_drop_paths([_FakeUrl(dense)], max_files=100)
         self.assertFalse(too_many)
+
+
+# ── 无后缀文件支持（排除乱七八糟后缀 + 与文件夹区分）───────────────────────
+
+
+class NoExtensionFileTests(unittest.TestCase):
+    """无后缀二进制文件纳入、无后缀纯文本排除、无后缀子目录不冒充文件。
+
+    语义：``_is_supported_file`` 对无后缀返回 True（带未知后缀仍为 False），
+    目录扫描/同目录导航对无后缀条目额外做二进制嗅探（头部含 NUL）过滤。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-noext-")
+        self.root = os.path.join(self._tmp, "folder")
+        os.makedirs(self.root)
+        # 无后缀二进制（RAW 候选，头部含 NUL）
+        with open(os.path.join(self.root, "output"), "wb") as f:
+            f.write(b"\x00\x11\x22rawdata...")
+        # 无后缀纯文本（README/LICENSE 不得被当作 RAW 扫入）
+        with open(os.path.join(self.root, "README"), "w", encoding="utf-8") as f:
+            f.write("hello\nworld\n")
+        with open(os.path.join(self.root, "LICENSE"), "w", encoding="utf-8") as f:
+            f.write("MIT License\n")
+        # 无后缀空文件（嗅探读不到 NUL → 不纳入，安全兜底）
+        with open(os.path.join(self.root, "empty"), "wb") as f:
+            pass
+        # 无后缀子目录（os.listdir 会枚举到同名条目，必须排除）
+        os.makedirs(os.path.join(self.root, "subdir_noext"))
+        with open(os.path.join(self.root, "subdir_noext", "inside.bin"), "wb") as f:
+            f.write(b"x")
+        # 常规支持文件与未知后缀文件
+        with open(os.path.join(self.root, "a.raw"), "wb") as f:
+            f.write(b"\x00x")
+        with open(os.path.join(self.root, "b.png"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(self.root, "notes.txt"), "wb") as f:
+            f.write(b"x")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_looks_binary_candidate(self):
+        self.assertTrue(_looks_binary_candidate(os.path.join(self.root, "output")))
+        self.assertFalse(_looks_binary_candidate(os.path.join(self.root, "README")))
+        self.assertFalse(_looks_binary_candidate(os.path.join(self.root, "LICENSE")))
+        self.assertFalse(_looks_binary_candidate(os.path.join(self.root, "empty")))
+        # 嗅探失败（不存在）也不纳入
+        self.assertFalse(_looks_binary_candidate(os.path.join(self.root, "missing")))
+
+    def test_looks_binary_candidate_nul_beyond_512_bytes(self):
+        """P2-2：NUL 落在 512 字节之后（如 offset 600）也应命中（窗口 4096）。"""
+        beyond = os.path.join(self._tmp, "bin_nul600")
+        with open(beyond, "wb") as f:
+            f.write(b"A" * 600 + b"\x00" + b"B" * 100)
+        self.assertTrue(_looks_binary_candidate(beyond))
+        # 目录扫描能把它纳入
+        self.assertIn("bin_nul600",
+                      {os.path.basename(p) for p in _scan_directory(self._tmp)})
+
+    def test_looks_binary_candidate_high_control_char_ratio(self):
+        """P2-2：前 4096 无 NUL 但控制字符占比过高 → 判为二进制。"""
+        ctrl = os.path.join(self._tmp, "bin_ctrl")
+        with open(ctrl, "wb") as f:
+            f.write(bytes([0x01, 0x02, 0x03, 0x04]) * 500)
+        self.assertTrue(_looks_binary_candidate(ctrl))
+
+    def test_looks_binary_candidate_multilingual_text_excluded(self):
+        """P2-2：非打印字符计数不误伤 UTF-8 中文等多行纯文本。"""
+        text = os.path.join(self._tmp, "多语言说明")
+        with open(text, "w", encoding="utf-8") as f:
+            f.write("hello world\n" * 200 + "中文文本需要UTF-8编码\n" * 100)
+        self.assertFalse(_looks_binary_candidate(text))
+
+    def test_scan_directory_includes_noext_binary_excludes_text_and_subdir(self):
+        found = _scan_directory(self.root)
+        names = {os.path.basename(p) for p in found}
+        self.assertIn("output", names)          # 无后缀二进制 -> 纳入
+        self.assertIn("a.raw", names)
+        self.assertIn("b.png", names)
+        self.assertIn("inside.bin", names)      # 子目录内正常文件照常递归
+        self.assertNotIn("README", names)       # 无后缀纯文本 -> 排除
+        self.assertNotIn("LICENSE", names)      # 无后缀纯文本 -> 排除
+        self.assertNotIn("empty", names)        # 无后缀空文件 -> 排除（嗅探兜底）
+        self.assertNotIn("notes.txt", names)    # 未知后缀 -> 排除
+        self.assertNotIn("subdir_noext", names)  # 子目录（即便无后缀）不入文件列表
+
+    def test_handle_drop_paths_directory_includes_noext_binary(self):
+        files, too_many = handle_drop_paths([_FakeUrl(self.root)])
+        names = {os.path.basename(p) for p in files}
+        self.assertIn("output", names)
+        self.assertNotIn("README", names)
+        self.assertNotIn("LICENSE", names)
+        self.assertNotIn("notes.txt", names)
+        self.assertFalse(too_many)
+
+    def test_handle_drop_paths_single_noext_file_accepted(self):
+        """单文件显式拖放不受嗅探限制：无后缀二进制直接被接受。"""
+        files, _ = handle_drop_paths([_FakeUrl(os.path.join(self.root, "output"))])
+        self.assertEqual([os.path.basename(p) for p in files], ["output"])
+
+    def test_handle_drop_paths_single_noext_text_is_user_choice(self):
+        """单文件显式拖放：用户手选即信任（无后缀纯文本也可打开为 RAW）。"""
+        files, _ = handle_drop_paths([_FakeUrl(os.path.join(self.root, "README"))])
+        self.assertEqual([os.path.basename(p) for p in files], ["README"])
+
+    def test_handle_drop_paths_directory_with_noext_subdir_only(self):
+        """整目录只有无后缀子目录时不会把子目录当文件打开。"""
+        only_dir = os.path.join(self._tmp, "only_subdir")
+        os.makedirs(os.path.join(only_dir, "some_noext_subdir"))
+        files, _ = handle_drop_paths([_FakeUrl(only_dir)])
+        self.assertEqual(files, [])
+
+
+class SameDirItemsNoExtensionTests(unittest.TestCase):
+    """_same_dir_items 对无后缀兄弟项：子目录排除、纯文本排除、二进制纳入。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-samedir-")
+        for fn in ("a.raw", "c.raw"):
+            with open(os.path.join(self._tmp, fn), "wb") as f:
+                f.write(b"\x00x")
+        with open(os.path.join(self._tmp, "output"), "wb") as f:
+            f.write(b"\x00\x11binary")
+        with open(os.path.join(self._tmp, "notes"), "w", encoding="utf-8") as f:
+            f.write("text note without extension\n")
+        os.makedirs(os.path.join(self._tmp, "subdir_noext"))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _window_on(self, path):
+        w = _new_window()
+        item = ViewerItem()
+        item.options.file_path = path
+        w._current_item = lambda: item
+        return w
+
+    def test_same_dir_items_filters_noext_entries(self):
+        w = self._window_on(os.path.join(self._tmp, "c.raw"))
+        siblings = sorted(w._same_dir_items())
+        # 无后缀子目录与纯文本被排除，无后缀二进制 "output" 被纳入。
+        self.assertEqual(siblings, ["a.raw", "output"])
+
+
+class OpenItemGuardTests(unittest.TestCase):
+    """_open_item 的 source 区分：auto 未知后缀拒绝；explicit 允许未知后缀、
+    仅拒危险可执行后缀并给出 GUI 反馈（绝不静默）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-openitem-")
+        self._raw = os.path.join(self._tmp, "frame0001")
+        with open(self._raw, "wb") as f:
+            f.write(b"\x00" * 64)
+        self._exe = os.path.join(self._tmp, "tool.exe")
+        with open(self._exe, "wb") as f:
+            f.write(b"\x00MZbinary")
+        self._txt = os.path.join(self._tmp, "readme.txt")
+        with open(self._txt, "wb") as f:
+            f.write(b"plain text")
+        self._dat = os.path.join(self._tmp, "capture.dat")
+        with open(self._dat, "wb") as f:
+            f.write(b"\x00" * 64)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_open_item_accepts_noext(self):
+        """无后缀文件（即便内容非图片）仍会建标签（按 RAW 默认打开）。"""
+        w = MainWindow()
+        try:
+            w._open_item(self._raw, decode=False)
+            self.assertEqual(len(w.items), 1)
+            self.assertEqual(w.items[0].options.image_type, "RAW")
+        finally:
+            w.close()
+            w.deleteLater()
+            _APP.processEvents()
+
+    def test_open_item_auto_rejects_unknown_extension(self):
+        """auto 来源（扫描/拖放）：带未知后缀（.exe/.txt）被拒，不建标签。"""
+        for path in (self._exe, self._txt, self._dat):
+            with self.subTest(path=path):
+                w = MainWindow()
+                try:
+                    w._open_item(path, decode=False, source="auto")
+                    self.assertEqual(len(w.items), 0)
+                finally:
+                    w.close()
+                    w.deleteLater()
+                    _APP.processEvents()
+
+    def test_open_item_explicit_accepts_unknown_data_extension(self):
+        """explicit 来源（打开对话框/启动参数/最近文件）：.dat 等未知后缀按 RAW 打开。"""
+        w = MainWindow()
+        try:
+            w._open_item(self._dat, decode=False, source="explicit")
+            self.assertEqual(len(w.items), 1)
+            self.assertEqual(w.items[0].options.image_type, "RAW")
+        finally:
+            w.close()
+            w.deleteLater()
+            _APP.processEvents()
+
+    def test_open_item_explicit_rejects_dangerous_extension_with_feedback(self):
+        """explicit 来源：.exe 等可执行后缀被拒，且给出状态栏/GUI 反馈而非静默。"""
+        for path in (self._exe,):
+            with self.subTest(path=path):
+                w = MainWindow()
+                status_msgs: list[str] = []
+                w.statusBar().showMessage = lambda msg, *a, **k: status_msgs.append(msg)
+                try:
+                    w._open_item(path, decode=False, source="explicit")
+                    self.assertEqual(len(w.items), 0)
+                    self.assertTrue(status_msgs, "被拒原因应写入状态栏反馈")
+                    self.assertIn("可执行文件", status_msgs[0])
+                finally:
+                    w.close()
+                    w.deleteLater()
+                    _APP.processEvents()
+
+    def test_is_dangerous_extension_set(self):
+        for ext in (".exe", ".dll", ".sys", ".bat", ".cmd", ".com", ".scr",
+                    ".msi", ".ps1", ".vbs", ".ocx"):
+            self.assertTrue(_is_dangerous_extension(f"a{ext}"))
+            self.assertTrue(_is_dangerous_extension(f"a{ext.upper()}"))
+        for ext in (".dat", ".txt", ".raw", ".bin", ".png", ".log"):
+            self.assertFalse(_is_dangerous_extension(f"a{ext}"))
+        self.assertFalse(_is_dangerous_extension("noext"))
 
 
 # ── L-2: dead field removed ──────────────────────────────────────────────

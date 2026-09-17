@@ -16,6 +16,9 @@ dist/
 # PyInstaller 缓存
 *.egg-info/
 
+# release.bat 分阶段构建暂存目录
+.release-staging/
+
 # claude
 .claude/
 

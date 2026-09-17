@@ -206,8 +206,10 @@ DIR_DROP_MAX_FILES = 50
 def _scan_directory(path: str) -> list[str]:
     """Recursively scan a directory for supported files, returning sorted paths.
 
-    Files whose extension is not in ``SUPPORTED_EXTENSIONS`` are skipped, so a
-    dropped folder doesn't pull in unrelated files.
+    ``os.walk`` 的 ``files`` 天然是文件；扩展名在 ``SUPPORTED_EXTENSIONS`` 中
+    的直接纳入，无后缀条目视为二进制 RAW 候选——需通过
+    :func:`_looks_binary_candidate` 内容嗅探（头部含 NUL），纯文本（README /
+    LICENSE / notes）不纳入，带未知后缀的文件一律跳过。
     """
     results: list[str] = []
     try:
@@ -215,15 +217,80 @@ def _scan_directory(path: str) -> list[str]:
             for fname in sorted(files):
                 if not _is_supported_file(fname):
                     continue
-                results.append(str(Path(root) / fname))
+                full = str(Path(root) / fname)
+                if Path(fname).suffix == "" and not _looks_binary_candidate(full):
+                    continue
+                results.append(full)
     except OSError:
         logger.warning("Failed to scan directory: %s", path)
     return results
 
 
 def _is_supported_file(path: str) -> bool:
-    """Whether *path* looks like a file the viewer supports (by extension)."""
-    return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
+    """Whether *path* is a file the viewer supports (by extension or lack thereof).
+
+    - 扩展名在 ``SUPPORTED_EXTENSIONS`` 中 → 支持；
+    - 无扩展名（``suffix == ""``）→ 支持（二进制/RAW 候选；目录枚举时由
+      :func:`_looks_binary_candidate` 排除纯文本，显式拖放/打开直接接受）；
+    - 带未知后缀（.exe/.txt/.dll 等）→ 不支持，绝不把无关文件当 RAW 打开。
+
+    注意：该判定只用于**自动扫描**来源（目录扫描 / 同目录导航 / 目录拖放）。
+    用户显式选择（打开对话框 / 启动参数 / 最近文件）走 ``_open_item(source=
+    "explicit")``，允许未知后缀、仅拒绝 :func:`_is_dangerous_extension`。
+    """
+    suffix = Path(path).suffix.lower()
+    return not suffix or suffix in SUPPORTED_EXTENSIONS
+
+
+#: 显式“用户手选”打开时也拒绝的“可执行/脚本”危险后缀：绝不把这类文件按 RAW
+#: 打开。自动扫描场景（_is_supported_file）对这些后缀本就不放行。
+_DANGEROUS_EXTENSIONS = frozenset({
+    ".exe", ".dll", ".sys", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1",
+    ".pif", ".vbs", ".vbe", ".jse", ".wsf", ".cpl", ".ocx",
+})
+
+
+def _is_dangerous_extension(path: str) -> bool:
+    """Whether *path* ends with a clearly executable/script suffix."""
+    return Path(path).suffix.lower() in _DANGEROUS_EXTENSIONS
+
+
+#: 内容嗅探窗口（字节）：NUL / 高控制字符占比的检测范围。4096 足够覆盖常见
+#: raw 头部（含 offset > 512 的边界 case），纯文本仅读前 4KB 开销可忽略。
+_BINARY_SNIFF_SIZE = 4096
+#: 非可打印 ASCII（除 \\t\\n\\r 外的控制字符 + DEL）占比阈值，超过则判二进制。
+_BINARY_NONPRINTABLE_RATIO = 0.05
+
+
+def _looks_binary_candidate(path: str) -> bool:
+    """轻量内容嗅探：无后缀条目是否像二进制（RAW 候选）。
+
+    仅用于目录扫描 / 同目录导航对「无后缀条目」的过滤。读文件头部
+    ``_BINARY_SNIFF_SIZE``（4096）字节判定：
+
+    - 含 NUL 字节 → 二进制（raw 首字节常为 0，也覆盖 NUL 落在 ±4KB 体内的）；
+    - 或非可打印 ASCII 控制字符（除 \\t\\n\\r 外 <0x20 及 0x7F）占比超过
+      ``_BINARY_NONPRINTABLE_RATIO`` → 二进制（覆盖“头部可打印前缀、前 4KB
+      无 NUL”的 raw）；UTF-8 中文文本的高位字节（0x80-0xFF）不计入，多行纯
+      文本的换行也不计入，不会误判。
+
+    纯文本（README/LICENSE/notes）两类都不命中 → 排除；嗅探失败（读不了）
+    返回 False，安全兜底不纳入。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_BINARY_SNIFF_SIZE)
+    except OSError:
+        return False
+    if not head:
+        return False
+    if b"\x00" in head:
+        return True
+    non_printable = 0
+    for byte in head:
+        if byte == 0x7F or (byte < 0x20 and byte not in (0x09, 0x0A, 0x0D)):
+            non_printable += 1
+    return non_printable > _BINARY_NONPRINTABLE_RATIO * len(head)
 
 
 def handle_drop_paths(urls, max_files: int = DIR_DROP_MAX_FILES) -> list[str]:
@@ -246,6 +313,7 @@ def handle_drop_paths(urls, max_files: int = DIR_DROP_MAX_FILES) -> list[str]:
                 scanned_too_many = True
             paths.extend(scanned)
         elif os.path.isfile(local_path) and _is_supported_file(local_path):
+            # 单个文件显式拖放：无后缀也直接接受（用户手选即信任，不做内容嗅探）
             paths.append(local_path)
     # Deduplicate while preserving order
     seen: set[str] = set()
@@ -773,14 +841,22 @@ class MainWindow(QMainWindow):
     # ── UI-6：同目录文件组切换 ────────────────────────────────────────
 
     def _same_dir_items(self) -> list[str]:
-        """当前项同目录下按名称排序的支持文件列表（排除了自身）。"""
+        """当前项同目录下按名称排序的支持文件列表（排除了自身）。
+
+        ``os.listdir`` 会同时枚举出无后缀的**子目录**名——它们不能冒充文件，
+        必须 ``os.path.isfile`` 校验；无后缀文件还要经 :func:`_looks_binary_candidate`
+        内容嗅探排除纯文本（与目录扫描一致）。
+        """
         item = self._current_item()
         path = item.options.file_path if item else ""
         directory = os.path.dirname(path)
         try:
             candidates = [
                 p for p in os.listdir(directory)
-                if _is_supported_file(p) and p != os.path.basename(path)
+                if p != os.path.basename(path)
+                and _is_supported_file(p)
+                and os.path.isfile(os.path.join(directory, p))
+                and (Path(p).suffix != "" or _looks_binary_candidate(os.path.join(directory, p)))
             ]
         except OSError:
             return []
@@ -881,15 +957,42 @@ class MainWindow(QMainWindow):
             return
         logger.info("Opening %d file(s)", len(paths))
         for path in paths:
-            self._open_item(path, decode=False)
+            self._open_item(path, decode=False, source="explicit")
         if paths:
             self.decode_current()
 
-    def _open_item(self, path: str, decode: bool) -> None:
+    def _open_item(self, path: str, decode: bool, source: str = "auto") -> None:
+        """Open one file into a new tab.
+
+        Parameters
+        ----------
+        path, decode
+            待打开路径与是否立即解码。
+        source
+            调用来源，决定文件类型判定策略：
+
+            - ``"auto"``（默认）：目录扫描 / 同目录导航 / 目录拖放等自动来源，
+              沿用 :func:`_is_supported_file`——未知后缀一律拒绝、无后缀需通过
+              :func:`_looks_binary_candidate` 二进制嗅探，绝不自动打开 .exe/.txt；
+            - ``"explicit"``：用户显式选择（打开对话框 / 启动参数 / 最近文件），
+              允许带未知后缀（如 .dat）按 RAW 打开；仅对可执行/脚本危险后缀
+              （:func:`_is_dangerous_extension`）拒绝，并在 GUI 给出明确反馈。
+        """
         if not path or not os.path.isfile(path):
             logger.warning("File not found: %s", path)
             return
-        logger.info("Opening item: %s (decode=%s)", path, decode)
+        # 显式选择来源：危险（可执行/脚本）后缀必须拒绝并反馈，绝不静默。
+        if source == "explicit" and _is_dangerous_extension(path):
+            logger.warning("Refusing to open executable file as RAW: %s", path)
+            self._reject_open_feedback(
+                f"{os.path.basename(path)} 是可执行文件，已拒绝按 RAW 打开"
+            )
+            return
+        # 自动来源 / 显式来源的其余情况：无后缀接受；自动来源的未知后缀拒绝。
+        if not _is_supported_file(path) and source == "auto":
+            logger.warning("Unsupported file type, ignored: %s", path)
+            return
+        logger.info("Opening item: %s (decode=%s, source=%s)", path, decode, source)
 
         item = ViewerItem()
         item.view = ImageView()
@@ -942,6 +1045,19 @@ class MainWindow(QMainWindow):
 
         if decode:
             self.decode_current()
+
+    def _reject_open_feedback(self, message: str) -> None:
+        """任何被拒绝打开的原因都要让用户看到，绝不只有 logger。
+
+        优先状态栏提示（不打断操作流），状态栏不可用时回退 QMessageBox。
+        """
+        try:
+            if self.statusBar is not None:
+                self.statusBar().showMessage(message, 5000)
+                return
+        except Exception:  # pragma: no cover - 防御日志路径本身异常
+            pass
+        QMessageBox.warning(self, "Cannot Open", message)
 
     # ── Tab management ────────────────────────────────────────────────
 
@@ -1928,7 +2044,7 @@ class MainWindow(QMainWindow):
         if not os.path.isfile(path):
             QMessageBox.warning(self, "Recent File", f"File not found:\n{path}")
             return
-        self._open_item(path, decode=True)
+        self._open_item(path, decode=True, source="explicit")
 
     def _clear_recent_files(self) -> None:
         self.settings.clear_recent_files()
@@ -2116,7 +2232,7 @@ def run(files: list[str] | None = None) -> None:
     w.show()
     if files:
         for path in files:
-            w._open_item(path, decode=False)
+            w._open_item(path, decode=False, source="explicit")
         if files:
             w.decode_current()
     app.exec_()

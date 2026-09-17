@@ -68,10 +68,52 @@ def resolve_output_path_collision(
 
 def load_bgr_image(path: str) -> np.ndarray:
     _require_cv2()
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    # Windows 下 cv2.imread 走窄字符路径 API，对含非 ASCII（如中文）的路径会
+    # 静默返回 None / decode failed。改为 numpy 在 Python 层打开文件（支持
+    # Unicode 路径）+ cv2.imdecode 解码字节流，规避这一限制。
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        buf = np.array([], dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
     if img is None:
         raise ValueError(f"failed to read image: {path}")
     return img
+
+
+#: ``cv2.imencode`` 需要扩展名（'.png'/'.jpg' 等）选择编码器；输出后缀不在
+#: 已知集合内时统一按 PNG 写入，保证任何非标后缀（含无后缀）都能落盘。
+_IMWRITE_EXT_ALIASES = {".jpeg": ".jpg", ".jpe": ".jpg", ".tif": ".tiff"}
+_IMWRITE_FALLBACK_EXT = ".png"
+
+
+def _imwrite_extension(output_path: str) -> str:
+    """从输出路径推导 ``cv2.imencode`` 用的扩展名，非法情况归一化到 '.png'。"""
+    ext = Path(output_path).suffix.lower()
+    ext = _IMWRITE_EXT_ALIASES.get(ext, ext)
+    if ext not in {".png", ".jpg", ".bmp", ".tiff"}:
+        return _IMWRITE_FALLBACK_EXT
+    return ext
+
+
+def _save_bgr_image(output_path: str, bgr: np.ndarray) -> int:
+    """把 BGR 图像编码并写到 *output_path*，返回写出的字节数。
+
+    - ``cv2.imencode`` 失败（``ok == False``）→ 抛 ``OSError``，绝不静默
+      "假成功"（旧 cv2.imwrite 对非法输入是静默不建文件）；
+    - ``tofile`` 的 OSError（目录不存在 / 无权限 / 中文路径不可写等）自然
+      向上传播；
+    - 写完后校验字节数 > 0，否则同样抛错，避免部分写入被当作成功。
+    """
+    ext = _imwrite_extension(output_path)
+    ok, encoded = cv2.imencode(ext, bgr)
+    if not ok:
+        raise OSError(f"failed to encode image: {output_path}")
+    encoded.tofile(output_path)
+    size = os.path.getsize(output_path)
+    if size <= 0:
+        raise OSError(f"no bytes written: {output_path}")
+    return size
 
 
 def bgr_to_gray8(bgr: np.ndarray, out_width: int, out_height: int) -> np.ndarray:
@@ -402,8 +444,9 @@ def raw_file_to_image(
     else:
         bgr = cv2.cvtColor(raw8, cv2.COLOR_GRAY2BGR)
 
-    cv2.imwrite(output_path, bgr)
-    size = os.path.getsize(output_path)
+    # Windows 下 cv2.imwrite 对含非 ASCII（中文）的输出路径会静默不写；改
+    # cv2.imencode 编码成字节 + numpy tofile 在 Python 层写盘（支持 Unicode）。
+    size = _save_bgr_image(output_path, bgr)
     logger.debug("raw_file_to_image OK: %d bytes written", size)
     return size
 
@@ -430,7 +473,7 @@ def yuv_file_to_image(
     spec = ImageSpec(width, height, 0)  # offset 已在 _read_frame 里 seek 消费
     rgb = decode_yuv(data, spec, subformat, alignment=alignment, endianness=endianness)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(output_path, bgr)
-    size = os.path.getsize(output_path)
+    # 同 raw_file_to_image：cv2.imencode + tofile 支持中文输出路径。
+    size = _save_bgr_image(output_path, bgr)
     logger.debug("yuv_file_to_image OK: %d bytes written", size)
     return size

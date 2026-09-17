@@ -10,6 +10,7 @@ from unittest import mock
 import numpy as np
 
 from raw_view.converter import (
+    _imwrite_extension,
     bayer8_to_rgb,
     bgr_to_bayer8,
     bgr_to_gray8,
@@ -312,6 +313,184 @@ class YuvFileToImageTests(unittest.TestCase):
     def test_nonexistent_yuv_file(self):
         with self.assertRaises(Exception):
             yuv_file_to_image("/nonexistent.yuv", "out.png", "I420", 8, 4)
+
+
+# ── 中文 / 非 ASCII 路径 I/O ─────────────────────────────────────────────
+#
+# Windows 下 cv2.imread / cv2.imwrite 走窄字符路径 API，对含非 ASCII（中文）
+# 的路径返回 None / 静默不写。修复后读侧用 np.fromfile + cv2.imdecode，写侧用
+# cv2.imencode + numpy tofile——都在 Python 层打开文件，支持 Unicode 路径。
+# 字面非 ASCII 固定用中文确保 CI（含 Linux）FS 为 UTF-8 时稳定；Windows NTFS
+# 本地测试同样成立。
+
+
+def _encode_png_bytes(bgr: np.ndarray) -> bytes:
+    """用 cv2.imencode 编码 PNG 字节（不用 cv2.imwrite——它对中文路径也会失败）。"""
+    import cv2
+
+    ok, encoded = cv2.imencode(".png", bgr)
+    if not ok:
+        raise AssertionError("failure to encode test image")
+    return encoded.tobytes()
+
+
+class UnicodePathImageTests(unittest.TestCase):
+    """中文/非 ASCII 路径下的图片读取与 RAW/YUV→PNG 写出。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp(prefix="rv-unicode-")
+        # 构造非 ASCII 目录名 + 文件名（典型用户场景，如"测试图"）。
+        self._zh_dir = os.path.join(self._tmpdir, "测试图")
+        os.makedirs(self._zh_dir)
+        bgr = _make_test_bgr(4, 6)
+        self._zh_png = os.path.join(self._zh_dir, "307测试图切debug out短曝透.png")
+        with open(self._zh_png, "wb") as f:
+            f.write(_encode_png_bytes(bgr))
+        # 小 RAW12（4x4 → 32 bytes）作为 RAW→PNG 写出的输入。
+        rng = np.random.RandomState(7)
+        raw_data = rng.randint(0, 4096, size=(4, 4), dtype=np.uint16)
+        self._raw_path = os.path.join(self._tmpdir, "测试.raw12")
+        raw_data.astype("<u2").tofile(self._raw_path)
+
+    def tearDown(self):
+        for f in os.listdir(self._tmpdir):
+            try:
+                os.remove(os.path.join(self._tmpdir, f))
+            except OSError:
+                pass
+        try:
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    def test_load_bgr_image_reads_chinese_path(self):
+        """中文文件名能被 load_bgr_image 读回（cv2.imread 直接读会得到 None）。"""
+        import cv2
+
+        import raw_view.converter as cv_mod
+
+        self.assertIsNone(cv2.imread(self._zh_png, cv2.IMREAD_COLOR))
+        img = cv_mod.load_bgr_image(self._zh_png)
+        self.assertEqual(img.shape, (4, 6, 3))
+
+    def test_image_file_to_raw_from_chinese_path(self):
+        """中文输入图 → RAW 写出（image_file_to_raw 经 load_bgr_image 读入）。"""
+        out = os.path.join(self._zh_dir, "输出.raw")
+        size = image_file_to_raw(self._zh_png, out, "RAW8", 6, 4)
+        self.assertGreater(size, 0)
+        self.assertTrue(os.path.isfile(out))
+
+    def test_image_file_to_yuv_from_chinese_path(self):
+        out = os.path.join(self._zh_dir, "输出.yuv")
+        size = image_file_to_yuv(self._zh_png, out, "I420", 6, 4)
+        self.assertGreater(size, 0)
+        self.assertTrue(os.path.isfile(out))
+
+    def test_raw_file_to_image_writes_chinese_path_and_reads_back(self):
+        """RAW → 中文输出路径：文件确实生成，且能被 load_bgr_image 再读回。"""
+        out = os.path.join(self._zh_dir, "输出.png")
+        size = raw_file_to_image(
+            self._raw_path, out, "RAW12", 4, 4,
+            preview_mode="Bayer Color", bayer_pattern="RGGB",
+        )
+        self.assertGreater(size, 0)
+        self.assertTrue(os.path.isfile(out))
+        back = load_bgr_image(out)
+        self.assertEqual(back.shape, (4, 4, 3))
+
+    def test_yuv_file_to_image_writes_chinese_path(self):
+        out = os.path.join(self._zh_dir, "输出.jpg")
+        size = yuv_file_to_image(self._raw_path, out, "I420", 4, 4)
+        self.assertGreater(size, 0)
+        self.assertTrue(os.path.isfile(out))
+        back = load_bgr_image(out)
+        self.assertEqual(back.shape, (4, 4, 3))
+
+    def test_raw_file_to_image_writes_unknown_extension_falls_back_png(self):
+        """非图片后缀（含无后缀）输出统一按 PNG 编码，文件仍生成且可读回。"""
+        for out in (os.path.join(self._zh_dir, "输出.xyz"),
+                    os.path.join(self._zh_dir, "无后缀")):
+            with self.subTest(out=out):
+                size = raw_file_to_image(self._raw_path, out, "RAW12", 4, 4,
+                                         bayer_pattern="RGGB")
+                self.assertGreater(size, 0)
+                self.assertTrue(os.path.isfile(out))
+                self.assertEqual(load_bgr_image(out).shape, (4, 4, 3))
+
+
+class ImwriteExtensionTests(unittest.TestCase):
+    def test_known_extensions_passthrough(self):
+        self.assertEqual(_imwrite_extension("a.png"), ".png")
+        self.assertEqual(_imwrite_extension("a.jpg"), ".jpg")
+        self.assertEqual(_imwrite_extension("a.bmp"), ".bmp")
+        self.assertEqual(_imwrite_extension("a.tiff"), ".tiff")
+
+    def test_case_normalisation_and_aliases(self):
+        self.assertEqual(_imwrite_extension("a.PNG"), ".png")
+        self.assertEqual(_imwrite_extension("a.JPEG"), ".jpg")
+        self.assertEqual(_imwrite_extension("a.TIF"), ".tiff")
+
+    def test_unknown_or_missing_extension_defaults_to_png(self):
+        self.assertEqual(_imwrite_extension("a.xyz"), ".png")
+        self.assertEqual(_imwrite_extension("a"), ".png")
+        self.assertEqual(_imwrite_extension("a.tar.gz"), ".png")
+
+
+# ── P1-1：写盘失败必须可见（绝不静默"假成功"）─────────────────────────────
+
+
+class ImageWriteFailureTests(unittest.TestCase):
+    """raw_file_to_image / yuv_file_to_image 的写盘失败路径。
+
+    旧实现：``cv2.imwrite`` 静默失败，函数返回 ``os.path.getsize`` 假装成功。
+    现在的 ``_save_bgr_image``：imencode ok=False 抛 OSError，``tofile`` 的
+    OSError 自然传播，写后字节数 <=0 也抛 OSError——任何失败都变成可见异常。
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.mkdtemp()
+        rng = np.random.RandomState(99)
+        raw_data = rng.randint(0, 4096, size=(4, 4), dtype=np.uint16)
+        self._raw_path = os.path.join(self._tmpdir, "test.raw12")
+        raw_data.astype("<u2").tofile(self._raw_path)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @mock.patch("raw_view.converter.cv2.imencode", return_value=(False, None))
+    def test_imencode_failure_raises_oserror_raw(self, _mock_imencode):
+        """imencode ok=False → 抛 OSError，绝不假装写成功。"""
+        out = os.path.join(self._tmpdir, "out.png")
+        with self.assertRaises(OSError):
+            raw_file_to_image(self._raw_path, out, "RAW12", 4, 4,
+                              bayer_pattern="RGGB")
+        self.assertFalse(os.path.exists(out))
+
+    @mock.patch("raw_view.converter.cv2.imencode", return_value=(False, None))
+    def test_imencode_failure_raises_oserror_yuv(self, _mock_imencode):
+        out = os.path.join(self._tmpdir, "out.png")
+        with self.assertRaises(OSError):
+            yuv_file_to_image(self._raw_path, out, "I420", 4, 4)
+        self.assertFalse(os.path.exists(out))
+
+    def test_tofile_oserror_propagates(self):
+        """目标目录不存在时 tofile 的 OSError 向上传播（不静默成功）。"""
+        out = os.path.join(self._tmpdir, "no_such_dir", "out.png")
+        with self.assertRaises(OSError):
+            raw_file_to_image(self._raw_path, out, "RAW12", 4, 4,
+                              bayer_pattern="RGGB")
+
+    def test_success_returns_positive_size(self):
+        """正常写盘仍返回 >0 字节数（回归保护）。"""
+        out = os.path.join(self._tmpdir, "ok.png")
+        size = raw_file_to_image(self._raw_path, out, "RAW12", 4, 4,
+                                 bayer_pattern="RGGB")
+        self.assertGreater(size, 0)
+        self.assertTrue(os.path.isfile(out))
 
 
 if __name__ == "__main__":
