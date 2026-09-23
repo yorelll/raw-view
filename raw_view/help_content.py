@@ -5,6 +5,12 @@
 # 不再依赖 HELP_HTML 里的 HTML 小节（0.4.1 把快捷键从 Format Help 独立出来）。
 SHORTCUTS: list[tuple[str, list[tuple[str, str]]]] = [
     (
+        "Decode",
+        [
+            ("Ctrl+A", "apply current decode parameters"),
+        ],
+    ),
+    (
         "Frame navigation",
         [
             ("Up / Left", "previous frame"),

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -23,7 +25,19 @@ from raw_view.formats import (
     expected_frame_size_yuv,
 )
 from raw_view.gui.image_utils import _format_size
-from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS
+from raw_view.models import (
+    ACTION_ICON_COLOR,
+    BAYER_PATTERNS,
+    PRESET_FILTER_ALL,
+    PRESET_FILTER_CURRENT,
+    PRESET_IMAGE_TYPES,
+    SensorPreset,
+    filter_sensor_presets,
+    is_supported_preset_format_for_type,
+    normalize_preset_format_name,
+    normalize_preset_image_type,
+    preset_format_filter_choices,
+)
 
 
 def _qta_icon(name: str):
@@ -110,19 +124,36 @@ class ControlPanel(QWidget):
         content = QWidget()
         content.setObjectName("controlPanelContent")
 
-        # ── Sensor preset row (shown at the very top) ──
+        # ── Sensor preset controls (shown at the very top) ──────────────
+        # The selector stays non-editable: search is a dedicated text field so
+        # arbitrary typed text can never be mistaken for (or load as) a preset.
+        self._preset_records: list[SensorPreset] = []
+        self._preset_names_only = False  # compatibility path for set_preset_names()
+        self._preset_last_selected_name: str | None = None
         self.preset_combo = QComboBox()
         self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
         self.preset_combo.setToolTip(
             "Saved sensor presets. Selecting one fills the form below; "
             "press Apply to render."
         )
-        # Let the combo shrink so the Save/Manage buttons are never pushed
-        # off the edge of the narrow panel; the tooltip shows the full text.
-        # Keep the box compact so both icon buttons always fit on the narrow
-        # panel; the dropdown popup still expands to show full preset names.
         self.preset_combo.setMinimumWidth(96)
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+        self.preset_search_edit = QLineEdit()
+        self.preset_search_edit.setObjectName("presetSearch")
+        self.preset_search_edit.setPlaceholderText("Search presets…")
+        self.preset_search_edit.setClearButtonEnabled(True)
+        self.preset_search_edit.setToolTip(
+            "Filter saved preset names as you type (case-insensitive)."
+        )
+        self.preset_search_edit.setAccessibleName("Search sensor presets")
+
+        self.preset_format_filter_combo = QComboBox()
+        self.preset_format_filter_combo.setObjectName("presetFormatFilter")
+        self.preset_format_filter_combo.setToolTip(
+            "Show presets for the current format, every format, or one exact stored format."
+        )
+        self.preset_format_filter_combo.setAccessibleName("Filter sensor presets by format")
 
         # Compact icon buttons keep the preset row readable on the narrow
         # panel (text buttons got truncated to "MANAC" etc.).
@@ -148,13 +179,22 @@ class ControlPanel(QWidget):
             btn.setFixedSize(32, 30)
 
         preset_row = QWidget()
-        preset_layout = QHBoxLayout(preset_row)
+        preset_layout = QVBoxLayout(preset_row)
         preset_layout.setContentsMargins(0, 0, 0, 0)
         preset_layout.setSpacing(4)
-        # The combo gets the stretch; the buttons keep their natural width.
-        preset_layout.addWidget(self.preset_combo, 1)
-        preset_layout.addWidget(self.preset_save_btn, 0)
-        preset_layout.addWidget(self.preset_manage_btn, 0)
+        preset_select_row = QHBoxLayout()
+        preset_select_row.setContentsMargins(0, 0, 0, 0)
+        preset_select_row.setSpacing(4)
+        preset_select_row.addWidget(self.preset_combo, 1)
+        preset_select_row.addWidget(self.preset_save_btn, 0)
+        preset_select_row.addWidget(self.preset_manage_btn, 0)
+        preset_filter_row = QHBoxLayout()
+        preset_filter_row.setContentsMargins(0, 0, 0, 0)
+        preset_filter_row.setSpacing(4)
+        preset_filter_row.addWidget(self.preset_search_edit, 1)
+        preset_filter_row.addWidget(self.preset_format_filter_combo, 1)
+        preset_layout.addLayout(preset_select_row)
+        preset_layout.addLayout(preset_filter_row)
 
         # ── Format parameters ──
         self.type_combo = QComboBox()
@@ -219,6 +259,7 @@ class ControlPanel(QWidget):
         # ── Apply button ──
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.setObjectName("accentButton")
+        self.apply_btn.setToolTip("Apply current decode parameters (Ctrl+A)")
 
         # ── Layout ──
         form = QFormLayout(content)
@@ -294,6 +335,8 @@ class ControlPanel(QWidget):
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
         self.zoom_spin.valueChanged.connect(self._on_spin_zoom)
         self.preset_combo.activated.connect(self._on_preset_activated)
+        self.preset_search_edit.textChanged.connect(self._refresh_preset_combo)
+        self.preset_format_filter_combo.currentTextChanged.connect(self._refresh_preset_combo)
         self.preset_save_btn.clicked.connect(self.savePresetRequested)
         self.preset_manage_btn.clicked.connect(self.managePresetsRequested)
 
@@ -306,8 +349,10 @@ class ControlPanel(QWidget):
             self.bit_depth_combo,
         ):
             combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
-        # 切换格式时联动条件显隐（YOnly → 位深+对齐+端序；RAW → 高级参数）
+        # 切换格式时联动条件显隐（YOnly → 位深+对齐+端序；RAW →高级参数）
         self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
+        self.format_combo.currentTextChanged.connect(lambda _f: self._refresh_preset_combo())
+        self.bit_depth_combo.currentTextChanged.connect(lambda _b: self._refresh_preset_combo())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
             spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
         # UI-9：宽高/格式/位深/对齐变化时刷新 Apply 门禁（Estimated frame 提示
@@ -323,11 +368,135 @@ class ControlPanel(QWidget):
 
     # ── public helpers ───────────────────────────────────────────────
 
+    _DYNAMIC_FORMAT_ROLE = Qt.UserRole + 41
+    _DYNAMIC_TYPE_ROLE = Qt.UserRole + 42
+
+    def _current_dynamic_format(self) -> str:
+        """Return the active temporary format, or empty when a registry item is selected."""
+        index = self.format_combo.currentIndex()
+        if index >= 0 and self.format_combo.itemData(index, self._DYNAMIC_FORMAT_ROLE):
+            return self.format_combo.itemText(index)
+        return ""
+
+    def _remove_stale_dynamic_types(self, keep: str = "") -> None:
+        """Drop unsupported temporary image types once the user selects another one."""
+        for index in range(self.type_combo.count() - 1, -1, -1):
+            if self.type_combo.itemData(index, self._DYNAMIC_TYPE_ROLE):
+                if self.type_combo.itemText(index) != keep:
+                    self.type_combo.removeItem(index)
+
     def set_type(self, image_type: str) -> None:
-        self.type_combo.setCurrentText(image_type)
+        """Atomically select a type while preserving a compatible stored format.
+
+        Removing a selected dynamic type makes Qt choose a temporary neighbour
+        (often Standard Image), whose signal handler can rebuild the format box
+        to N/A before the requested RAW/YUV type is installed.  Capture the
+        identifier first and block both combos for the whole cleanup/select/
+        rebuild sequence; then invoke exactly one final type handler.
+        """
+        kind = normalize_preset_image_type(image_type)
+        previous_format = self.format_combo.currentText()
+        with QSignalBlocker(self.type_combo), QSignalBlocker(self.format_combo):
+            index = self.type_combo.findText(kind)
+            if index < 0:
+                self._remove_stale_dynamic_types(keep=kind)
+                self.type_combo.addItem(kind)
+                index = self.type_combo.count() - 1
+                self.type_combo.setItemData(index, True, self._DYNAMIC_TYPE_ROLE)
+            else:
+                keep = kind if self.type_combo.itemData(index, self._DYNAMIC_TYPE_ROLE) else ""
+                self._remove_stale_dynamic_types(keep=keep)
+                index = self.type_combo.findText(kind)
+            if index >= 0:
+                self.type_combo.setCurrentIndex(index)
+            self._rebuild_format_for_type(kind, previous_format)
+        # QSignalBlocker intentionally suppresses intermediate Type/Format
+        # events.  Reapply dependent visibility/gating once after the atomic
+        # transition, without emitting valuesChanged/dirty from false states.
+        self._finish_type_change(kind)
+
+    def _rebuild_format_for_type(self, image_type: str, previous_format: str) -> None:
+        """Populate format options for *image_type*, retaining compatible prior value.
+
+        Called with type/format combo signals blocked by :meth:`set_type`.
+        """
+        self.format_combo.clear()
+        if image_type == "RAW":
+            self.format_combo.addItems(self.RAW_FORMATS)
+            target = previous_format if previous_format in self.RAW_FORMATS else "RAW12"
+        elif image_type == "YUV":
+            self.format_combo.addItems(self.YUV_FORMATS)
+            target = previous_format if previous_format in self.YUV_FORMATS else "YUYV"
+        elif image_type == "Standard Image":
+            self.format_combo.addItems(["N/A"])
+            target = "N/A"
+        else:
+            self.format_combo.addItems([previous_format] if previous_format else ["N/A"])
+            target = previous_format or "N/A"
+        self.format_combo.setCurrentText(target)
+
+    def _finish_type_change(self, image_type: str) -> None:
+        """Apply post-type-change UI state once, after atomic combo transition."""
+        if image_type == "RAW":
+            self.align_combo.setEnabled(True)
+            self.endian_combo.setEnabled(True)
+            self.raw_preview_combo.setEnabled(True)
+            self.bayer_pattern_combo.setEnabled(
+                self.raw_preview_combo.currentText().startswith("Bayer")
+            )
+        self._sync_type_enabled()
+        self._refresh_frame_size_hint()
+        if hasattr(self, "preset_format_filter_combo"):
+            self._refresh_preset_combo()
+        self.typeChanged.emit(image_type)
+
+    def _remove_stale_dynamic_formats(
+        self, keep: str = "", *, preserve_current: bool = True,
+    ) -> None:
+        """Remove stale temporary formats without silently replacing active legacy state.
+
+        A current marked entry represents the actual options of the active item.
+        Refreshing preset records after deletion must not remove it: QComboBox
+        would auto-select a neighbouring registry item and later overwrite the
+        item on Apply.  Explicit user selection passes ``preserve_current=False``
+        and may remove the prior active temporary value.
+        """
+        current_dynamic = self._current_dynamic_format() if preserve_current else ""
+        for index in range(self.format_combo.count() - 1, -1, -1):
+            if self.format_combo.itemData(index, self._DYNAMIC_FORMAT_ROLE):
+                text = self.format_combo.itemText(index)
+                if text not in {keep, current_dynamic}:
+                    self.format_combo.removeItem(index)
+
+    def _add_dynamic_format(self, fmt: str) -> int:
+        """Append one raw stored legacy/mismatched identifier and mark it temporary."""
+        self.format_combo.addItem(fmt)
+        index = self.format_combo.count() - 1
+        self.format_combo.setItemData(index, True, self._DYNAMIC_FORMAT_ROLE)
+        return index
 
     def set_format(self, format_name: str) -> None:
-        idx = self.format_combo.findText(format_name)
+        """Select *format_name*, preserving unsupported legacy values verbatim.
+
+        A saved unknown/mismatched format must never silently fall back to the
+        current RAW12/YUV entry.  Temporary entries are cleaned when a later
+        legitimate format is loaded, while the current legacy identifier stays
+        visible long enough to round-trip safely.
+        """
+        fmt = normalize_preset_format_name(format_name)
+        idx = self.format_combo.findText(fmt)
+        if idx < 0 and fmt:
+            # Caller explicitly chose/loaded a different format; old temporary
+            # entries may now be removed.  (set_presets refresh uses the default
+            # preservation path instead.)
+            self._remove_stale_dynamic_formats(keep=fmt, preserve_current=False)
+            idx = self._add_dynamic_format(fmt)
+        elif idx >= 0:
+            # A legal/current item supersedes old temporary entries.  If *fmt*
+            # itself is a marked legacy entry, retain just that one.
+            keep = fmt if self.format_combo.itemData(idx, self._DYNAMIC_FORMAT_ROLE) else ""
+            self._remove_stale_dynamic_formats(keep=keep, preserve_current=False)
+            idx = self.format_combo.findText(fmt)
         if idx >= 0:
             self.format_combo.setCurrentIndex(idx)
 
@@ -350,7 +519,7 @@ class ControlPanel(QWidget):
         """
         fmt = self.format_combo.currentText()
         return {
-            "image_type": self.type_combo.currentText(),
+            "image_type": normalize_preset_image_type(self.type_combo.currentText()),
             "format_name": self._yonly_internal_name(
                 fmt, self.bit_depth_combo.currentText()
             ),
@@ -371,10 +540,10 @@ class ControlPanel(QWidget):
         ``YOnly`` 开头且 / 或带 ``bit_depth``，则拆成 UI 的 ``YOnly`` + Bit depth。
         """
         if "image_type" in kwargs:
-            self.type_combo.setCurrentText(kwargs["image_type"])
+            self.set_type(kwargs["image_type"])
         if "format_name" in kwargs:
-            fname = kwargs["format_name"]
-            if fname.startswith("YOnly"):
+            fname = normalize_preset_format_name(kwargs["format_name"])
+            if fname in {"YOnly", "YOnly8", "YOnly10", "YOnly12", "YOnly14", "YOnly16"}:
                 bit = kwargs.get("bit_depth") or fname[len("YOnly"):] or "8"
                 if bit not in self.YONLY_BIT_DEPTHS:
                     bit = "12"
@@ -408,6 +577,8 @@ class ControlPanel(QWidget):
         self._panel_enabled = bool(enabled)
         for widget in [
             self.preset_combo,
+            self.preset_search_edit,
+            self.preset_format_filter_combo,
             self.preset_save_btn,
             self.preset_manage_btn,
             self.type_combo,
@@ -458,6 +629,20 @@ class ControlPanel(QWidget):
                 self.apply_btn.setEnabled(allowed)
 
         dynamic = image_type != "Standard Image"
+        effective_format = self._yonly_internal_name(
+            fmt, self.bit_depth_combo.currentText(),
+        )
+        if not is_supported_preset_format_for_type(image_type, effective_format):
+            # Legacy/imported values remain editable/selectable so they
+            # round-trip intact, but unknown OR type-mismatched formats must
+            # never decode through an accidental RAW/YUV fallback.
+            _set_apply(False)
+            self.apply_btn.setToolTip(
+                f"Unsupported format '{effective_format}' for {image_type}. "
+                "Select a supported format to Apply."
+            )
+            return
+        self.apply_btn.setToolTip("Apply current decode parameters (Ctrl+A)")
         try:
             if image_type == "YUV":
                 if fmt == "YOnly":
@@ -484,29 +669,121 @@ class ControlPanel(QWidget):
         else:
             _set_apply(True)
 
-    def set_preset_names(self, names: list[str], current: str | None = None) -> None:
-        """Repopulate the preset combo. Pass current=None to leave selection unchanged.
+    def _current_preset_format(self) -> str:
+        """Return the panel's effective stored format (including YOnly bit depth)."""
+        if self.type_combo.currentText() == "Standard Image":
+            return "N/A"
+        return self._yonly_internal_name(
+            self.format_combo.currentText(), self.bit_depth_combo.currentText()
+        )
 
-        The first item is always the placeholder; selecting it has no effect.
+    def _set_preset_format_choices(
+        self,
+        *,
+        preserve: str | None = None,
+        prefer_current: bool = False,
+    ) -> None:
+        """Refresh the format-filter choices without emitting filter signals."""
+        choices = preset_format_filter_choices(
+            self._preset_records, include_current=True,
+        )
+        current_format = self._current_preset_format()
+        selected = normalize_preset_format_name(preserve) if preserve in choices else None
+        if selected is None and prefer_current:
+            has_current = (
+                current_format != "N/A"
+                and any(
+                    normalize_preset_format_name(p.format_name) == current_format
+                    for p in self._preset_records
+                )
+            )
+            selected = PRESET_FILTER_CURRENT if has_current else PRESET_FILTER_ALL
+        if selected is None:
+            selected = PRESET_FILTER_ALL
+        self.preset_format_filter_combo.blockSignals(True)
+        self.preset_format_filter_combo.clear()
+        self.preset_format_filter_combo.addItems(choices)
+        self.preset_format_filter_combo.setCurrentText(selected)
+        self.preset_format_filter_combo.blockSignals(False)
+
+    def set_presets(
+        self, presets: list[SensorPreset], current: str | None = None,
+    ) -> None:
+        """Set complete preset records and refresh search + exact-format filtering.
+
+        ``current`` selects a name only when it remains visible under the active
+        filters.  A hidden old selection always falls back to the placeholder,
+        so pressing the combo cannot load a wrong/stale preset.
         """
+        selected_format = self.preset_format_filter_combo.currentText()
+        had_filter = self.preset_format_filter_combo.count() > 0
+        self._preset_records = list(presets)
+        self._preset_names_only = False
+        # Do not remove a *currently selected* temporary format here.  Preset
+        # deletion/refresh is not a user format choice; retaining the active
+        # legacy identifier prevents Qt from silently selecting RAW32/another
+        # neighbour and corrupting the current item's options on next Apply.
+        # Inactive temporary entries are still pruned by the helper.
+        self._remove_stale_dynamic_formats()
+        self._set_preset_format_choices(
+            preserve=selected_format,
+            prefer_current=not had_filter,
+        )
+        self._refresh_preset_combo(current=current)
+
+    def set_preset_names(self, names: list[str], current: str | None = None) -> None:
+        """Backward-compatible names-only preset population helper.
+
+        Production callers should use :meth:`set_presets` so format filtering
+        has real stored values.  The compatibility path intentionally forces
+        ``All formats`` instead of fabricating a format for legacy/test callers.
+        """
+        self._preset_records = [SensorPreset(name=name, format_name="") for name in names if name]
+        self._preset_names_only = True
+        self._remove_stale_dynamic_formats()
+        self._set_preset_format_choices(preserve=PRESET_FILTER_ALL)
+        self._refresh_preset_combo(current=current)
+
+    def _refresh_preset_combo(self, *_signal_args, current: str | None = None) -> None:
+        """Apply name + format filters to the non-editable preset selector."""
+        selected_name = current
+        if selected_name is None and self.preset_combo.currentIndex() > 0:
+            selected_name = self.preset_combo.currentData()
+        if selected_name is None:
+            selected_name = self._preset_last_selected_name
+        format_filter = self.preset_format_filter_combo.currentText() or PRESET_FILTER_ALL
+        current_format = self._current_preset_format()
+        # ``Current format`` remains an exact dynamic filter even when it has
+        # no result: an empty selector is safer than silently widening to a
+        # different format, and clearing/selecting All restores every preset.
+        if self._preset_names_only:
+            visible = [
+                p for p in self._preset_records
+                if not self.preset_search_edit.text().strip()
+                or self.preset_search_edit.text().strip().casefold() in p.name.casefold()
+            ]
+        else:
+            visible = filter_sensor_presets(
+                self._preset_records,
+                self.preset_search_edit.text(),
+                format_filter,
+                current_format,
+            )
+        visible_names = {p.name for p in visible}
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
-        for name in names:
-            if name:
-                self.preset_combo.addItem(name)
-        if current:
-            idx = self.preset_combo.findText(current)
-            if idx > 0:
-                self.preset_combo.setCurrentIndex(idx)
-            else:
-                self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.addItem(self._PRESET_PLACEHOLDER, None)
+        for preset in visible:
+            self.preset_combo.addItem(preset.name, preset.name)
+        if selected_name in visible_names:
+            self.preset_combo.setCurrentIndex(self.preset_combo.findData(selected_name))
         else:
             self.preset_combo.setCurrentIndex(0)
         self.preset_combo.blockSignals(False)
 
     def reset_preset_selection(self) -> None:
         """Move the preset combo back to the placeholder without emitting signals."""
+        self._preset_last_selected_name = None
         self.preset_combo.blockSignals(True)
         self.preset_combo.setCurrentIndex(0)
         self.preset_combo.blockSignals(False)
@@ -658,12 +935,13 @@ class ControlPanel(QWidget):
     # ── internal slots ───────────────────────────────────────────────
 
     def _on_preset_activated(self, index: int) -> None:
-        """Forward a preset selection. Index 0 is the placeholder — ignore it."""
+        """Forward a visible preset selection; placeholder/filtered values do nothing."""
         if index <= 0:
             return
-        name = self.preset_combo.itemText(index)
+        name = self.preset_combo.itemData(index)
         if name:
-            self.presetSelected.emit(name)
+            self._preset_last_selected_name = str(name)
+            self.presetSelected.emit(str(name))
 
     def _on_slider_zoom(self, value: int) -> None:
         self.zoom_spin.blockSignals(True)
@@ -678,25 +956,23 @@ class ControlPanel(QWidget):
         self.zoomChanged.emit(value)
 
     def _on_type_changed(self, image_type: str) -> None:
-        self.format_combo.clear()
-        if image_type == "RAW":
-            self.format_combo.addItems(self.RAW_FORMATS)
-            self.format_combo.setCurrentText("RAW12")
-            self.align_combo.setEnabled(True)
-            self.endian_combo.setEnabled(True)
-            self.raw_preview_combo.setEnabled(True)
-            self.bayer_pattern_combo.setEnabled(
-                self.raw_preview_combo.currentText().startswith("Bayer")
+        """Handle direct user type-combo changes (signals are already final)."""
+        image_type = normalize_preset_image_type(image_type)
+        previous_format = self.format_combo.currentText()
+        # A user-driven QComboBox selection is one deliberate change.  Remove
+        # its now-inactive legacy type under a blocker, and rebuild Format under
+        # a blocker, so no transient Standard Image/N/A/default signal reaches
+        # valuesChanged or gets saved to the current ViewerItem.
+        with QSignalBlocker(self.type_combo), QSignalBlocker(self.format_combo):
+            type_index = self.type_combo.currentIndex()
+            keep = (
+                image_type
+                if type_index >= 0 and self.type_combo.itemData(type_index, self._DYNAMIC_TYPE_ROLE)
+                else ""
             )
-        elif image_type == "YUV":
-            self.format_combo.addItems(self.YUV_FORMATS)
-            self.format_combo.setCurrentText("YUYV")
-        else:
-            self.format_combo.addItems(["N/A"])
-        # 类型/格式联动条件显隐（RAW 显示高级参数 / YOnly 显示位深+对齐+端序）
-        self._sync_type_enabled()
-        self._refresh_frame_size_hint()
-        self.typeChanged.emit(image_type)
+            self._remove_stale_dynamic_types(keep=keep)
+            self._rebuild_format_for_type(image_type, previous_format)
+        self._finish_type_change(image_type)
 
     def _on_raw_preview_changed(self, value: str) -> None:
         # 只在 RAW 且 Bayer 时启用/显示 Bayer 控件。复用 _sync_type_enabled 的

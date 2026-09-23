@@ -30,7 +30,20 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.gui.panels import ControlPanel, _qta_icon
-from raw_view.models import AppSettings, BAYER_PATTERNS, SensorPreset
+from raw_view.models import (
+    AppSettings,
+    BAYER_PATTERNS,
+    PRESET_FILTER_ALL,
+    PRESET_IMAGE_TYPES,
+    PRESET_RAW_FORMATS,
+    PRESET_STANDARD_FORMATS,
+    PRESET_YUV_FORMATS,
+    SensorPreset,
+    filter_sensor_presets,
+    normalize_preset_format_name,
+    normalize_preset_image_type,
+    preset_format_filter_choices,
+)
 
 
 class PresetManagerDialog(QDialog):
@@ -47,6 +60,7 @@ class PresetManagerDialog(QDialog):
             SensorPreset.from_dict(p.to_dict()) for p in settings.sensor_presets
         ]
         self._current_index: int = -1
+        self._visible_indices: list[int] = []  # list row -> canonical _presets index
         self._loading: bool = False  # guards against edit-callback recursion
 
         self.setWindowTitle("Sensor Presets")
@@ -58,11 +72,19 @@ class PresetManagerDialog(QDialog):
         header = QLabel("Presets")
         header.setStyleSheet("font-weight: bold;")
 
-        # Search filter — only shown once the list gets long enough to warrant it.
+        # Name search + exact stored-format filter are ANDed.  Search remains a
+        # dedicated field (not an editable selection control), so filtering can
+        # never create a fake preset value.
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search presets…")
         self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setToolTip("Filter preset names as you type (case-insensitive).")
+        self.format_filter_combo = QComboBox()
+        self.format_filter_combo.setToolTip(
+            "Show all presets or one exact stored format. Search and format are combined."
+        )
         self.search_edit.textChanged.connect(self._apply_filter)
+        self.format_filter_combo.currentTextChanged.connect(self._apply_filter)
 
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
@@ -92,12 +114,13 @@ class PresetManagerDialog(QDialog):
         left = QVBoxLayout()
         left.addWidget(header)
         left.addWidget(self.search_edit)
+        left.addWidget(self.format_filter_combo)
         left.addWidget(self.list_widget, 1)
         left.addLayout(list_btn_row)
 
         # ── Right side: editable parameter form ───────────────────────
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["RAW", "YUV", "Standard Image"])
+        self.type_combo.addItems(PRESET_IMAGE_TYPES)
         self.format_combo = QComboBox()
         self.align_combo = QComboBox()
         self.align_combo.addItems(["lsb", "msb"])
@@ -182,17 +205,21 @@ class PresetManagerDialog(QDialog):
             widget.valueChanged.connect(self._on_field_changed)
 
     def _populate_format_combo(self, image_type: str) -> None:
-        """Refill format_combo for the given image type. Signals are blocked
-        to keep this side-effect-free — callers decide when to fire updates.
+        """Refill format_combo from the shared preset format registry.
+
+        The panel exposes display ``YOnly`` + a separate bit selector, whereas
+        stored presets can legitimately contain YOnly8/10/12/14/16.  The
+        manager therefore exposes every actual stored registry format so edits
+        never coerce/drop imported YOnly bit-depth presets.
         """
         self.format_combo.blockSignals(True)
         self.format_combo.clear()
         if image_type == "RAW":
-            self.format_combo.addItems(ControlPanel.RAW_FORMATS)
+            self.format_combo.addItems(PRESET_RAW_FORMATS)
         elif image_type == "YUV":
-            self.format_combo.addItems(ControlPanel.YUV_FORMATS)
+            self.format_combo.addItems(PRESET_YUV_FORMATS)
         else:
-            self.format_combo.addItems(["N/A"])
+            self.format_combo.addItems(PRESET_STANDARD_FORMATS)
         self.format_combo.blockSignals(False)
 
     def _on_type_changed(self, image_type: str) -> None:
@@ -202,30 +229,68 @@ class PresetManagerDialog(QDialog):
 
     # ── List management ─────────────────────────────────────────────────
 
+    def _refresh_format_filter_choices(self, preserve: str | None = None) -> None:
+        """Refresh exact-format choices from registry + current/imported presets."""
+        choices = preset_format_filter_choices(self._presets)
+        selected = preserve if preserve in choices else PRESET_FILTER_ALL
+        self.format_filter_combo.blockSignals(True)
+        self.format_filter_combo.clear()
+        self.format_filter_combo.addItems(choices)
+        self.format_filter_combo.setCurrentText(selected)
+        self.format_filter_combo.blockSignals(False)
+
     def _refresh_list(self, select_index: int = -1) -> None:
+        """Rebuild visible rows while retaining canonical indices in item data."""
+        selected_format = self.format_filter_combo.currentText()
+        self._refresh_format_filter_choices(preserve=selected_format)
+        self._apply_filter(select_index=select_index)
+
+    def _apply_filter(self, *_signal_args, select_index: int = -1) -> None:
+        """Apply name + exact-format filters and keep selection/model mapping safe."""
+        previous_index = self._current_index if select_index < 0 else select_index
+        selected_format = self.format_filter_combo.currentText() or PRESET_FILTER_ALL
+        filtered = filter_sensor_presets(
+            self._presets, self.search_edit.text(), selected_format,
+        )
+        # Names are unique by model contract; retain each source index so rows
+        # can safely map back after filtering, import, editing, or deletion.
+        visible_indices = [
+            index for index, preset in enumerate(self._presets) if preset in filtered
+        ]
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
-        for p in self._presets:
-            self.list_widget.addItem(QListWidgetItem(p.name))
+        self._visible_indices = visible_indices
+        selected_row = -1
+        for row, source_index in enumerate(visible_indices):
+            preset = self._presets[source_index]
+            item = QListWidgetItem(preset.name)
+            item.setData(Qt.UserRole, source_index)
+            self.list_widget.addItem(item)
+            if source_index == previous_index:
+                selected_row = row
         self.list_widget.blockSignals(False)
-        # Search box only appears when the list is long enough to need it.
-        self.search_edit.setVisible(len(self._presets) > 8)
-        self._apply_filter(self.search_edit.text())
-        if 0 <= select_index < len(self._presets):
-            self.list_widget.setCurrentRow(select_index)
+        # Search was previously conditionally hidden; keeping it visible makes
+        # the feature discoverable for small and large preset collections alike.
+        self.search_edit.setVisible(True)
+        if selected_row >= 0:
+            self.list_widget.setCurrentRow(selected_row)
+        elif visible_indices:
+            self.list_widget.setCurrentRow(0)
         else:
             self._current_index = -1
             self._set_form_enabled(False)
 
-    def _apply_filter(self, query: str) -> None:
-        q = (query or "").strip().lower()
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            item.setHidden(bool(q) and q not in item.text().lower())
+    def _current_source_index(self, row: int) -> int:
+        """Map the visible QListWidget row to the canonical preset list index."""
+        if not (0 <= row < self.list_widget.count()):
+            return -1
+        item = self.list_widget.item(row)
+        source_index = item.data(Qt.UserRole) if item is not None else -1
+        return int(source_index) if isinstance(source_index, int) else -1
 
     def _show_list_menu(self, pos) -> None:
         row = self.list_widget.indexAt(pos).row()
-        has_item = 0 <= row < len(self._presets)
+        has_item = self._current_source_index(row) >= 0
         if has_item:
             self.list_widget.setCurrentRow(row)
         menu = QMenu(self)
@@ -258,25 +323,42 @@ class PresetManagerDialog(QDialog):
             w.setEnabled(enabled)
 
     def _on_row_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self._presets):
+        source_index = self._current_source_index(row)
+        if not (0 <= source_index < len(self._presets)):
             self._current_index = -1
             self._set_form_enabled(False)
             return
-        self._current_index = row
+        self._current_index = source_index
         self._set_form_enabled(True)
-        self._load_form(self._presets[row])
+        self._load_form(self._presets[source_index])
 
     def _load_form(self, preset: SensorPreset) -> None:
         self._loading = True
         try:
-            self.type_combo.setCurrentText(preset.image_type)
+            image_type = normalize_preset_image_type(preset.image_type)
+            type_idx = self.type_combo.findText(image_type)
+            if type_idx < 0:
+                # Preserve even an empty/unknown legacy type verbatim so a
+                # width/rename edit cannot silently coerce it to the combo's
+                # first RAW entry.
+                self.type_combo.addItem(image_type)
+                type_idx = self.type_combo.findText(image_type)
+            if type_idx >= 0:
+                self.type_combo.setCurrentIndex(type_idx)
             # Always repopulate format_combo explicitly: setCurrentText above
             # is a no-op when the combo is already on that type (e.g. the
             # default "RAW"), so currentTextChanged never fires and
             # format_combo stays empty — which used to leave Format blank
             # after re-opening the dialog.
-            self._populate_format_combo(preset.image_type)
-            idx = self.format_combo.findText(preset.format_name)
+            self._populate_format_combo(image_type)
+            # Keep legacy/imported unknown identifiers editable and round-trip
+            # safe.  Without this, findText() leaves RAW8 selected and any
+            # unrelated width/rename edit permanently rewrites VendorRAW.
+            format_name = normalize_preset_format_name(preset.format_name)
+            idx = self.format_combo.findText(format_name)
+            if idx < 0 and format_name:
+                self.format_combo.addItem(format_name)
+                idx = self.format_combo.findText(format_name)
             if idx >= 0:
                 self.format_combo.setCurrentIndex(idx)
             self.align_combo.setCurrentText(preset.alignment)
@@ -293,8 +375,8 @@ class PresetManagerDialog(QDialog):
         if self._loading or self._current_index < 0:
             return
         p = self._presets[self._current_index]
-        p.image_type = self.type_combo.currentText()
-        p.format_name = self.format_combo.currentText()
+        p.image_type = normalize_preset_image_type(self.type_combo.currentText())
+        p.format_name = normalize_preset_format_name(self.format_combo.currentText())
         p.alignment = self.align_combo.currentText()
         p.endianness = self.endian_combo.currentText()
         p.preview_mode = self.preview_combo.currentText()
@@ -302,6 +384,9 @@ class PresetManagerDialog(QDialog):
         p.width = self.width_spin.value()
         p.height = self.height_spin.value()
         p.offset = self.offset_spin.value()
+        # An edit can move the selected preset out of the active format filter;
+        # refresh immediately so no stale row/selection survives.
+        self._refresh_list(select_index=self._current_index)
 
     # ── Add / Rename / Delete ───────────────────────────────────────────
 

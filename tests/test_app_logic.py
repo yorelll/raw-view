@@ -49,12 +49,20 @@ from raw_view.gui.app import (  # noqa: E402
     handle_drop_paths,
 )
 from raw_view.gui.framenav import FrameNavBar  # noqa: E402
+from raw_view.gui.dialogs.preset import PresetManagerDialog  # noqa: E402
 from raw_view.models import (  # noqa: E402
     BAYER_PATTERNS,
     THEME_PALETTES,
     DecodeOptions,
+    PRESET_FILTER_ALL,
+    SensorPreset,
     ViewerItem,
     build_ui_stylesheet,
+    filter_sensor_presets,
+    is_supported_preset_format,
+    is_supported_preset_format_for_type,
+    normalize_preset_image_type,
+    preset_format_filter_choices,
 )
 
 
@@ -113,6 +121,423 @@ class _FakeUrl:
         return self._path
 
 
+# ── Sensor preset format filters ─────────────────────────────────────────
+
+
+class _PresetSettings:
+    """Small AppSettings-compatible preset source for manager dialog tests."""
+
+    def __init__(self, presets):
+        self.sensor_presets = list(presets)
+
+    def replace_sensor_presets(self, presets):
+        self.sensor_presets = list(presets)
+
+
+class PresetFilterModelTests(unittest.TestCase):
+    def setUp(self):
+        self.presets = [
+            SensorPreset(name="Alpha RAW8", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="beta RAW12", image_type="RAW", format_name="RAW12"),
+            SensorPreset(name="Gamma YUYV", image_type="YUV", format_name="YUYV"),
+            SensorPreset(name="Imported custom", image_type="RAW", format_name="VendorRAW"),
+        ]
+
+    def test_registry_choices_are_complete_and_keep_unknown_import(self):
+        choices = preset_format_filter_choices(self.presets)
+        for fmt in ("RAW8", "RAW10 Packed", "RAW14 Packed", "YOnly12", "YUYV", "NV61", "I420", "VendorRAW"):
+            self.assertIn(fmt, choices)
+        self.assertEqual(choices[0], PRESET_FILTER_ALL)
+
+    def test_search_and_exact_format_are_anded_case_insensitively(self):
+        self.assertEqual(
+            [p.name for p in filter_sensor_presets(self.presets, "BETA", "RAW12")],
+            ["beta RAW12"],
+        )
+        self.assertEqual(filter_sensor_presets(self.presets, "beta", "RAW8"), [])
+        self.assertEqual(
+            [p.name for p in filter_sensor_presets(self.presets, "", PRESET_FILTER_ALL)],
+            [p.name for p in self.presets],
+        )
+
+    def test_type_aware_format_validation_rejects_cross_type_pairs(self):
+        for image_type, format_name in (
+            ("RAW", "YUYV"),
+            ("YUV", "RAW8"),
+            ("RAW", "N/A"),
+            ("Standard Image", "RAW8"),
+            ("Unknown", "RAW8"),
+            ("RAW", "VendorRAW"),
+        ):
+            with self.subTest(image_type=image_type, format_name=format_name):
+                self.assertFalse(
+                    is_supported_preset_format_for_type(image_type, format_name),
+                )
+        for image_type, format_name in (
+            ("RAW", "RAW8"),
+            ("RAW", "RAW14 Packed"),
+            ("YUV", "YUYV"),
+            ("YUV", "YOnly12"),
+            ("Standard Image", "N/A"),
+        ):
+            with self.subTest(image_type=image_type, format_name=format_name):
+                self.assertTrue(
+                    is_supported_preset_format_for_type(image_type, format_name),
+                )
+
+
+class LegacyPresetCompatibilityTests(unittest.TestCase):
+    """Unknown/non-string stored formats survive filtering, editing, and loading."""
+
+    def _dialog(self, preset):
+        return PresetManagerDialog(_PresetSettings([preset]))
+
+    def test_from_dict_normalizes_non_string_format_values_and_filters_safely(self):
+        for raw, expected in ((12, "12"), (None, ""), ([], "")):
+            with self.subTest(raw=raw):
+                preset = SensorPreset.from_dict({"name": "bad legacy", "format_name": raw})
+                self.assertEqual(preset.format_name, expected)
+                # All helper paths must tolerate both normalized JSON and a
+                # programmatic malformed SensorPreset without AttributeError.
+                choices = preset_format_filter_choices([preset])
+                self.assertIn(expected, choices) if expected else self.assertTrue(choices)
+                self.assertEqual(filter_sensor_presets([preset], "bad"), [preset])
+        direct_bad = SensorPreset(name="direct bad", format_name=12)
+        self.assertIn("12", preset_format_filter_choices([direct_bad]))
+        self.assertEqual(filter_sensor_presets([direct_bad], "direct", "12"), [direct_bad])
+        self.assertEqual(SensorPreset.from_dict(None).format_name, "RAW12")
+
+    def test_from_dict_normalizes_non_string_image_type_values(self):
+        for raw, expected in ((12, "12"), (None, ""), ([], ""), ({}, "")):
+            with self.subTest(raw=raw):
+                preset = SensorPreset.from_dict({"name": "bad type", "image_type": raw})
+                self.assertEqual(preset.image_type, expected)
+                self.assertEqual(normalize_preset_image_type(raw), expected)
+                self.assertFalse(
+                    is_supported_preset_format_for_type(preset.image_type, preset.format_name),
+                )
+
+    def test_manager_unknown_image_type_loads_and_round_trips_without_typeerror(self):
+        settings = _PresetSettings([
+            SensorPreset(name="bad type", image_type="12", format_name="RAW8", width=111),
+        ])
+        dlg = PresetManagerDialog(settings)
+        try:
+            self.assertEqual(dlg.type_combo.currentText(), "12")
+            self.assertEqual(dlg.format_combo.currentText(), "RAW8")
+            dlg.width_spin.setValue(222)
+            dlg._on_save_clicked()
+            self.assertEqual(settings.sensor_presets[0].image_type, "12")
+            self.assertEqual(settings.sensor_presets[0].format_name, "RAW8")
+            self.assertEqual(settings.sensor_presets[0].width, 222)
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            _APP.processEvents()
+
+    def test_manager_unknown_format_round_trips_after_width_rename_and_save(self):
+        settings = _PresetSettings([
+            SensorPreset(name="legacy", image_type="RAW", format_name="VendorRAW", width=111),
+        ])
+        dlg = PresetManagerDialog(settings)
+        try:
+            self.assertEqual(dlg.format_combo.currentText(), "VendorRAW")
+            dlg.width_spin.setValue(222)
+            self.assertEqual(dlg._presets[0].format_name, "VendorRAW")
+            dlg._presets[0].name = "legacy renamed"  # rename model path
+            dlg._on_save_clicked()
+            self.assertEqual(settings.sensor_presets[0].name, "legacy renamed")
+            self.assertEqual(settings.sensor_presets[0].format_name, "VendorRAW")
+            self.assertEqual(settings.sensor_presets[0].width, 222)
+            # Export/import representation is still the literal original value.
+            payload = settings.sensor_presets[0].to_dict()
+            restored = SensorPreset.from_dict(payload)
+            self.assertEqual(restored.format_name, "VendorRAW")
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            _APP.processEvents()
+
+
+class PresetManagerFormatFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = _PresetSettings([
+            SensorPreset(name="Alpha RAW8", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="beta RAW12", image_type="RAW", format_name="RAW12"),
+            SensorPreset(name="Gamma YUYV", image_type="YUV", format_name="YUYV"),
+        ])
+        self.dlg = PresetManagerDialog(self.settings)
+
+    def tearDown(self):
+        self.dlg.close()
+        self.dlg.deleteLater()
+        _APP.processEvents()
+
+    def _names(self):
+        return [self.dlg.list_widget.item(i).text() for i in range(self.dlg.list_widget.count())]
+
+    def test_existing_search_and_new_format_filter_are_anded(self):
+        self.dlg.search_edit.setText("BETA")
+        self.assertEqual(self._names(), ["beta RAW12"])
+        self.dlg.format_filter_combo.setCurrentText("RAW8")
+        self.assertEqual(self._names(), [])
+        self.assertEqual(self.dlg._current_index, -1)
+        self.assertFalse(self.dlg.delete_btn.isEnabled())
+        self.dlg.search_edit.clear()
+        self.assertEqual(self._names(), ["Alpha RAW8"])
+
+    def test_editing_format_refreshes_filtered_rows_and_source_mapping(self):
+        self.dlg.format_filter_combo.setCurrentText("RAW12")
+        self.assertEqual(self._names(), ["beta RAW12"])
+        self.assertEqual(self.dlg._current_index, 1)  # canonical, not visible row 0
+        self.dlg.format_combo.setCurrentText("RAW8")
+        self.assertEqual(self._names(), [])
+        self.assertEqual(self.dlg._current_index, -1)
+        self.dlg.format_filter_combo.setCurrentText(PRESET_FILTER_ALL)
+        self.assertIn("beta RAW12", self._names())
+        beta = next(p for p in self.dlg._presets if p.name == "beta RAW12")
+        self.assertEqual(beta.format_name, "RAW8")
+
+    def test_add_and_import_style_refresh_keep_active_filter_safe(self):
+        self.dlg.format_filter_combo.setCurrentText("YUYV")
+        self.assertEqual(self._names(), ["Gamma YUYV"])
+        # Simulate CRUD/import mutation; refresh must retain exact filter and
+        # select only visible canonical entries (no stale list row mapping).
+        self.dlg._presets.append(
+            SensorPreset(name="New NV12", image_type="YUV", format_name="NV12")
+        )
+        self.dlg._refresh_list(select_index=len(self.dlg._presets) - 1)
+        self.assertEqual(self._names(), ["Gamma YUYV"])
+        self.assertEqual(self.dlg._current_index, 2)
+        self.dlg.format_filter_combo.setCurrentText("NV12")
+        self.assertEqual(self._names(), ["New NV12"])
+        self.assertEqual(self.dlg._current_index, 3)
+
+
+# ── Save Display default filename ─────────────────────────────────────────
+
+
+class MainWindowLegacyPresetRefreshTests(unittest.TestCase):
+    """Manager refresh must not silently replace an active deleted legacy format."""
+
+    def test_deleted_active_legacy_preset_keeps_panel_item_until_explicit_choice(self):
+        root = tempfile.mkdtemp(prefix="rv-legacy-refresh-")
+        try:
+            path = os.path.join(root, "frame.raw")
+            with open(path, "wb") as f:
+                f.write(b"\x00" * 64)
+            w = MainWindow()
+            try:
+                item = ViewerItem()
+                item.options.file_path = path
+                item.options.image_type = "RAW"
+                item.options.format_name = "VendorA"
+                item.options.width = item.options.height = 2
+                # The panel/item state is real; pin the current-item accessor
+                # so this integration test need not construct a visual tab page.
+                w._current_item = lambda: item
+                w.panel.set_enabled(True)
+                w.panel.set_values(image_type="RAW", format_name="VendorA", width=2, height=2)
+                self.assertEqual(w.panel.format_combo.currentText(), "VendorA")
+                self.assertFalse(w.panel.apply_btn.isEnabled())
+                states = []
+                w._set_state = lambda *args: states.append(args)
+                w.settings = _PresetSettings([])
+                w._refresh_preset_combo()  # manager deletion / refresh path
+                self.assertEqual(w.panel.format_combo.currentText(), "VendorA")
+                self.assertFalse(w.panel.apply_btn.isEnabled())
+                self.assertEqual(item.options.format_name, "VendorA")
+                self.assertEqual(states, [], "refresh must not mark dirty/change state")
+                # Ctrl+A / button guard cannot run Apply while legacy is disabled.
+                w._start_async_decode = mock.Mock()
+                with mock.patch.object(app_module.QMessageBox, "critical"):
+                    w._on_apply_clicked()
+                w._start_async_decode.assert_not_called()
+                self.assertEqual(item.options.format_name, "VendorA")
+                # An explicit legal choice removes VendorA and then Apply writes
+                # RAW8 intentionally (not through Qt's implicit fallback).
+                w.panel.set_format("RAW8")
+                self.assertEqual(w.panel.format_combo.findText("VendorA"), -1)
+                self.assertTrue(w.panel.apply_btn.isEnabled())
+                w._save_panel_to_item(item)
+                self.assertEqual(item.options.format_name, "RAW8")
+            finally:
+                w.close()
+                w.deleteLater()
+                _APP.processEvents()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class SaveDisplayDefaultPathTests(unittest.TestCase):
+    def _window_for(self, file_path: str):
+        w = _new_window()
+        item = ViewerItem()
+        item.options.file_path = file_path
+        item.current_display = np.zeros((2, 2, 3), dtype=np.uint8)
+        w._current_item = lambda: item
+        w.settings = SimpleNamespace(save_dpi=300)
+        w._set_state = lambda *_a, **_k: None
+        return w, item
+
+    def test_save_dialog_receives_source_directory_and_stem_png(self):
+        cases = [
+            ("/captures/Y8I_0x0b.bin", "/captures/Y8I_0x0b.png"),
+            ("/测试/307测试图切debug out短曝.png", "/测试/307测试图切debug out短曝.png"),
+            ("/captures/capture.raw.bin", "/captures/capture.raw.png"),
+            ("/captures/output", "/captures/output.png"),
+        ]
+        for source, expected in cases:
+            with self.subTest(source=source):
+                w, _ = self._window_for(source)
+                with mock.patch.object(app_module.QFileDialog, "getSaveFileName", return_value=("", "")) as dialog:
+                    w.save_display()
+                # Qt uses native path separators on Windows; the source
+                # directory/stem contract is separator-agnostic.
+                self.assertEqual(dialog.call_args.args[2], os.path.normpath(expected))
+
+    def test_save_dialog_empty_source_uses_usable_fallback(self):
+        w, _ = self._window_for("")
+        with mock.patch.object(app_module.QFileDialog, "getSaveFileName", return_value=("", "")) as dialog:
+            w.save_display()
+        self.assertEqual(dialog.call_args.args[2], "image.png")
+
+    def test_jpeg_filter_keeps_existing_bare_name_completion(self):
+        w, _ = self._window_for("/captures/input.bin")
+        saved = []
+
+        class _Qimg:
+            def setDotsPerMeterX(self, _value):
+                pass
+
+            def setDotsPerMeterY(self, _value):
+                pass
+
+            def save(self, path, fmt):
+                saved.append((path, fmt))
+                return True
+
+        w._qimage_from_rgb = lambda _img: _Qimg()
+        with mock.patch.object(
+            app_module.QFileDialog,
+            "getSaveFileName",
+            return_value=("/exports/chosen", "JPEG (*.jpg *.jpeg)"),
+        ):
+            w.save_display()
+        self.assertEqual(saved, [("/exports/chosen.jpg", "JPEG")])
+
+
+# ── Initial automatic decode errors ───────────────────────────────────────
+
+
+class InitialDecodeErrorTests(unittest.TestCase):
+    def _window_with_pending(self, generation: int, show_error: bool):
+        w = _new_window()
+        item = ViewerItem()
+        w._decode_generation = generation
+        w._pending_decode_item = item
+        w._pending_decode_show_error = show_error
+        w._current_item = lambda: item
+        states = []
+        w._set_state = lambda *args: states.append(args)
+        return w, item, states
+
+    def test_open_item_decode_true_starts_silent_initial_decode(self):
+        """Direct initial open passes show_error=False without needing a real worker."""
+        root = tempfile.mkdtemp(prefix="rv-initial-open-")
+        try:
+            path = os.path.join(root, "small.raw")
+            with open(path, "wb") as f:
+                f.write(b"\x00" * 8)
+            w = MainWindow()
+            captured = []
+            w.decode_current = lambda *a, **kw: captured.append((a, kw))
+            try:
+                w._open_item(path, decode=True)
+                self.assertEqual(captured, [((), {"show_error": False})])
+            finally:
+                w.close()
+                w.deleteLater()
+                _APP.processEvents()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_silent_async_worker_error_updates_state_without_modal(self):
+        w, _item, states = self._window_with_pending(1, show_error=False)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w._on_decode_error(1, "data too short")
+        critical.assert_not_called()
+        self.assertEqual(states[-1], ("Decode failed", "error"))
+        self.assertIsNone(w._pending_decode_item)
+
+    def test_explicit_async_worker_error_still_shows_modal(self):
+        w, _item, states = self._window_with_pending(1, show_error=True)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w._on_decode_error(1, "data too short")
+        critical.assert_called_once_with(w, "Decode Failed", "data too short")
+        self.assertEqual(states[-1], ("Decode failed", "error"))
+
+    def test_stale_generation_cannot_cross_contaminate_error_intent(self):
+        w, item, _states = self._window_with_pending(2, show_error=True)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            # First request was silent (generation 1); its late error is stale
+            # and must not consume/mute generation 2's explicit error.
+            w._on_decode_error(1, "old silent error")
+            critical.assert_not_called()
+            self.assertIs(w._pending_decode_item, item)
+            w._on_decode_error(2, "new explicit error")
+            critical.assert_called_once_with(w, "Decode Failed", "new explicit error")
+
+        # Reverse order: a stale explicit error must not pop a dialog while the
+        # current silent initial request remains quiet.
+        w, item, _states = self._window_with_pending(4, show_error=False)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w._on_decode_error(3, "old explicit error")
+            w._on_decode_error(4, "new silent error")
+            critical.assert_not_called()
+            self.assertIsNone(w._pending_decode_item)
+
+    def test_standard_image_initial_silent_then_explicit_error(self):
+        item = ViewerItem()
+        item.options.file_path = "bad.png"
+        item.options.image_type = "Standard Image"
+        opts = item.options
+        w = _new_window()
+        states = []
+        w._set_state = lambda *args: states.append(args)
+        with mock.patch.object(app_module, "load_bgr_image", side_effect=ValueError("bad image")), \
+             mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w._decode_standard_image(item, opts, show_error=False)
+            critical.assert_not_called()
+            self.assertEqual(states[-1], ("Decode failed", "error"))
+            w._decode_standard_image(item, opts, show_error=True)
+            critical.assert_called_once_with(w, "Decode Failed", "bad image")
+
+    def test_decode_current_forwards_explicit_intent_to_worker_start(self):
+        root = tempfile.mkdtemp(prefix="rv-decode-intent-")
+        try:
+            path = os.path.join(root, "tiny.raw")
+            with open(path, "wb") as f:
+                f.write(b"\x00")
+            item = ViewerItem()
+            item.options.file_path = path
+            item.options.image_type = "RAW"
+            item.options.format_name = "RAW8"
+            item.options.width = item.options.height = 2
+            w = _new_window()
+            w.panel = _StubPanel({"width": 2, "height": 2})
+            w._current_item = lambda: item
+            captured = []
+            w._start_async_decode = lambda *args: captured.append(args)
+            w.decode_current(show_error=False)
+            self.assertFalse(captured[-1][-1])
+            w._warn_size_mismatch = lambda *_args: True
+            w.decode_current(warn_mismatch=True, show_error=True)
+            self.assertTrue(captured[-1][-1])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 # ── M-1: DecodeOptions preview/bayer fields ──────────────────────────────
 
 
@@ -166,6 +591,166 @@ class DecodeOptionsPersistenceTests(unittest.TestCase):
 # ── H-2: on-demand (per-frame) file reads ────────────────────────────────
 
 
+class DecodePreflightInvalidationTests(unittest.TestCase):
+    """Every valid decode request invalidates old worker UI effects before preflight."""
+
+    def _window_with_old_worker(self, path: str):
+        w = _new_window()
+        item = ViewerItem()
+        item.options.file_path = path
+        item.options.image_type = "RAW"
+        item.options.format_name = "RAW32"
+        item.options.width = item.options.height = 65_535
+        w.panel = _StubPanel({
+            "image_type": "RAW", "format_name": "RAW32",
+            "width": 65_535, "height": 65_535,
+        })
+        w._current_item = lambda: item
+        w._decode_generation = 41
+        w._pending_decode_item = item
+        w._pending_decode_show_error = False
+        w._thread = object()
+        w._worker = object()
+        w._pending_cache_key = "old-key"
+        states = []
+        w._set_state = lambda *args: states.append(args)
+        return w, item, states
+
+    def _assert_old_signals_are_stale(self, w, item, old_result, states_before):
+        w._on_decode_finished(41, old_result)
+        w._on_decode_error(41, "late old worker error")
+        self.assertEqual(states_before, states_before[:], "late worker must not alter failure state")
+        self.assertIsNone(item.current_display)
+
+    def test_frame_too_large_preflight_invalidates_old_silent_worker(self):
+        path = os.path.join(tempfile.gettempdir(), "rv-preflight-too-large.raw")
+        with open(path, "wb") as f:
+            f.write(b"\x00")
+        try:
+            w, item, states = self._window_with_old_worker(path)
+            old_result = SimpleNamespace(
+                display_array=np.ones((2, 2), dtype=np.uint8), qimage=None,
+                width=2, height=2, format_name="RAW8",
+            )
+            with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+                w.decode_current(warn_mismatch=True, show_error=True)
+                critical.assert_called_once()
+            self.assertGreater(w._decode_generation, 41)
+            self.assertIsNone(w._pending_decode_item)
+            self.assertEqual(states[-1], ("Decode rejected: frame too large", "error"))
+            states_before = list(states)
+            w._on_decode_finished(41, old_result)
+            with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+                w._on_decode_error(41, "late old worker error")
+                critical.assert_not_called()
+            self.assertEqual(states, states_before)
+            self.assertIsNone(item.current_display)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def test_mismatch_cancel_preflight_invalidates_old_worker(self):
+        path = os.path.join(tempfile.gettempdir(), "rv-preflight-mismatch.raw")
+        with open(path, "wb") as f:
+            f.write(b"\x00")
+        try:
+            w, item, states = self._window_with_old_worker(path)
+            # Small but non-huge RAW8 forces the size-mismatch prompt path.
+            item.options.format_name = "RAW8"
+            item.options.width = item.options.height = 2
+            w.panel.values.update({"format_name": "RAW8", "width": 2, "height": 2})
+            w._warn_size_mismatch = lambda *_args: False
+            old_result = SimpleNamespace(
+                display_array=np.ones((2, 2), dtype=np.uint8), qimage=None,
+                width=2, height=2, format_name="RAW8",
+            )
+            w.decode_current(warn_mismatch=True, show_error=True)
+            self.assertGreater(w._decode_generation, 41)
+            self.assertIsNone(w._pending_decode_item)
+            states_before = list(states)
+            w._on_decode_finished(41, old_result)
+            with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+                w._on_decode_error(41, "late old error")
+                critical.assert_not_called()
+            self.assertEqual(states, states_before)
+            self.assertIsNone(item.current_display)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+class DecodeTypeFormatDefenceTests(unittest.TestCase):
+    """Runtime decode rejects legacy image_type/format mismatches even if UI is bypassed."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-type-format-")
+        self._path = os.path.join(self._tmp, "frame.bin")
+        with open(self._path, "wb") as f:
+            f.write(b"\x00" * 64)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run_mismatch(self, image_type: str, format_name: str):
+        item = ViewerItem()
+        item.options.file_path = self._path
+        w = _new_window()
+        w.panel = _StubPanel({
+            "image_type": image_type,
+            "format_name": format_name,
+            "width": 2,
+            "height": 2,
+        })
+        w._current_item = lambda: item
+        w._start_async_decode = mock.Mock()
+        states = []
+        w._set_state = lambda *args: states.append(args)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w.decode_current(show_error=True)
+        return item, w, states, critical
+
+    def test_raw_yuyv_is_rejected_before_worker_decode(self):
+        item, w, states, critical = self._run_mismatch("RAW", "YUYV")
+        w._start_async_decode.assert_not_called()
+        critical.assert_called_once()
+        self.assertIn("Unsupported format 'YUYV' for RAW", critical.call_args.args[2])
+        self.assertEqual(states[-1], ("Decode failed: unsupported format", "error"))
+        self.assertEqual(item.options.format_name, "YUYV")
+
+    def test_all_cross_type_pairs_are_defensively_rejected(self):
+        for image_type, format_name in (
+            ("YUV", "RAW8"),
+            ("RAW", "N/A"),
+            ("Standard Image", "RAW8"),
+        ):
+            with self.subTest(image_type=image_type, format_name=format_name):
+                _item, w, states, critical = self._run_mismatch(image_type, format_name)
+                w._start_async_decode.assert_not_called()
+                critical.assert_called_once()
+                self.assertIn(f"Unsupported format '{format_name}' for {image_type}",
+                              critical.call_args.args[2])
+                self.assertEqual(states[-1], ("Decode failed: unsupported format", "error"))
+
+    def test_silent_initial_mismatch_updates_state_without_modal(self):
+        item = ViewerItem()
+        item.options.file_path = self._path
+        w = _new_window()
+        w.panel = _StubPanel({"image_type": "RAW", "format_name": "YUYV"})
+        w._current_item = lambda: item
+        w._start_async_decode = mock.Mock()
+        states = []
+        w._set_state = lambda *args: states.append(args)
+        with mock.patch.object(app_module.QMessageBox, "critical") as critical:
+            w.decode_current(show_error=False)
+        critical.assert_not_called()
+        w._start_async_decode.assert_not_called()
+        self.assertEqual(states[-1], ("Decode failed: unsupported format", "error"))
+
+
 class OnDemandReadTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="rv-on-demand-")
@@ -211,7 +796,7 @@ class OnDemandReadTests(unittest.TestCase):
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, dec_item, opts, eff, cache_key = captured[0]
+        data, dec_item, opts, eff, cache_key, show_error = captured[0]
         # 4 bytes for one frame, not the whole 40-byte file
         self.assertEqual(data, b"\x02\x02\x02\x02")
         self.assertEqual(len(data), 4)
@@ -219,6 +804,7 @@ class OnDemandReadTests(unittest.TestCase):
         self.assertIs(dec_item, item)
         self.assertIs(opts, item.options)
         self.assertIsInstance(cache_key, str)
+        self.assertTrue(show_error)
 
     def test_decode_current_frame_offset_with_base_offset(self):
         item = ViewerItem()
@@ -241,10 +827,11 @@ class OnDemandReadTests(unittest.TestCase):
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, _item, _opts, eff, cache_key = captured[0]
+        data, _item, _opts, eff, cache_key, show_error = captured[0]
         self.assertEqual(eff, 8)
         self.assertEqual(data, b"\x02\x02\x02\x02")
         self.assertIsInstance(cache_key, str)
+        self.assertTrue(show_error)
 
     def test_apply_warn_mismatch_gates_decode(self):
         """Only Apply pops the mismatch dialog; declining aborts the decode."""

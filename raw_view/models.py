@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import QSettings
 
+from .formats import RAW_BITS, YUV_BYTES_PER_PIXEL
 from .fourcc_data import FourCCEntry
 
 
@@ -16,6 +17,121 @@ from .fourcc_data import FourCCEntry
 
 BAYER_PATTERNS = ["RGGB", "GRBG", "GBRG", "BGGR"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+
+# Sensor-preset format choices share the actual codec registries instead of a
+# separately maintained UI list.  ``YOnly`` is the UI alias for YOnly8; the
+# other valid stored YOnly<N> values remain explicit choices so imported / old
+# presets are never hidden by an artificial RAW-vs-YUV grouping.
+PRESET_RAW_FORMATS = tuple(RAW_BITS)
+PRESET_YUV_FORMATS = tuple(YUV_BYTES_PER_PIXEL)
+PRESET_STANDARD_FORMATS = ("N/A",)
+PRESET_IMAGE_TYPES = ("RAW", "YUV", "Standard Image")
+PRESET_FORMATS = PRESET_RAW_FORMATS + PRESET_YUV_FORMATS + PRESET_STANDARD_FORMATS
+PRESET_FILTER_ALL = "All formats"
+PRESET_FILTER_CURRENT = "Current format"
+
+
+def normalize_preset_image_type(value: object) -> str:
+    """Coerce legacy/programmatic preset image types to stable text."""
+    return str(value or "").strip()
+
+
+def normalize_preset_format_name(value: object) -> str:
+    """Coerce legacy/programmatic preset format values to stable text.
+
+    Old QSettings/JSON may contain an integer, null, or another non-string
+    value.  Format names are identifiers, so a predictable stripped string is
+    safer than letting filter/UI code call ``.strip()`` on arbitrary objects.
+    """
+    return str(value or "").strip()
+
+
+def is_supported_preset_format(value: object) -> bool:
+    """Whether *value* is one of the actual RAW/YUV/standard decoder formats.
+
+    This is intentionally type-agnostic for format-filter population.  Decode
+    UI and runtime validation must use :func:`is_supported_preset_format_for_type`
+    so a globally real format (for example YUYV) cannot be used as RAW.
+    """
+    return normalize_preset_format_name(value) in PRESET_FORMATS
+
+
+def is_supported_preset_format_for_type(image_type: object, format_name: object) -> bool:
+    """Whether a stored format is legitimate for the given preset image type.
+
+    Presets imported from older/manual JSON may pair otherwise valid identifiers
+    with the wrong type (RAW/YUYV, YUV/RAW8, Standard Image/RAW8).  Such a pair
+    is not decoder-safe and must never be allowed to silently route through the
+    other type's decode branch.
+    """
+    image_kind = normalize_preset_image_type(image_type)
+    fmt = normalize_preset_format_name(format_name)
+    if image_kind == "RAW":
+        return fmt in PRESET_RAW_FORMATS
+    if image_kind == "YUV":
+        return fmt in PRESET_YUV_FORMATS
+    if image_kind == "Standard Image":
+        return fmt in PRESET_STANDARD_FORMATS
+    return False
+
+
+def preset_format_filter_choices(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...] = (),
+    *,
+    include_current: bool = False,
+) -> list[str]:
+    """Return stable, complete format-filter choices for sensor presets.
+
+    Registry formats always come first (so an empty list or future imports still
+    expose every valid format); unknown legacy/imported ``format_name`` values
+    are appended in first-seen order to keep them selectable rather than hiding
+    user data.  The UI-only *Current format* sentinel is optional because the
+    manager does not have a live decode-panel format to resolve.
+    """
+    choices = [PRESET_FILTER_ALL]
+    if include_current:
+        choices.append(PRESET_FILTER_CURRENT)
+    choices.extend(PRESET_FORMATS)
+    seen = set(choices)
+    for preset in presets:
+        fmt = normalize_preset_format_name(getattr(preset, "format_name", ""))
+        if fmt and fmt not in seen:
+            choices.append(fmt)
+            seen.add(fmt)
+    return choices
+
+
+def filter_sensor_presets(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...],
+    query: str = "",
+    format_filter: str = PRESET_FILTER_ALL,
+    current_format: str = "",
+) -> list["SensorPreset"]:
+    """Filter presets by case-insensitive name and exact stored format.
+
+    The two conditions are ANDed.  ``Current format`` resolves to
+    *current_format*; when there is no meaningful current format (empty/N/A),
+    it intentionally produces no result instead of accidentally loading a
+    preset for another image type.
+    """
+    needle = str(query or "").strip().casefold()
+    selected_format = normalize_preset_format_name(format_filter) or PRESET_FILTER_ALL
+    if selected_format == PRESET_FILTER_CURRENT:
+        selected_format = normalize_preset_format_name(current_format)
+        if not selected_format or selected_format == "N/A":
+            return []
+    return [
+        preset for preset in presets
+        if (
+            not needle
+            or needle in str(getattr(preset, "name", "") or "").casefold()
+        )
+        and (
+            selected_format == PRESET_FILTER_ALL
+            or normalize_preset_format_name(getattr(preset, "format_name", "")) == selected_format
+        )
+    ]
+
 
 # Common output resolutions offered as one-click checkboxes in the
 # multi-variant generator. Users can also add custom sizes.
@@ -31,7 +147,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.6"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -160,7 +276,13 @@ class SensorPreset:
 
     @classmethod
     def from_dict(cls, data: dict) -> "SensorPreset":
-        """Build a preset from a (possibly partial) dict, falling back to defaults."""
+        """Build a preset from a possibly partial/legacy mapping.
+
+        Persisted settings should not prevent the GUI from starting merely
+        because an older/manual JSON entry contains a non-mapping value.
+        """
+        if not isinstance(data, dict):
+            data = {}
         defaults = cls()
         merged = {f: data.get(f, getattr(defaults, f)) for f in defaults.__dataclass_fields__}
         # Sanity-coerce numeric fields.
@@ -169,7 +291,9 @@ class SensorPreset:
                 merged[k] = int(merged[k])
             except (TypeError, ValueError):
                 merged[k] = getattr(defaults, k)
-        merged["name"] = str(merged.get("name", "")).strip()
+        merged["name"] = str(merged.get("name", "") or "").strip()
+        merged["image_type"] = normalize_preset_image_type(merged.get("image_type", ""))
+        merged["format_name"] = normalize_preset_format_name(merged.get("format_name", ""))
         return cls(**merged)
 
 

@@ -8,24 +8,28 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QComboBox,
     QFileDialog,
     QInputDialog,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +55,7 @@ from raw_view.models import (
     SensorPreset,
     ViewerItem,
     build_ui_stylesheet,
+    is_supported_preset_format_for_type,
     dpi_to_dots_per_meter,
 )
 
@@ -357,6 +362,10 @@ class MainWindow(QMainWindow):
         # 解码期间用户翻帧/改参数/外部替换文件时，不能用“当前 item 状态”给旧结果
         # 错绑一个新 key。
         self._pending_cache_key: str | None = None
+        # 与 generation + pending item 同步保存的错误展示意图。首次按默认参数
+        # 自动解码可静默失败；后续用户 Apply 的失败必须弹框。不能用全局裸 flag，
+        # 否则旧 worker 的迟到 error 会吞掉/污染新请求的意图。
+        self._pending_decode_show_error: bool = True
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -444,6 +453,7 @@ class MainWindow(QMainWindow):
 
         self._build_menus()
         self._build_toolbar()
+        self._install_apply_shortcut_guard()
         self._refresh_recent_files_menu()
         self.panel.set_enabled(False)
 
@@ -538,6 +548,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(clear_recent_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
+
+        # ── Decode ──
+        # Ctrl+A is deliberately assigned at the user's request even though it
+        # is normally Select All.  _install_apply_shortcut_guard() preserves
+        # standard text-selection behavior for editable controls first.
+        decode_menu = menu.addMenu("Decode")
+        self.apply_action = QAction("Apply", self)
+        self.apply_action.setShortcut("Ctrl+A")
+        self.apply_action.setShortcutContext(Qt.WindowShortcut)
+        self.apply_action.setToolTip("Apply current decode parameters (Ctrl+A)")
+        self.apply_action.triggered.connect(self._trigger_apply_shortcut)
+        self.addAction(self.apply_action)
+        decode_menu.addAction(self.apply_action)
 
         # ── Navigate ──
         nav_menu = menu.addMenu("Navigate")
@@ -684,6 +707,64 @@ class MainWindow(QMainWindow):
         help_icon = self._build_action_icon(ACTION_ICON_NAMES["help"])
         help_action = toolbar.addAction(help_icon, "Help")
         help_action.triggered.connect(self.show_help)
+
+    # ── Apply shortcut guard ─────────────────────────────────────────
+
+    def _install_apply_shortcut_guard(self) -> None:
+        """Install a focused event filter that preserves Ctrl+A text selection.
+
+        Qt normally resolves a window shortcut before the target widget's
+        default key handler.  Since the requested Ctrl+A conflicts with Select
+        All, install this MainWindow as a filter on its concrete editable child
+        controls.  This keeps the protection local to the main window (rather
+        than accumulating application-wide filters for every window instance)
+        while covering panel searches, spinbox editors, and editable combos.
+        """
+        editable_classes = (QLineEdit, QTextEdit, QPlainTextEdit)
+        for widget in self.findChildren(editable_classes):
+            widget.installEventFilter(self)
+        for combo in self.findChildren(QComboBox):
+            if combo.isEditable() and combo.lineEdit() is not None:
+                combo.lineEdit().installEventFilter(self)
+
+    @staticmethod
+    def _is_ctrl_a_event(event) -> bool:
+        return (
+            event.type() == QEvent.KeyPress
+            and event.key() == Qt.Key_A
+            and event.modifiers() == Qt.ControlModifier
+        )
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 — Qt override
+        if self._is_ctrl_a_event(event) and isinstance(
+            watched, (QLineEdit, QTextEdit, QPlainTextEdit),
+        ):
+            # A Ctrl+A QAction would otherwise be resolved before this widget's
+            # default key handler.  Select explicitly and consume so QLineEdit,
+            # QTextEdit, QPlainTextEdit, QSpinBox, and editable QComboBox line
+            # editors retain their expected native Select All behavior.
+            watched.selectAll()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _trigger_apply_shortcut(self) -> None:
+        """Run the exact Apply handler only when the viewer is actionable."""
+        # ControlPanel.set_enabled(False) intentionally disables child controls
+        # rather than the panel container itself; the Apply button is therefore
+        # the authoritative existing eligibility gate (also covers frame-size
+        # safety gating that disables Apply while an item remains open).
+        if self._current_item() is None or not self.panel.apply_btn.isEnabled():
+            return
+        # Do not let a modal dialog/manager/save dialog accidentally apply the
+        # main viewer's panel parameters while it owns user interaction.
+        modal = QApplication.activeModalWidget()
+        if modal is not None and modal is not self:
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        self._on_apply_clicked()
 
     # ── Theme & icons ────────────────────────────────────────────────
 
@@ -942,7 +1023,9 @@ class MainWindow(QMainWindow):
         for path in paths:
             self._open_item(path, decode=False)
         if paths:
-            self.decode_current()
+            # First automatic decode uses defaults; a size/format mismatch must
+            # not interrupt the user before they can enter the real parameters.
+            self.decode_current(show_error=False)
 
     # ── File open ─────────────────────────────────────────────────────
 
@@ -959,7 +1042,7 @@ class MainWindow(QMainWindow):
         for path in paths:
             self._open_item(path, decode=False, source="explicit")
         if paths:
-            self.decode_current()
+            self.decode_current(show_error=False)
 
     def _open_item(self, path: str, decode: bool, source: str = "auto") -> None:
         """Open one file into a new tab.
@@ -1044,7 +1127,10 @@ class MainWindow(QMainWindow):
         self._update_center_stack()
 
         if decode:
-            self.decode_current()
+            # Direct open/navigation is an initial automatic decode.  Default
+            # RAW12/2560x1440 frequently mismatches a newly opened capture, so
+            # errors are recorded in state/logs but do not block parameter entry.
+            self.decode_current(show_error=False)
 
     def _reject_open_feedback(self, message: str) -> None:
         """任何被拒绝打开的原因都要让用户看到，绝不只有 logger。
@@ -1371,7 +1457,8 @@ class MainWindow(QMainWindow):
         if frame_index == item.current_frame:
             return
         item.current_frame = max(0, min(frame_index, max(0, item.total_frames - 1)))
-        self.decode_current()
+        # A frame-navigation click is an explicit user decode action.
+        self.decode_current(show_error=True)
 
     def _nav_frame(self, item: ViewerItem, delta: int) -> None:
         """Navigate frames by delta (-1 prev, +1 next) for any item (not just current)."""
@@ -1379,9 +1466,9 @@ class MainWindow(QMainWindow):
         if 0 <= new_index < item.total_frames:
             item.current_frame = new_index
             item.frame_nav.set_frame_index(new_index)
-            # If this is the current visible tab, decode immediately
+            # If this is the current visible tab, decode immediately.
             if item is self._current_item():
-                self.decode_current()
+                self.decode_current(show_error=True)
 
     def _on_panel_zoom_changed(self, percent: int) -> None:
         """Zoom slider changed."""
@@ -1401,7 +1488,7 @@ class MainWindow(QMainWindow):
         since the default parameters won't match arbitrary inputs until the
         user has actually configured them and pressed Apply.
         """
-        self.decode_current(warn_mismatch=True)
+        self.decode_current(warn_mismatch=True, show_error=True)
 
     @staticmethod
     def _remaining_bytes(path: str, offset: int) -> int | None:
@@ -1454,16 +1541,45 @@ class MainWindow(QMainWindow):
         except Exception:
             return -1
 
-    def decode_current(self, warn_mismatch: bool = False) -> None:
+    def decode_current(
+        self, warn_mismatch: bool = False, show_error: bool = True,
+    ) -> None:
+        """Decode the current item.
+
+        ``show_error`` is an intent snapshot, not a global UI mode: initial
+        automatic opens pass ``False`` so a default-parameter mismatch only
+        updates the state/log, while Apply/frame navigation pass ``True`` and
+        retain the normal modal error feedback.  Async requests bind this value
+        to their generation/item in :meth:`_start_async_decode`.
+
+        A valid request first invalidates any in-flight decode *before* preflight
+        checks.  Thus an old worker may still emit for lifecycle cleanup, but it
+        can never redraw/status-overwrite a newer failed/cancelled request.
+        """
         item = self._current_item()
         if item is None:
             return
         path = item.options.file_path
         if not path:
             return
+        # A new decode intent supersedes any previous worker even if this one
+        # fails preflight or the user cancels the mismatch dialog.  Bump the
+        # generation as well as clearing pending refs: _should_apply_decode
+        # then rejects every late finished/error signal while lifecycle signal
+        # connections still quit/delete the old worker/thread normally.
+        self._invalidate_pending_decode()
         self._save_panel_to_item(item)
 
         opts = item.options
+        if not is_supported_preset_format_for_type(opts.image_type, opts.format_name):
+            message = (
+                f"Unsupported format '{opts.format_name}' for {opts.image_type}. "
+                "Select a supported format before decoding."
+            )
+            logger.warning("Decode rejected: %s", message)
+            self._show_decode_error_if_requested(show_error, "Decode Failed", message)
+            self._set_state("Decode failed: unsupported format", "error")
+            return
 
         logger.debug(
             "Decode request: %s (type=%s, format=%s, %dx%d, frame=%d)",
@@ -1486,14 +1602,17 @@ class MainWindow(QMainWindow):
         # Standard Image — decode synchronously; load_bgr_image() reads and
         # decodes the file itself, so we never read the raw bytes here.
         if opts.image_type == "Standard Image":
-            self._decode_standard_image(item, opts)
+            self._decode_standard_image(item, opts, show_error=show_error)
             return
 
         # RAW / YUV: validate remaining bytes against one frame, then seek-read
         # only the current frame interval instead of slurping the whole file.
         actual = self._remaining_bytes(path, effective_offset)
         if actual is None:
-            QMessageBox.critical(self, "Read Error", f"Failed to read file size: {path}")
+            self._show_decode_error_if_requested(
+                show_error, "Read Error", f"Failed to read file size: {path}"
+            )
+            self._set_state("Decode failed", "error")
             return
 
         # 单帧内存上限（512MB）——GUI 与 CLI/batch 统一保护，防超大宽高 OOM
@@ -1502,8 +1621,9 @@ class MainWindow(QMainWindow):
             try:
                 require_decode_size(opts.width, opts.height, expected)
             except FormatError as exc:
-                QMessageBox.critical(
-                    self, "Frame Too Large",
+                self._show_decode_error_if_requested(
+                    show_error,
+                    "Frame Too Large",
                     f"{exc}\n\n请降低宽度/高度，或换用更低位深/非 32-bit 格式。",
                 )
                 self._set_state("Decode rejected: frame too large", "error")
@@ -1543,11 +1663,9 @@ class MainWindow(QMainWindow):
             # 0.4.1-M-1 三版沿用）；先更新 options 与 _on_decode_finished 一致。
             item.options.width = cached.width
             item.options.height = cached.height
-            # 0.3.0-L-3：命中时若先前有同参数 worker 仍在跑，其完成信号会因
-            # pending 置空而不再绘制（_should_apply_decode 拒绝），但让旧线程
-            # 继续跑完 + 重复写缓存仍是浪费；解引用/断开它，避免重复消费。
-            self._cancel_async_decode()
-            self._pending_decode_item = None
+            # decode_current already invalidated any preceding request before
+            # preflight.  No second cancellation/generation bump is needed here;
+            # cached pixels can now be applied without a late worker competing.
             self._on_decode_success(item, cached.qimage, cached.width, cached.height, cached.format_name)
             self._set_state("Decoded (cached)", "ok")
             return
@@ -1555,17 +1673,28 @@ class MainWindow(QMainWindow):
         read_len = frame_size if frame_size > 0 else actual
         data = self._read_frame_data(path, effective_offset, read_len)
         if not data and actual > 0:
-            QMessageBox.critical(
-                self, "Read Error",
+            self._show_decode_error_if_requested(
+                show_error,
+                "Read Error",
                 f"Failed to read {read_len} bytes at offset {effective_offset}: {path}",
             )
+            self._set_state("Decode failed", "error")
             return
 
         # RAW/YUV — async. The exact key representing these bytes is passed to
         # the starter; it is saved only after any old worker is disconnected.
-        self._start_async_decode(data, item, opts, effective_offset, cache_key)
+        self._start_async_decode(
+            data, item, opts, effective_offset, cache_key, show_error,
+        )
 
-    def _decode_standard_image(self, item: ViewerItem, opts: DecodeOptions) -> None:
+    def _show_decode_error_if_requested(self, show_error: bool, title: str, message: str) -> None:
+        """Show a decode modal only for an explicit user-requested decode."""
+        if show_error:
+            QMessageBox.critical(self, title, message)
+
+    def _decode_standard_image(
+        self, item: ViewerItem, opts: DecodeOptions, show_error: bool = True,
+    ) -> None:
         try:
             bgr = load_bgr_image(opts.file_path)
             rgb = bgr[:, :, ::-1]
@@ -1580,7 +1709,7 @@ class MainWindow(QMainWindow):
             self._on_decode_success(item, qimg, w, h, "Standard Image")
         except Exception as exc:
             logger.exception("Failed to decode standard image: %s", opts.file_path)
-            QMessageBox.critical(self, "Decode Failed", str(exc))
+            self._show_decode_error_if_requested(show_error, "Decode Failed", str(exc))
             self._set_state("Decode failed", "error")
         finally:
             # A standard-image decode is synchronous and takes over the
@@ -1594,15 +1723,20 @@ class MainWindow(QMainWindow):
         opts: DecodeOptions,
         effective_offset: int,
         cache_key: str | None = None,
+        show_error: bool = True,
     ) -> None:
-        # Detach from any in-flight decode, then bump the generation so its
-        # (unavoidably late) results are recognised as stale and dropped.
-        self._cancel_async_decode()
-        self._decode_generation += 1
+        # decode_current already invalidated older work before preflight.  Keep
+        # this direct-call guard too: callers/tests using _start_async_decode
+        # standalone still supersede their predecessor exactly once.
+        self._invalidate_pending_decode()
         self._pending_decode_item = item
         # _cancel_async_decode() clears the old request's key; only now is it
         # safe to associate the new worker with the exact bytes/key it reads.
         self._pending_cache_key = cache_key
+        # Snapshot UI error intent beside the same generation/item contract as
+        # the worker.  _on_decode_error only reads it after _should_apply_decode
+        # accepts, so a stale silent error cannot suppress a newer explicit one.
+        self._pending_decode_show_error = bool(show_error)
 
         # Preview/bayer come from the item's own saved options — not whatever
         # the shared panel currently shows — so tab switches can't leak values
@@ -1661,6 +1795,18 @@ class MainWindow(QMainWindow):
         self._set_state("Decoding...", "busy")
         self._thread.start()
 
+    def _invalidate_pending_decode(self) -> None:
+        """Supersede an in-flight request so its late UI signals are stale.
+
+        Worker lifecycle signals deliberately remain connected to their local
+        thread-cleanup lambdas.  This only drops MainWindow ownership and bumps
+        the generation used by :meth:`_should_apply_decode`; it is safe when no
+        worker exists and is used before every valid decode request, including
+        requests that later fail preflight.
+        """
+        self._cancel_async_decode()
+        self._decode_generation = self.__dict__.get("_decode_generation", 0) + 1
+
     def _cancel_async_decode(self) -> None:
         """Detach from any in-flight decode without blocking the UI thread.
 
@@ -1683,6 +1829,7 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._pending_decode_item = None
         self._pending_cache_key = None
+        self._pending_decode_show_error = True
 
     def _disconnect_decode(self) -> None:
         """彻底断开主窗口与在途解码 worker/thread 的连接。
@@ -1817,18 +1964,40 @@ class MainWindow(QMainWindow):
                 generation, self._decode_generation,
             )
             return
+        show_error = self.__dict__.get("_pending_decode_show_error", True)
         self._pending_decode_item = None
-        QMessageBox.critical(self, "Decode Failed", message)
+        self._pending_decode_show_error = True
+        self._show_decode_error_if_requested(show_error, "Decode Failed", message)
         self._set_state("Decode failed", "error")
 
     # ── Save ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _default_display_save_path(file_path: str) -> str:
+        """Build the Save Display dialog's PNG default from the opened file.
+
+        ``Path.stem`` removes precisely the last suffix, preserves Unicode and
+        multi-suffix names (``capture.raw.bin`` → ``capture.raw.png``), and
+        leaves dotfiles useful (``.sensor`` → ``.sensor.png``).  The source
+        directory is deliberately retained so Save Display starts beside the
+        opened image.  An empty/non-file fallback remains usable for test or
+        future synthetic-display callers.
+        """
+        if not file_path:
+            return "image.png"
+        source = Path(file_path)
+        if not source.name:
+            return "image.png"
+        stem = source.stem or source.name
+        return str(source.parent / f"{stem}.png")
 
     def save_display(self) -> None:
         item = self._current_item()
         if item is None or item.current_display is None:
             return
+        initial_path = self._default_display_save_path(item.options.file_path)
         path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Save Image", "", "PNG (*.png);;JPEG (*.jpg *.jpeg)"
+            self, "Save Image", initial_path, "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
         if not path:
             return
@@ -1966,7 +2135,7 @@ class MainWindow(QMainWindow):
                 item.current_frame = 0
                 if item.frame_nav is not None:
                     item.frame_nav.set_frame_index(0)
-                self.decode_current()
+                self.decode_current(show_error=True)
             event.accept()
             return
         if event.key() == Qt.Key_End:
@@ -1975,7 +2144,7 @@ class MainWindow(QMainWindow):
                 item.current_frame = item.total_frames - 1
                 if item.frame_nav is not None:
                     item.frame_nav.set_frame_index(item.current_frame)
-                self.decode_current()
+                self.decode_current(show_error=True)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -2088,9 +2257,14 @@ class MainWindow(QMainWindow):
     # ── Sensor presets ───────────────────────────────────────────────
 
     def _refresh_preset_combo(self, current: str | None = None) -> None:
-        """Reload the preset combo from persisted settings."""
-        names = [p.name for p in self.settings.sensor_presets]
-        self.panel.set_preset_names(names, current=current)
+        """Reload preset selector records without changing active panel options.
+
+        A manager deletion only changes the selector list.  In particular, an
+        active legacy dynamic format must remain selected/disabled until the
+        user explicitly changes format or switches item; otherwise Qt may
+        silently select a neighbouring RAW format and corrupt the item on Apply.
+        """
+        self.panel.set_presets(self.settings.sensor_presets, current=current)
 
     def _on_preset_selected(self, name: str) -> None:
         """User picked a preset — populate the panel and trigger Apply."""
@@ -2234,5 +2408,5 @@ def run(files: list[str] | None = None) -> None:
         for path in files:
             w._open_item(path, decode=False, source="explicit")
         if files:
-            w.decode_current()
+            w.decode_current(show_error=False)
     app.exec_()

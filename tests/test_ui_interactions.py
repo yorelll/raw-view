@@ -30,11 +30,15 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QSize, Qt  # noqa: E402
+from PyQt5.QtCore import QEvent, QSize, Qt  # noqa: E402
+from PyQt5.QtGui import QKeyEvent  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
+    QComboBox,
     QFormLayout,
     QLabel,
+    QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QTabWidget,
     QWidget,
@@ -45,7 +49,12 @@ _APP = QApplication.instance() or QApplication([])
 
 from raw_view.gui.app import MainWindow  # noqa: E402
 from raw_view.gui.panels import ControlPanel  # noqa: E402
-from raw_view.models import ViewerItem  # noqa: E402
+from raw_view.models import (  # noqa: E402
+    PRESET_FILTER_ALL,
+    PRESET_FILTER_CURRENT,
+    SensorPreset,
+    ViewerItem,
+)
 
 
 def _panel() -> ControlPanel:
@@ -133,6 +142,187 @@ def _add_tab(w, name: str) -> ViewerItem:
 
 
 # ── 需求 1/2：条件显隐（无折叠交互） ──────────────────────────────────
+
+
+class MainPanelPresetFilterTests(unittest.TestCase):
+    """主面板 preset 搜索 + 精确 format 过滤的稳定 widget 路径。"""
+
+    def setUp(self):
+        self.p = _panel()
+        self.presets = [
+            SensorPreset(name="Alpha RAW8", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="beta RAW12", image_type="RAW", format_name="RAW12"),
+            SensorPreset(name="Gamma YUYV", image_type="YUV", format_name="YUYV"),
+            SensorPreset(name="YOnly twelve", image_type="YUV", format_name="YOnly12"),
+        ]
+        self.p.set_presets(self.presets)
+
+    def tearDown(self):
+        self.p.close()
+        self.p.deleteLater()
+        QApplication.processEvents()
+
+    def _names(self):
+        return [self.p.preset_combo.itemText(i) for i in range(1, self.p.preset_combo.count())]
+
+    def test_default_current_format_and_switch_refresh(self):
+        # ControlPanel defaults to RAW12, so Current format is a useful default.
+        self.assertEqual(self.p.preset_format_filter_combo.currentText(), PRESET_FILTER_CURRENT)
+        self.assertEqual(self._names(), ["beta RAW12"])
+        self.p.set_type("YUV")
+        self.p.set_format("YUYV")
+        self.assertEqual(self._names(), ["Gamma YUYV"])
+
+    def test_case_insensitive_name_search_and_format_and(self):
+        self.p.preset_format_filter_combo.setCurrentText(PRESET_FILTER_ALL)
+        self.p.preset_search_edit.setText("BETA")
+        self.assertEqual(self._names(), ["beta RAW12"])
+        self.p.preset_format_filter_combo.setCurrentText("RAW8")
+        self.assertEqual(self._names(), [])  # search + format are ANDed
+        self.assertEqual(self.p.preset_combo.currentIndex(), 0)
+        self.p.preset_search_edit.clear()
+        self.assertEqual(self._names(), ["Alpha RAW8"])
+
+    def test_all_exact_formats_and_hidden_selection_are_safe(self):
+        self.p.preset_format_filter_combo.setCurrentText(PRESET_FILTER_ALL)
+        self.assertEqual(
+            self._names(), ["Alpha RAW8", "beta RAW12", "Gamma YUYV", "YOnly twelve"],
+        )
+        emitted: list[str] = []
+        self.p.presetSelected.connect(emitted.append)
+        self.p.preset_combo.setCurrentIndex(self.p.preset_combo.findData("beta RAW12"))
+        self.p._on_preset_activated(self.p.preset_combo.currentIndex())
+        self.assertEqual(emitted, ["beta RAW12"])
+        self.p.preset_format_filter_combo.setCurrentText("RAW8")
+        # Filter hides the old selection and resets to placeholder; it cannot
+        # emit/load the stale RAW12 preset.
+        self.assertEqual(self.p.preset_combo.currentIndex(), 0)
+        self.p._on_preset_activated(0)
+        self.assertEqual(emitted, ["beta RAW12"])
+        self.p.preset_format_filter_combo.setCurrentText(PRESET_FILTER_ALL)
+        self.assertIn("beta RAW12", self._names())
+
+    def test_yonly_stored_bit_depth_is_exact_filter_value(self):
+        self.p.preset_format_filter_combo.setCurrentText("YOnly12")
+        self.assertEqual(self._names(), ["YOnly twelve"])
+        self.assertIn("RAW10 Packed", [
+            self.p.preset_format_filter_combo.itemText(i)
+            for i in range(self.p.preset_format_filter_combo.count())
+        ])
+        self.assertIn("NV61", [
+            self.p.preset_format_filter_combo.itemText(i)
+            for i in range(self.p.preset_format_filter_combo.count())
+        ])
+
+    def test_unknown_legacy_format_is_preserved_and_apply_is_safely_disabled(self):
+        legacy = SensorPreset(
+            name="legacy", image_type="RAW", format_name="VendorRAW", width=111,
+        )
+        self.p.set_presets([legacy])
+        self.p.preset_format_filter_combo.setCurrentText("VendorRAW")
+        self.assertEqual(self._names(), ["legacy"])
+        self.p.set_values(image_type="RAW", format_name="VendorRAW", width=111)
+        self.assertEqual(self.p.format_combo.currentText(), "VendorRAW")
+        self.assertEqual(self.p.get_values()["format_name"], "VendorRAW")
+        self.assertFalse(self.p.apply_btn.isEnabled())
+        self.assertIn("Unsupported format 'VendorRAW' for RAW", self.p.apply_btn.toolTip())
+        # Switching back to a real codec format restores normal Apply behavior.
+        self.p.set_format("RAW8")
+        self.assertTrue(self.p.apply_btn.isEnabled())
+
+    def test_type_format_mismatches_disable_apply_and_preserve_identifier(self):
+        for image_type, format_name in (
+            ("RAW", "YUYV"),
+            ("YUV", "RAW8"),
+            ("RAW", "N/A"),
+            ("Standard Image", "RAW8"),
+        ):
+            with self.subTest(image_type=image_type, format_name=format_name):
+                self.p.set_values(image_type=image_type, format_name=format_name)
+                self.assertEqual(self.p.get_values()["format_name"], format_name)
+                self.assertFalse(self.p.apply_btn.isEnabled())
+                self.assertIn(
+                    f"Unsupported format '{format_name}' for {image_type}",
+                    self.p.apply_btn.toolTip(),
+                )
+
+    def test_type_switch_or_legal_format_restores_apply(self):
+        self.p.set_values(image_type="RAW", format_name="YUYV")
+        self.assertFalse(self.p.apply_btn.isEnabled())
+        # The mismatched value remains selected; changing its type makes it a
+        # legitimate YUV decode format and immediately restores Apply.
+        self.p.set_type("YUV")
+        self.p.set_format("YUYV")
+        self.assertTrue(self.p.apply_btn.isEnabled())
+        self.p.set_values(image_type="YUV", format_name="YOnly12")
+        self.assertTrue(self.p.apply_btn.isEnabled())
+        self.p.set_type("Standard Image")
+        self.p.set_format("N/A")
+        self.assertTrue(self.p.apply_btn.isEnabled())
+
+    def test_dynamic_legacy_format_cleanup_lifecycle(self):
+        self.p.set_values(image_type="RAW", format_name="VendorRAW")
+        self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
+        self.p.set_values(image_type="RAW", format_name="RAW8")
+        self.assertEqual(self.p.format_combo.findText("VendorRAW"), -1)
+        # Current legacy item stays selected across selector refresh even when
+        # its preset record disappeared; it must not fall back to RAW32.
+        legacy = SensorPreset(name="legacy", image_type="RAW", format_name="VendorRAW")
+        self.p.set_presets([legacy])
+        self.p.set_values(image_type="RAW", format_name="VendorRAW")
+        self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
+        # A second inactive legacy entry is pruned on refresh, while the actual
+        # current VendorRAW must survive manager deletion.
+        self.p._add_dynamic_format("VendorB")
+        self.p.set_presets([])
+        self.assertEqual(self.p.format_combo.currentText(), "VendorRAW")
+        self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
+        self.assertEqual(self.p.format_combo.findText("VendorB"), -1)
+        self.assertFalse(self.p.apply_btn.isEnabled())
+        # Explicit legal user choice removes the stale temporary entry.
+        self.p.set_format("RAW8")
+        self.assertEqual(self.p.format_combo.findText("VendorRAW"), -1)
+        self.assertTrue(self.p.apply_btn.isEnabled())
+
+    def test_direct_bad_image_type_does_not_raise_or_enable_apply(self):
+        for raw_type in (12, None, [], {}):
+            with self.subTest(raw_type=raw_type):
+                self.p.set_values(image_type=raw_type, format_name="RAW8")
+                self.assertEqual(self.p.type_combo.currentText(), str(raw_type or "").strip())
+                self.assertFalse(self.p.apply_btn.isEnabled())
+                self.assertIn("Unsupported format 'RAW8'", self.p.apply_btn.toolTip())
+        self.p.set_values(image_type="RAW", format_name="RAW8")
+        self.assertTrue(self.p.apply_btn.isEnabled())
+
+    def test_unknown_type_to_compatible_type_preserves_exact_format_atomically(self):
+        for fmt in ("RAW8", "RAW10", "RAW12", "RAW16", "RAW10 Packed"):
+            with self.subTest(fmt=fmt):
+                self.p.set_values(image_type="VendorType", format_name=fmt)
+                seen_types: list[str] = []
+                changed: list[object] = []
+                self.p.typeChanged.connect(seen_types.append)
+                self.p.valuesChanged.connect(lambda: changed.append(object()))
+                self.p.set_type("RAW")
+                self.assertEqual(self.p.type_combo.currentText(), "RAW")
+                self.assertEqual(self.p.format_combo.currentText(), fmt)
+                self.assertEqual(self.p.get_values()["format_name"], fmt)
+                self.assertTrue(self.p.apply_btn.isEnabled())
+                self.assertEqual(seen_types[-1:], ["RAW"])
+                self.assertEqual(changed, [], "atomic programmatic correction must not dirty item")
+
+    def test_unknown_type_to_yuv_preserves_yuv_and_incompatible_uses_default(self):
+        for fmt in ("YUYV", "YOnly12"):
+            with self.subTest(fmt=fmt):
+                self.p.set_values(image_type="VendorType", format_name=fmt)
+                self.p.set_type("YUV")
+                self.assertEqual(self.p.type_combo.currentText(), "YUV")
+                self.assertEqual(self.p.get_values()["format_name"], fmt)
+                self.assertTrue(self.p.apply_btn.isEnabled())
+        self.p.set_values(image_type="VendorType", format_name="YUYV")
+        self.p.set_type("RAW")
+        self.assertEqual(self.p.type_combo.currentText(), "RAW")
+        self.assertEqual(self.p.format_combo.currentText(), "RAW12")
+        self.assertTrue(self.p.apply_btn.isEnabled())
 
 
 class AdvancedVisibilityTests(unittest.TestCase):
@@ -964,6 +1154,98 @@ class TabMenuDispatchTests(unittest.TestCase):
         self.assertEqual(w.items, items[:3])
 
 
+# ── 需求 7：Ctrl+A Apply 快捷键 ────────────────────────────────────────
+
+
+class ApplyShortcutTests(unittest.TestCase):
+    """Ctrl+A 必须走同一 Apply handler，同时绝不抢可编辑控件的 Select All。"""
+
+    def setUp(self):
+        self.w = MainWindow()
+        self.w.show()
+        self.item = ViewerItem()
+        self.w._current_item = lambda: self.item
+        self.w.panel.set_enabled(True)
+        self.called = []
+        self.w._on_apply_clicked = lambda: self.called.append("apply")
+        _APP.processEvents()
+
+    def tearDown(self):
+        self.w.close()
+        self.w.deleteLater()
+        _APP.processEvents()
+
+    @staticmethod
+    def _ctrl_a(widget):
+        return QApplication.sendEvent(
+            widget, QKeyEvent(QEvent.KeyPress, Qt.Key_A, Qt.ControlModifier),
+        )
+
+    def test_non_text_focus_triggers_the_existing_apply_handler_once(self):
+        self.w.item_tabs.setFocus()
+        _APP.processEvents()
+        self._ctrl_a(self.w.item_tabs)
+        _APP.processEvents()
+        self.assertEqual(self.called, ["apply"])
+        self.assertEqual(self.w.apply_action.shortcut().toString(), "Ctrl+A")
+        self.assertEqual(self.w.apply_action.shortcutContext(), Qt.WindowShortcut)
+
+    def test_action_uses_apply_handler_with_explicit_decode_intent(self):
+        """The QAction calls _on_apply_clicked, not a shortcut-specific decode path."""
+        captured = []
+        self.w._on_apply_clicked = MainWindow._on_apply_clicked.__get__(self.w, MainWindow)
+        self.w.decode_current = lambda *args, **kwargs: captured.append((args, kwargs))
+        self.w.apply_action.trigger()
+        self.assertEqual(captured, [((), {"warn_mismatch": True, "show_error": True})])
+
+    def test_main_panel_search_line_edit_keeps_select_all(self):
+        search = self.w.panel.preset_search_edit
+        search.setText("find these presets")
+        search.setFocus()
+        _APP.processEvents()
+        self._ctrl_a(search)
+        _APP.processEvents()
+        self.assertEqual(search.selectedText(), "find these presets")
+        self.assertEqual(self.called, [])
+
+    def test_plain_text_editor_keeps_select_all(self):
+        editor = QPlainTextEdit("select this text", self.w)
+        editor.show()
+        editor.setFocus()
+        _APP.processEvents()
+        self._ctrl_a(editor)
+        _APP.processEvents()
+        self.assertEqual(editor.textCursor().selectedText(), "select this text")
+        self.assertEqual(self.called, [])
+        editor.deleteLater()
+
+    def test_editable_combo_line_edit_keeps_select_all(self):
+        combo = QComboBox(self.w)
+        combo.setEditable(True)
+        combo.addItem("combo editable text")
+        combo.show()
+        combo.lineEdit().setFocus()
+        _APP.processEvents()
+        self._ctrl_a(combo.lineEdit())
+        _APP.processEvents()
+        self.assertEqual(combo.lineEdit().selectedText(), "combo editable text")
+        self.assertEqual(self.called, [])
+        combo.deleteLater()
+
+    def test_no_item_or_disabled_panel_never_triggers(self):
+        self.w._current_item = lambda: None
+        self.w.item_tabs.setFocus()
+        self._ctrl_a(self.w.item_tabs)
+        self.assertEqual(self.called, [])
+        self.w._current_item = lambda: self.item
+        self.w.panel.set_enabled(False)
+        self._ctrl_a(self.w.item_tabs)
+        self.assertEqual(self.called, [])
+
+    def test_apply_button_tooltip_advertises_shortcut(self):
+        self.assertIn("Ctrl+A", self.w.panel.apply_btn.toolTip())
+
+
 # ── 需求 6：Help 快捷键章节 ──────────────────────────────────────────
 
 
@@ -986,6 +1268,7 @@ class HelpShortcutSectionTests(unittest.TestCase):
             for k, _d in items:
                 keys.add(k)
         for needle in (
+            "Ctrl+A",
             "Up / Left", "Down / Right", "Home", "End",
             "Ctrl+Left", "Ctrl+Right",
             "Ctrl+0", "Ctrl+1",
@@ -1056,7 +1339,8 @@ class HelpShortcutSectionTests(unittest.TestCase):
         self.assertIn("Qt.Key_Home", src)
         self.assertIn("Qt.Key_End", src)
         self.assertIn("Qt.Key_Escape", src)
-        # 字符串形式的 setShortcut 都在实现里注册过
+        # 字符串形式的 setShortcut 都在实现里注册过（Ctrl+A 是 Decode/Apply）。
+        self.assertIn("Ctrl+A", impl_shortcuts)
         for sc in ("Ctrl+Left", "Ctrl+Right", "F11",
                    "Ctrl+0", "Ctrl+1",
                    "Ctrl+R", "Ctrl+Shift+R", "Ctrl+H", "Ctrl+Shift+V"):
@@ -1066,7 +1350,7 @@ class HelpShortcutSectionTests(unittest.TestCase):
         self.assertIn("QKeySequence.ZoomOut", src)
         # 快捷键数据源写出的每个字符串快捷键都要出现在实现里（Zoom +/- 由
         # 常量提供，通过 QKeySequence.ZoomIn/Out 校验）
-        for sc in ("Ctrl+Left", "Ctrl+Right", "F11",
+        for sc in ("Ctrl+A", "Ctrl+Left", "Ctrl+Right", "F11",
                    "Ctrl+0", "Ctrl+1",
                    "Ctrl+R", "Ctrl+Shift+R", "Ctrl+H", "Ctrl+Shift+V"):
             self.assertIn(sc, short, f"SHORTCUTS 应写出 {sc}")
