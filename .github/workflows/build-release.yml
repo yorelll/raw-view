@@ -196,24 +196,28 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**324 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**367 passed**）。
 
-            ### 🐛 修复（0.4.5）
+            ### 🐛 修复（0.4.6）
 
-            - **中文/非 ASCII 文件名解码失败**：Windows 下 `cv2.imread`/`cv2.imwrite` 走窄字符路径 API，中文等非 ASCII
-              文件名打开显示 "decode failed"、写 PNG/JPG 静默不生成。**修复**：读侧改 `np.fromfile`+`cv2.imdecode`，
-              写侧改 `cv2.imencode`+`numpy.tofile`（全部在 Python 层处理路径）；写盘失败（编码失败/写失败/0 字节）
-              统一抛显式异常，不再假成功。
-            - **无后缀文件无法打开**：无扩展名的 RAW/BIN（如 `output`）在拖拽/目录扫描/同目录导航中全部被过滤。
-              **修复**：无后缀文件按 RAW 打开；目录扫描/同目录导航对无后缀条目做 4KB 内容嗅探（含 NUL 或非打印控制字符
-              占比较高）判定为二进制候选，纯文本（README/LICENSE）与无后缀文件夹不误入；用户显式选择（对话框/启动参数/
-              最近文件）允许未知后缀（如 `.dat`）按 RAW 打开，但 `.exe/.dll/.bat/.cmd/.sys/.scr/.ps1/.vbs` 等 16 种
-              可执行/脚本后缀一律拒绝，并在状态栏给出明确提示。
-            - 新增中文路径读写、无后缀文件/文件夹区分、危险后缀拦截等回归测试；全量测试 **324 passed, 53 subtests**。
+            - **保存图像没有可用默认文件名**：Save Display 对话框此前初始路径为空。**修复**：以当前输入文件的
+              basename 去除最后一个后缀作为保存名，并保留原目录；例如 `capture.raw.bin` → `capture.raw.png`，
+              无后缀与中文路径同样适用，手动输入裸名时仍按 PNG/JPEG 筛选器补后缀。
+            - **首次打开 RAW/YUV 被默认参数错误阻断**：小文件首次自动套用 RAW12/2560×1440 时，默认参数不匹配会弹出
+              Decode Failed，用户必须先关闭弹窗才能修改参数。**修复**：首次自动解码的错误仅更新状态/日志；用户随后
+              明确点击 Apply、翻帧或修改参数产生的错误仍弹窗。解码请求携带独立错误展示意图并在预检前废弃旧 worker，
+              避免迟到结果覆盖当前错误状态。
+            - **legacy/imported preset 可能静默改坏或误解码**：未知格式、损坏的 type/format 字段或 RAW/YUV 类型错配
+              可能回退为默认格式、触发错误 decoder。**修复**：保留原始 legacy identifier 供筛选、编辑、导入导出；
+              不支持或不匹配的组合明确禁用 Apply，运行时再次拦截，只有用户主动选择兼容格式才允许解码。
+            - 新增保存路径、preset 兼容/过滤、静默解码竞争与快捷键等回归测试；全量测试 **367 passed, 93 subtests**。
 
-            ### 🆕 功能（0.4.5）
-            - **支持无后缀 RAW/BIN 文件**：无扩展名文件可直接打开与拖入，目录扫描自动纳入二进制、排除纯文本与文件夹。
-            - **危险后缀拦截**：显式打开 `.exe` 等可执行/脚本文件时给出明确拒绝提示，不再无声失败。
+            ### 🆕 新功能 / 增强（0.4.6）
+            - **Preset 搜索与精确格式过滤**：主界面新增名称搜索，以及“全部 / 当前格式 / 每个实际格式”过滤；
+              Preset Manager 保留搜索并加入相同 format filter，两个条件按 AND 组合。支持 RAW、Packed RAW、
+              YOnly bit-depth 与所有 YUV 子格式，列表刷新、编辑、删除、导入导出均保持安全选择。
+            - **Ctrl+A 快速 Apply**：图像视图或主窗口非文本控件有焦点时，`Ctrl+A` 走同一条 Apply 解码路径；
+              在搜索框、数值输入框、可编辑下拉框和文本编辑器中仍保持标准的 Select All，不会误解码。
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
