@@ -23,6 +23,10 @@ from unittest import mock
 
 import numpy as np
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 
 class DecodeCacheTests(unittest.TestCase):
     """P1-1：LRU 解码缓存。"""

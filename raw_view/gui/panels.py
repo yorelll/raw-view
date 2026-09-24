@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -28,15 +29,14 @@ from raw_view.gui.image_utils import _format_size
 from raw_view.models import (
     ACTION_ICON_COLOR,
     BAYER_PATTERNS,
-    PRESET_FILTER_ALL,
-    PRESET_FILTER_CURRENT,
-    PRESET_IMAGE_TYPES,
+    PRESET_CATEGORY_ALL,
+    PRESET_CATEGORY_CHOICES,
     SensorPreset,
-    filter_sensor_presets,
+    filter_sensor_presets_by_category,
     is_supported_preset_format_for_type,
     normalize_preset_format_name,
     normalize_preset_image_type,
-    preset_format_filter_choices,
+    search_sensor_presets,
 )
 
 
@@ -50,6 +50,42 @@ def _qta_icon(name: str):
         from PyQt5.QtGui import QIcon
 
         return QIcon()
+
+
+class PresetComboBox(QComboBox):
+    """Editable preset selector that announces native-arrow popup requests."""
+
+    popupRequested = pyqtSignal()
+
+    def showPopup(self) -> None:  # noqa: N802 — Qt virtual override
+        self.popupRequested.emit()
+        super().showPopup()
+
+
+class _PresetQueryLineEdit(QLineEdit):
+    """Line edit that asks the panel to detach a settled preset before editing."""
+
+    editingStarted = pyqtSignal()
+
+    @staticmethod
+    def _is_editing_key(event) -> bool:
+        key = event.key()
+        if key in (Qt.Key_Backspace, Qt.Key_Delete):
+            return True
+        if event.matches(QKeySequence.Paste) or event.matches(QKeySequence.Cut):
+            return True
+        # Keep Ctrl+A as native Select All (not an edit transition); Ctrl+V is
+        # handled above.  AltGr printable input still carries text and is valid.
+        return bool(event.text()) and not (event.modifiers() & Qt.ControlModifier)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        if self._is_editing_key(event):
+            self.editingStarted.emit()
+        super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802 — Qt virtual override
+        self.editingStarted.emit()
+        super().insertFromMimeData(source)
 
 
 class ControlPanel(QWidget):
@@ -125,35 +161,57 @@ class ControlPanel(QWidget):
         content.setObjectName("controlPanelContent")
 
         # ── Sensor preset controls (shown at the very top) ──────────────
-        # The selector stays non-editable: search is a dedicated text field so
-        # arbitrary typed text can never be mistaken for (or load as) a preset.
+        # One editable combo unifies selection and name search.  Typed text is
+        # strictly query state: only an item carrying a preset-name userData can
+        # emit presetSelected, so arbitrary text can never be loaded/saved as a
+        # preset.  Clicking the native arrow intentionally clears a query and
+        # switches to category-filtered dropdown mode.
         self._preset_records: list[SensorPreset] = []
         self._preset_names_only = False  # compatibility path for set_preset_names()
-        self._preset_last_selected_name: str | None = None
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItem(self._PRESET_PLACEHOLDER)
+        # Identity, query, and what the line edit happens to display are separate
+        # states.  In particular, Qt must not turn a selected item's display text
+        # into the next typed search query.
+        self._preset_selected_name: str | None = None
+        self._preset_query = ""
+        self._preset_search_mode = False
+        self._preset_edit_transitioning = False
+        self.preset_combo = PresetComboBox()
+        self.preset_combo.setEditable(True)
+        self.preset_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
         self.preset_combo.setToolTip(
-            "Saved sensor presets. Selecting one fills the form below; "
-            "press Apply to render."
+            "Type to search all saved presets, or use the arrow to browse the selected preset type. "
+            "Structured search: <type:raw + format:raw10 packed>name."
+        )
+        self.preset_combo.setAccessibleName("Search or select sensor preset")
+        self.preset_combo.setAccessibleDescription(
+            "Type a preset name or official <type:... + format:...> search across all saved presets; "
+            "use the arrow to browse by preset type."
         )
         self.preset_combo.setMinimumWidth(96)
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._preset_line_edit = _PresetQueryLineEdit(self.preset_combo)
+        self.preset_combo.setLineEdit(self._preset_line_edit)
+        # QComboBox otherwise installs an inline QCompleter that appends a
+        # matching item suffix to the visible editor.  Candidates are already
+        # provided by our filtered popup; autocomplete must stay off so visible
+        # editor text is always the exact user query.
+        self.preset_combo.setCompleter(None)
+        self._preset_line_edit.setCompleter(None)
+        self._preset_line_edit.setPlaceholderText("Search or select preset…")
+        self._preset_line_edit.setClearButtonEnabled(True)
 
-        self.preset_search_edit = QLineEdit()
-        self.preset_search_edit.setObjectName("presetSearch")
-        self.preset_search_edit.setPlaceholderText("Search presets…")
-        self.preset_search_edit.setClearButtonEnabled(True)
-        self.preset_search_edit.setToolTip(
-            "Filter saved preset names as you type (case-insensitive)."
+        self.preset_category_filter_combo = QComboBox()
+        self.preset_category_filter_combo.setObjectName("presetCategoryFilter")
+        self.preset_category_filter_combo.addItems(PRESET_CATEGORY_CHOICES)
+        self.preset_category_filter_combo.setToolTip(
+            "Browse All, RAW (including Packed), YUV (including YOnly), or Standard images. "
+            "Typed search always covers every type."
         )
-        self.preset_search_edit.setAccessibleName("Search sensor presets")
-
-        self.preset_format_filter_combo = QComboBox()
-        self.preset_format_filter_combo.setObjectName("presetFormatFilter")
-        self.preset_format_filter_combo.setToolTip(
-            "Show presets for the current format, every format, or one exact stored format."
+        self.preset_category_filter_combo.setAccessibleName("Preset type")
+        self.preset_category_filter_combo.setAccessibleDescription(
+            "Choose All, RAW, YUV, or Standard images for dropdown browsing."
         )
-        self.preset_format_filter_combo.setAccessibleName("Filter sensor presets by format")
 
         # Compact icon buttons keep the preset row readable on the narrow
         # panel (text buttons got truncated to "MANAC" etc.).
@@ -178,23 +236,17 @@ class ControlPanel(QWidget):
         for btn in (self.preset_save_btn, self.preset_manage_btn):
             btn.setFixedSize(32, 30)
 
-        preset_row = QWidget()
-        preset_layout = QVBoxLayout(preset_row)
-        preset_layout.setContentsMargins(0, 0, 0, 0)
-        preset_layout.setSpacing(4)
-        preset_select_row = QHBoxLayout()
-        preset_select_row.setContentsMargins(0, 0, 0, 0)
-        preset_select_row.setSpacing(4)
-        preset_select_row.addWidget(self.preset_combo, 1)
-        preset_select_row.addWidget(self.preset_save_btn, 0)
-        preset_select_row.addWidget(self.preset_manage_btn, 0)
-        preset_filter_row = QHBoxLayout()
-        preset_filter_row.setContentsMargins(0, 0, 0, 0)
-        preset_filter_row.setSpacing(4)
-        preset_filter_row.addWidget(self.preset_search_edit, 1)
-        preset_filter_row.addWidget(self.preset_format_filter_combo, 1)
-        preset_layout.addLayout(preset_select_row)
-        preset_layout.addLayout(preset_filter_row)
+        # Preset type and Preset are individual main-form rows so their labels
+        # and fields use precisely the same alignment and sizing rules as Type,
+        # Format, and Bit depth.  The action buttons remain attached only to the
+        # Preset field.
+        preset_select_row = QWidget()
+        preset_select_layout = QHBoxLayout(preset_select_row)
+        preset_select_layout.setContentsMargins(0, 0, 0, 0)
+        preset_select_layout.setSpacing(4)
+        preset_select_layout.addWidget(self.preset_combo, 1)
+        preset_select_layout.addWidget(self.preset_save_btn, 0)
+        preset_select_layout.addWidget(self.preset_manage_btn, 0)
 
         # ── Format parameters ──
         self.type_combo = QComboBox()
@@ -268,9 +320,10 @@ class ControlPanel(QWidget):
         # 彻底移出表单（仅 setVisible 时本机 PyQt5 的 QFormLayout 仍保留行几何，
         # 会在 Format 与 Width 之间留出大段空白，0.4.1 修复）。
         self._main_form = form
-        form.addRow("Preset", preset_row)
+        form.addRow("Preset type", self.preset_category_filter_combo)
+        form.addRow("Preset", preset_select_row)
 
-        # Separator: the Preset row is "preset management"; everything below
+        # Separator: the Preset rows are "preset management"; everything below
         # is "parameter configuration" — divide them so the two functional
         # areas read as distinct groups.
         preset_divider = QFrame()
@@ -335,8 +388,13 @@ class ControlPanel(QWidget):
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
         self.zoom_spin.valueChanged.connect(self._on_spin_zoom)
         self.preset_combo.activated.connect(self._on_preset_activated)
-        self.preset_search_edit.textChanged.connect(self._refresh_preset_combo)
-        self.preset_format_filter_combo.currentTextChanged.connect(self._refresh_preset_combo)
+        self.preset_combo.popupRequested.connect(self._show_preset_popup)
+        # The custom line edit clears settled display text before an edit is
+        # applied.  textEdited then owns all query updates, including the native
+        # clear button's empty string.
+        self._preset_line_edit.editingStarted.connect(self._begin_preset_edit)
+        self._preset_line_edit.textEdited.connect(self._on_preset_query_edited)
+        self.preset_category_filter_combo.currentTextChanged.connect(self._on_preset_category_changed)
         self.preset_save_btn.clicked.connect(self.savePresetRequested)
         self.preset_manage_btn.clicked.connect(self.managePresetsRequested)
 
@@ -446,7 +504,7 @@ class ControlPanel(QWidget):
             )
         self._sync_type_enabled()
         self._refresh_frame_size_hint()
-        if hasattr(self, "preset_format_filter_combo"):
+        if hasattr(self, "preset_category_filter_combo"):
             self._refresh_preset_combo()
         self.typeChanged.emit(image_type)
 
@@ -577,8 +635,7 @@ class ControlPanel(QWidget):
         self._panel_enabled = bool(enabled)
         for widget in [
             self.preset_combo,
-            self.preset_search_edit,
-            self.preset_format_filter_combo,
+            self.preset_category_filter_combo,
             self.preset_save_btn,
             self.preset_manage_btn,
             self.type_combo,
@@ -669,124 +726,138 @@ class ControlPanel(QWidget):
         else:
             _set_apply(True)
 
-    def _current_preset_format(self) -> str:
-        """Return the panel's effective stored format (including YOnly bit depth)."""
-        if self.type_combo.currentText() == "Standard Image":
-            return "N/A"
-        return self._yonly_internal_name(
-            self.format_combo.currentText(), self.bit_depth_combo.currentText()
-        )
+    def _preset_candidates(self) -> list[SensorPreset]:
+        """Return candidates for the separate query/selection state machine.
 
-    def _set_preset_format_choices(
-        self,
-        *,
-        preserve: str | None = None,
-        prefer_current: bool = False,
-    ) -> None:
-        """Refresh the format-filter choices without emitting filter signals."""
-        choices = preset_format_filter_choices(
-            self._preset_records, include_current=True,
+        Any nonempty query uses the shared official bracket-search parser and
+        therefore ignores the browse category.  Empty query means browse mode.
+        Unknown legacy records remain in All and explicit/name search results,
+        but never create a misleading type category.
+        """
+        if self._preset_query:
+            return search_sensor_presets(self._preset_records, self._preset_query)
+        return filter_sensor_presets_by_category(
+            self._preset_records,
+            self.preset_category_filter_combo.currentText() or PRESET_CATEGORY_ALL,
         )
-        current_format = self._current_preset_format()
-        selected = normalize_preset_format_name(preserve) if preserve in choices else None
-        if selected is None and prefer_current:
-            has_current = (
-                current_format != "N/A"
-                and any(
-                    normalize_preset_format_name(p.format_name) == current_format
-                    for p in self._preset_records
-                )
-            )
-            selected = PRESET_FILTER_CURRENT if has_current else PRESET_FILTER_ALL
-        if selected is None:
-            selected = PRESET_FILTER_ALL
-        self.preset_format_filter_combo.blockSignals(True)
-        self.preset_format_filter_combo.clear()
-        self.preset_format_filter_combo.addItems(choices)
-        self.preset_format_filter_combo.setCurrentText(selected)
-        self.preset_format_filter_combo.blockSignals(False)
 
     def set_presets(
         self, presets: list[SensorPreset], current: str | None = None,
     ) -> None:
-        """Set complete preset records and refresh search + exact-format filtering.
-
-        ``current`` selects a name only when it remains visible under the active
-        filters.  A hidden old selection always falls back to the placeholder,
-        so pressing the combo cannot load a wrong/stale preset.
-        """
-        selected_format = self.preset_format_filter_combo.currentText()
-        had_filter = self.preset_format_filter_combo.count() > 0
+        """Set complete records without overwriting an active typed query."""
         self._preset_records = list(presets)
         self._preset_names_only = False
-        # Do not remove a *currently selected* temporary format here.  Preset
-        # deletion/refresh is not a user format choice; retaining the active
-        # legacy identifier prevents Qt from silently selecting RAW32/another
-        # neighbour and corrupting the current item's options on next Apply.
-        # Inactive temporary entries are still pruned by the helper.
+        # Selector refresh is not a user format choice: retain an active legacy
+        # decoder value while pruning inactive temporary format entries.
         self._remove_stale_dynamic_formats()
-        self._set_preset_format_choices(
-            preserve=selected_format,
-            prefer_current=not had_filter,
-        )
-        self._refresh_preset_combo(current=current)
+        names = {preset.name for preset in self._preset_records}
+        if self._preset_selected_name not in names:
+            self._preset_selected_name = None
+        # ``current`` intentionally selects a newly saved record only if there
+        # is no active query.  A save/manager refresh must not replace user text.
+        if current and not self._preset_query and current in names:
+            self._preset_selected_name = current
+        self._refresh_preset_combo()
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
-        """Backward-compatible names-only preset population helper.
-
-        Production callers should use :meth:`set_presets` so format filtering
-        has real stored values.  The compatibility path intentionally forces
-        ``All formats`` instead of fabricating a format for legacy/test callers.
-        """
+        """Backward-compatible names-only population for older callers/tests."""
         self._preset_records = [SensorPreset(name=name, format_name="") for name in names if name]
         self._preset_names_only = True
         self._remove_stale_dynamic_formats()
-        self._set_preset_format_choices(preserve=PRESET_FILTER_ALL)
-        self._refresh_preset_combo(current=current)
+        available = {preset.name for preset in self._preset_records}
+        if self._preset_selected_name not in available:
+            self._preset_selected_name = None
+        if current and not self._preset_query and current in available:
+            self._preset_selected_name = current
+        self._refresh_preset_combo()
 
-    def _refresh_preset_combo(self, *_signal_args, current: str | None = None) -> None:
-        """Apply name + format filters to the non-editable preset selector."""
-        selected_name = current
-        if selected_name is None and self.preset_combo.currentIndex() > 0:
-            selected_name = self.preset_combo.currentData()
-        if selected_name is None:
-            selected_name = self._preset_last_selected_name
-        format_filter = self.preset_format_filter_combo.currentText() or PRESET_FILTER_ALL
-        current_format = self._current_preset_format()
-        # ``Current format`` remains an exact dynamic filter even when it has
-        # no result: an empty selector is safer than silently widening to a
-        # different format, and clearing/selecting All restores every preset.
-        if self._preset_names_only:
-            visible = [
-                p for p in self._preset_records
-                if not self.preset_search_edit.text().strip()
-                or self.preset_search_edit.text().strip().casefold() in p.name.casefold()
-            ]
-        else:
-            visible = filter_sensor_presets(
-                self._preset_records,
-                self.preset_search_edit.text(),
-                format_filter,
-                current_format,
-            )
-        visible_names = {p.name for p in visible}
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.clear()
-        self.preset_combo.addItem(self._PRESET_PLACEHOLDER, None)
-        for preset in visible:
-            self.preset_combo.addItem(preset.name, preset.name)
-        if selected_name in visible_names:
-            self.preset_combo.setCurrentIndex(self.preset_combo.findData(selected_name))
-        else:
-            self.preset_combo.setCurrentIndex(0)
-        self.preset_combo.blockSignals(False)
+    def _set_preset_combo_text(self, text: str) -> None:
+        """Set line-edit text without allowing Qt to reinterpret selection/query."""
+        with QSignalBlocker(self._preset_line_edit):
+            self._preset_line_edit.setText(text)
+
+    def _begin_preset_edit(self) -> None:
+        """Detach settled selected text before the first real edit is applied."""
+        if self._preset_edit_transitioning or self._preset_search_mode:
+            return
+        self._preset_edit_transitioning = True
+        try:
+            self._preset_search_mode = True
+            self._preset_query = ""
+            # The identity may remain internally for bookkeeping, but its text
+            # must never be prepended to the user input or restored on clear.
+            self._set_preset_combo_text("")
+            with QSignalBlocker(self.preset_combo):
+                self.preset_combo.setCurrentIndex(-1)
+        finally:
+            self._preset_edit_transitioning = False
+
+    def _refresh_preset_combo(self, *_signal_args) -> None:
+        """Refresh items while preserving query verbatim and selection identity."""
+        query = self._preset_query
+        visible = self._preset_candidates()
+        visible_names = {preset.name for preset in visible}
+        selected_name = self._preset_selected_name
+        if selected_name not in {preset.name for preset in self._preset_records}:
+            selected_name = None
+            self._preset_selected_name = None
+        with QSignalBlocker(self.preset_combo), QSignalBlocker(self._preset_line_edit):
+            self.preset_combo.clear()
+            for preset in visible:
+                self.preset_combo.addItem(preset.name, preset.name)
+            if query and not visible:
+                self.preset_combo.addItem("(No matching presets)", None)
+                item = getattr(self.preset_combo.model(), "item", lambda _i: None)(
+                    self.preset_combo.count() - 1
+                )
+                if item is not None:
+                    item.setEnabled(False)
+            if (
+                not query
+                and not self._preset_search_mode
+                and selected_name in visible_names
+            ):
+                self.preset_combo.setCurrentIndex(self.preset_combo.findData(selected_name))
+            else:
+                self.preset_combo.setCurrentIndex(-1)
+            # Query always wins over selected display.  Once the query is empty,
+            # selected text is shown only when it represents an explicit settled
+            # selection rather than a cleared/deleted search state.
+            if query:
+                self._preset_line_edit.setText(query)
+            elif not self._preset_search_mode and selected_name:
+                self._preset_line_edit.setText(selected_name)
+            else:
+                self._preset_line_edit.clear()
+
+    def _on_preset_query_edited(self, text: str) -> None:
+        """Store user text as a query; it never implicitly selects/loads data."""
+        if not self._preset_search_mode:
+            self._begin_preset_edit()
+        self._preset_query = text
+        self._preset_search_mode = True
+        self._refresh_preset_combo()
+
+    def _on_preset_category_changed(self, _category: str) -> None:
+        # While a query is active category changes deliberately do not disturb
+        # all-type search results.  Empty browse mode refreshes immediately.
+        if not self._preset_query:
+            self._refresh_preset_combo()
+
+    def _show_preset_popup(self) -> None:
+        """Arrow browsing clears the query and never loads a preset by itself."""
+        self._preset_query = ""
+        self._preset_search_mode = True
+        self._refresh_preset_combo()
 
     def reset_preset_selection(self) -> None:
-        """Move the preset combo back to the placeholder without emitting signals."""
-        self._preset_last_selected_name = None
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.setCurrentIndex(0)
-        self.preset_combo.blockSignals(False)
+        """Clear query and identity without emitting preset or Apply signals."""
+        self._preset_selected_name = None
+        self._preset_query = ""
+        self._preset_search_mode = True
+        with QSignalBlocker(self.preset_combo), QSignalBlocker(self._preset_line_edit):
+            self.preset_combo.setCurrentIndex(-1)
+            self._preset_line_edit.clear()
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and spin box without emitting zoomChanged."""
@@ -935,13 +1006,20 @@ class ControlPanel(QWidget):
     # ── internal slots ───────────────────────────────────────────────
 
     def _on_preset_activated(self, index: int) -> None:
-        """Forward a visible preset selection; placeholder/filtered values do nothing."""
-        if index <= 0:
+        """Load only a real item; Enter on arbitrary query text is inert."""
+        if index < 0:
             return
         name = self.preset_combo.itemData(index)
-        if name:
-            self._preset_last_selected_name = str(name)
-            self.presetSelected.emit(str(name))
+        if not name:
+            return
+        selected = str(name)
+        # The popup/item itself is the sole selection authority.  Query text
+        # cannot become a preset identity, so keyboard Enter remains safe.
+        self._preset_selected_name = selected
+        self._preset_query = ""
+        self._preset_search_mode = False
+        self._refresh_preset_combo()
+        self.presetSelected.emit(selected)
 
     def _on_slider_zoom(self, value: int) -> None:
         self.zoom_spin.blockSignals(True)

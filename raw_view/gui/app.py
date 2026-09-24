@@ -715,10 +715,9 @@ class MainWindow(QMainWindow):
 
         Qt normally resolves a window shortcut before the target widget's
         default key handler.  Since the requested Ctrl+A conflicts with Select
-        All, install this MainWindow as a filter on its concrete editable child
-        controls.  This keeps the protection local to the main window (rather
-        than accumulating application-wide filters for every window instance)
-        while covering panel searches, spinbox editors, and editable combos.
+        All, install this MainWindow as a filter on concrete editable children.
+        This stays local to the window while covering panel search/selection,
+        spinbox editors, and editable combos.
         """
         editable_classes = (QLineEdit, QTextEdit, QPlainTextEdit)
         for widget in self.findChildren(editable_classes):

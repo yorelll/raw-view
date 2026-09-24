@@ -3,6 +3,10 @@ from unittest import mock
 
 import numpy as np
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 from raw_view.converter import bayer8_to_rgb, bgr_to_bayer8, image_file_to_raw
 
 

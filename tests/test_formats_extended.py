@@ -8,6 +8,10 @@ import unittest
 
 import numpy as np
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 from raw_view.formats import (
     FormatError,
     ImageSpec,

@@ -27,6 +27,24 @@ PRESET_YUV_FORMATS = tuple(YUV_BYTES_PER_PIXEL)
 PRESET_STANDARD_FORMATS = ("N/A",)
 PRESET_IMAGE_TYPES = ("RAW", "YUV", "Standard Image")
 PRESET_FORMATS = PRESET_RAW_FORMATS + PRESET_YUV_FORMATS + PRESET_STANDARD_FORMATS
+
+# Preset browsing is intentionally coarse-grained.  Exact decoder formats
+# remain available in the decode/preset editor but are not exposed as a noisy
+# selector filter (which previously surfaced internal N/A and malformed values
+# such as "12").
+PRESET_CATEGORY_ALL = "All"
+PRESET_CATEGORY_RAW = "RAW"
+PRESET_CATEGORY_YUV = "YUV"
+PRESET_CATEGORY_STANDARD = "Standard images"
+PRESET_CATEGORY_CHOICES = (
+    PRESET_CATEGORY_ALL,
+    PRESET_CATEGORY_RAW,
+    PRESET_CATEGORY_YUV,
+    PRESET_CATEGORY_STANDARD,
+)
+
+# Legacy exact-format helpers are retained for persisted-data/manager editing
+# compatibility.  They are no longer used as user-facing filter choices.
 PRESET_FILTER_ALL = "All formats"
 PRESET_FILTER_CURRENT = "Current format"
 
@@ -101,19 +119,149 @@ def preset_format_filter_choices(
     return choices
 
 
+def preset_category_for(image_type: object, format_name: object = "") -> str | None:
+    """Return the simplified browsing category for a preset, if coherent.
+
+    Unknown legacy values stay loadable/editable but are deliberately omitted
+    from category-only dropdowns.  They remain discoverable via the all-type
+    name search, which never treats malformed identifiers as categories.
+    """
+    if is_supported_preset_format_for_type(image_type, format_name):
+        kind = normalize_preset_image_type(image_type)
+        if kind == "RAW":
+            return PRESET_CATEGORY_RAW
+        if kind == "YUV":
+            return PRESET_CATEGORY_YUV
+        if kind == "Standard Image":
+            return PRESET_CATEGORY_STANDARD
+    return None
+
+
+def filter_sensor_presets_by_category(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...],
+    category: str = PRESET_CATEGORY_ALL,
+) -> list["SensorPreset"]:
+    """Filter coherent presets by one of the four user-facing categories."""
+    selected = category if category in PRESET_CATEGORY_CHOICES else PRESET_CATEGORY_ALL
+    if selected == PRESET_CATEGORY_ALL:
+        return list(presets)
+    return [
+        preset for preset in presets
+        if preset_category_for(
+            getattr(preset, "image_type", ""), getattr(preset, "format_name", ""),
+        ) == selected
+    ]
+
+
+def _normalized_preset_search_value(value: object) -> str:
+    """Normalize a structured-search identifier without changing stored data."""
+    return "".join(str(value or "").casefold().split())
+
+
+def _parse_preset_search_query(query: object) -> tuple[str, dict[str, str] | None]:
+    """Parse the official ``<type:... + format:...>name`` search grammar.
+
+    The returned pair is ``(outside_name_term, requirements)``.  ``None`` for
+    *requirements* means malformed control syntax, while an empty mapping means
+    a normal name-only search.  Requirements are intentionally recognized only
+    inside exactly one leading angle-bracket block, so bare ``type:yuv`` remains
+    a literal name search rather than an undocumented filter syntax.
+    """
+    text = str(query or "").strip()
+    if not text:
+        return "", {}
+    if not text.startswith("<"):
+        return text, {}
+
+    close_at = text.find(">", 1)
+    if close_at < 0:
+        return "", None
+    # A second bracket pair or delimiter anywhere in the remaining name term is
+    # not part of the small official grammar; fail closed rather than broadening.
+    if "<" in text[1:close_at] or "<" in text[close_at + 1:] or ">" in text[close_at + 1:]:
+        return "", None
+
+    requirements: dict[str, str] = {}
+    aliases = {"type": "type", "t": "type", "format": "format", "f": "format"}
+    controls = text[1:close_at]
+    parts = controls.split("+")
+    if not controls.strip() or not parts:
+        return "", None
+    for part in parts:
+        if part.count(":") != 1:
+            return "", None
+        raw_key, raw_value = part.split(":", 1)
+        key = raw_key.strip().casefold()
+        value = raw_value.strip()
+        canonical_key = aliases.get(key)
+        if canonical_key is None or not value or canonical_key in requirements:
+            return "", None
+        requirements[canonical_key] = value
+    return text[close_at + 1:].strip(), requirements
+
+
+def search_sensor_presets(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...], query: str,
+) -> list["SensorPreset"]:
+    """Search presets by official bracketed requirements and/or name.
+
+    Supported control syntax is exactly ``<type:VALUE + format:VALUE>NAME``;
+    aliases ``t`` and ``f`` are accepted, spacing is optional, and every
+    requirement ANDs with the optional case-insensitive outside name term.
+    Invalid syntax, unknown keys, repeated keys, and unknown type values fail
+    closed to an empty result.  Bare text (including bare ``type:yuv``) is only
+    a name search.  Format comparisons ignore case and whitespace, but stored
+    names and identifiers remain untouched.
+    """
+    name_term, requirements = _parse_preset_search_query(query)
+    if requirements is None:
+        return []
+
+    normalized_type = ""
+    if "type" in requirements:
+        type_value = requirements["type"].strip().casefold()
+        type_aliases = {
+            "raw": "raw",
+            "yuv": "yuv",
+            "standard image": "standard image",
+        }
+        normalized_type = type_aliases.get(type_value, "")
+        if not normalized_type:
+            return []
+
+    normalized_format = ""
+    if "format" in requirements:
+        normalized_format = _normalized_preset_search_value(requirements["format"])
+        if not normalized_format:
+            return []
+
+    needle = name_term.casefold()
+    return [
+        preset for preset in presets
+        if (
+            not needle
+            or needle in str(getattr(preset, "name", "") or "").casefold()
+        )
+        and (
+            not normalized_type
+            or normalize_preset_image_type(getattr(preset, "image_type", "")).casefold()
+            == normalized_type
+        )
+        and (
+            not normalized_format
+            or _normalized_preset_search_value(getattr(preset, "format_name", ""))
+            == normalized_format
+        )
+    ]
+
+
 def filter_sensor_presets(
     presets: list["SensorPreset"] | tuple["SensorPreset", ...],
     query: str = "",
     format_filter: str = PRESET_FILTER_ALL,
     current_format: str = "",
 ) -> list["SensorPreset"]:
-    """Filter presets by case-insensitive name and exact stored format.
-
-    The two conditions are ANDed.  ``Current format`` resolves to
-    *current_format*; when there is no meaningful current format (empty/N/A),
-    it intentionally produces no result instead of accidentally loading a
-    preset for another image type.
-    """
+    """Legacy exact-format filter retained for non-UI compatibility callers."""
     needle = str(query or "").strip().casefold()
     selected_format = normalize_preset_format_name(format_filter) or PRESET_FILTER_ALL
     if selected_format == PRESET_FILTER_CURRENT:
@@ -327,11 +475,49 @@ class ViewerItem:
 # ── Settings ─────────────────────────────────────────────────────────────
 
 
-class AppSettings:
-    """Persistence wrapper around QSettings."""
+def _explicit_test_settings_file() -> str:
+    """Return the explicitly contracted, usable test INI path, if supplied.
 
-    def __init__(self) -> None:
-        self._store = QSettings("yorelll", "raw-view")
+    Test isolation is intentionally a caller/test-harness responsibility.  A
+    production process must never be classified as a test process from loaded
+    modules, stack frames, or any other implicit heuristic.  Requiring an
+    existing parent directory also keeps a malformed inherited environment
+    value from silently selecting an unusable file-backed store.
+    """
+    explicit = os.environ.get("RAW_VIEW_TEST_SETTINGS_FILE", "").strip()
+    if not explicit:
+        return ""
+    try:
+        path = Path(explicit).expanduser()
+        if not path.name or not path.parent.is_dir() or path.is_dir():
+            return ""
+    except (OSError, ValueError):
+        return ""
+    return str(path)
+
+
+class AppSettings:
+    """Persistence wrapper around QSettings.
+
+    Tests can inject an isolated ``QSettings`` object; production continues to
+    use the user's ``yorelll/raw-view`` registry location.  This removes the
+    accidental production-settings writes that previously made test fixtures
+    appear as real sensor presets.
+    """
+
+    def __init__(self, store: QSettings | None = None) -> None:
+        if store is not None:
+            self._store = store
+            return
+        # Only an explicit test-harness contract selects an INI file.  In every
+        # other case (including embedded hosts that happen to import test
+        # modules), preserve the user's native yorelll/raw-view settings.
+        isolated_path = _explicit_test_settings_file()
+        self._store = (
+            QSettings(isolated_path, QSettings.IniFormat)
+            if isolated_path
+            else QSettings("yorelll", "raw-view")
+        )
 
     @staticmethod
     def _normalize_dirname(value: str | None) -> str:

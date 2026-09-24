@@ -18,6 +18,10 @@ from pathlib import Path
 
 from PyQt5.QtCore import QRectF
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 from raw_view.gui.dialogs.batch_convert import (
     DEFAULT_CONVERT_HEIGHT as BATCH_DEFAULT_HEIGHT,
     DEFAULT_CONVERT_WIDTH as BATCH_DEFAULT_WIDTH,

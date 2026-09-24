@@ -19,6 +19,9 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtWidgets import QApplication, QLabel, QTabWidget  # noqa: E402

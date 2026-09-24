@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -30,8 +32,14 @@ from unittest import mock
 
 import numpy as np
 
+# unittest discovery does not load pytest's conftest.py.  Establish its owned
+# test INI before any raw_view import; under pytest this reuses conftest's path.
+from _settings_isolation import ensure_test_settings_file  # noqa: E402
+
+ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt5.QtCore import QSettings  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 # The offscreen platform lets us construct plain Qt widgets (FrameNavBar) and
@@ -54,15 +62,19 @@ from raw_view.models import (  # noqa: E402
     BAYER_PATTERNS,
     THEME_PALETTES,
     DecodeOptions,
-    PRESET_FILTER_ALL,
+    PRESET_CATEGORY_ALL,
+    PRESET_CATEGORY_RAW,
+    PRESET_CATEGORY_STANDARD,
+    PRESET_CATEGORY_YUV,
+    AppSettings,
     SensorPreset,
     ViewerItem,
     build_ui_stylesheet,
-    filter_sensor_presets,
+    filter_sensor_presets_by_category,
     is_supported_preset_format,
     is_supported_preset_format_for_type,
     normalize_preset_image_type,
-    preset_format_filter_choices,
+    search_sensor_presets,
 )
 
 
@@ -134,6 +146,113 @@ class _PresetSettings:
         self.sensor_presets = list(presets)
 
 
+class AppSettingsIsolationTests(unittest.TestCase):
+    """Test and production settings selection use explicit, safe contracts."""
+
+    @staticmethod
+    def _settings_probe_script() -> str:
+        return (
+            "import os, unittest\n"
+            "from PyQt5.QtCore import QSettings\n"
+            "from raw_view.models import AppSettings\n"
+            "settings = AppSettings()\n"
+            "store = settings._store\n"
+            "print('|'.join((str(int(store.format())), store.organizationName(), "
+            "store.applicationName(), store.fileName())))\n"
+        )
+
+    def test_unittest_import_does_not_switch_production_to_temp_ini(self):
+        """An embedded production host may import unittest before raw_view."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ)
+        env.pop("RAW_VIEW_TEST_SETTINGS_FILE", None)
+        env.pop("PYTHONPATH", None)
+        proc = subprocess.run(
+            [sys.executable, "-c", self._settings_probe_script()],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        settings_format, organization, application, filename = proc.stdout.strip().split("|", 3)
+        self.assertEqual(settings_format, str(int(QSettings.NativeFormat)))
+        self.assertEqual(organization, "yorelll")
+        self.assertEqual(application, "raw-view")
+        self.assertNotIn("raw-view-test-settings-", filename)
+        self.assertNotIn("raw-view-unittest-settings-", filename)
+        self.assertNotIn("raw-view-pytest-settings-", filename)
+
+    def test_explicit_test_environment_uses_owned_ini_store(self):
+        isolated_path = os.environ["RAW_VIEW_TEST_SETTINGS_FILE"]
+        settings = AppSettings()
+        self.assertEqual(settings._store.format(), QSettings.IniFormat)
+        self.assertEqual(os.path.normcase(settings._store.fileName()), os.path.normcase(isolated_path))
+
+    def test_malformed_test_environment_falls_back_to_native_without_writing(self):
+        with mock.patch.dict(
+            os.environ,
+            {"RAW_VIEW_TEST_SETTINGS_FILE": "not-a-real-parent/settings.ini"},
+            clear=False,
+        ):
+            settings = AppSettings()
+        self.assertEqual(settings._store.format(), QSettings.NativeFormat)
+        self.assertEqual(settings._store.organizationName(), "yorelll")
+        self.assertEqual(settings._store.applicationName(), "raw-view")
+
+    def test_injected_store_wins_over_test_environment(self):
+        temp_dir = tempfile.mkdtemp(prefix="rv-settings-injected-")
+        try:
+            injected_path = os.path.join(temp_dir, "injected.ini")
+            injected_store = QSettings(injected_path, QSettings.IniFormat)
+            settings = AppSettings(injected_store)
+            settings.save_sensor_preset(SensorPreset(name="test", format_name="RAW12"))
+            injected_store.sync()
+            self.assertIs(settings._store, injected_store)
+            self.assertEqual([p.name for p in settings.sensor_presets], ["test"])
+            self.assertTrue(os.path.isfile(injected_path))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class PersistentPresetSearchPathTests(unittest.TestCase):
+    """Saved preset -> MainWindow refresh -> editable-combo search integration."""
+
+    def test_saved_test_preset_is_immediately_searchable_from_injected_store(self):
+        temp_dir = tempfile.mkdtemp(prefix="rv-preset-search-")
+        try:
+            isolated = AppSettings(QSettings(os.path.join(temp_dir, "settings.ini"), QSettings.IniFormat))
+            isolated.save_sensor_preset(
+                SensorPreset(name="test", image_type="RAW", format_name="RAW12")
+            )
+            w = MainWindow()
+            try:
+                # MainWindow itself uses the test harness's INI; substitute a
+                # second injected store to exercise the actual save/read schema
+                # and refresh path without constructing a production QSettings.
+                w.settings = isolated
+                w._refresh_preset_combo(current="test")
+                line = w.panel.preset_combo.lineEdit()
+                line.setText("test")
+                w.panel._on_preset_query_edited("test")
+                self.assertGreaterEqual(w.panel.preset_combo.findData("test"), 0)
+                index = w.panel.preset_combo.findData("test")
+                w.panel.preset_combo.setCurrentIndex(index)
+                selected: list[str] = []
+                w.panel.presetSelected.connect(selected.append)
+                w.panel._on_preset_activated(index)
+                self.assertEqual(selected, ["test"])
+            finally:
+                w.close()
+                w.deleteLater()
+                _APP.processEvents()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 class PresetFilterModelTests(unittest.TestCase):
     def setUp(self):
         self.presets = [
@@ -143,21 +262,85 @@ class PresetFilterModelTests(unittest.TestCase):
             SensorPreset(name="Imported custom", image_type="RAW", format_name="VendorRAW"),
         ]
 
-    def test_registry_choices_are_complete_and_keep_unknown_import(self):
-        choices = preset_format_filter_choices(self.presets)
-        for fmt in ("RAW8", "RAW10 Packed", "RAW14 Packed", "YOnly12", "YUYV", "NV61", "I420", "VendorRAW"):
-            self.assertIn(fmt, choices)
-        self.assertEqual(choices[0], PRESET_FILTER_ALL)
-
-    def test_search_and_exact_format_are_anded_case_insensitively(self):
+    def test_category_filter_is_coarse_and_hides_internal_malformed_values(self):
         self.assertEqual(
-            [p.name for p in filter_sensor_presets(self.presets, "BETA", "RAW12")],
+            [p.name for p in filter_sensor_presets_by_category(self.presets, PRESET_CATEGORY_ALL)],
+            [p.name for p in self.presets],
+        )
+        self.assertEqual(
+            [p.name for p in filter_sensor_presets_by_category(self.presets, PRESET_CATEGORY_RAW)],
+            ["Alpha RAW8", "beta RAW12"],
+        )
+        self.assertEqual(
+            [p.name for p in filter_sensor_presets_by_category(self.presets, PRESET_CATEGORY_YUV)],
+            ["Gamma YUYV"],
+        )
+        self.assertEqual(
+            filter_sensor_presets_by_category(self.presets, PRESET_CATEGORY_STANDARD), [],
+        )
+        # Unknown VendorRAW remains visible under All/search but cannot become a
+        # misleading decoder-format filter entry.
+        self.assertIn("Imported custom", [
+            p.name for p in search_sensor_presets(self.presets, "custom")
+        ])
+
+    def test_name_search_is_case_insensitive_across_all_categories(self):
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(self.presets, "BETA")],
             ["beta RAW12"],
         )
-        self.assertEqual(filter_sensor_presets(self.presets, "beta", "RAW8"), [])
         self.assertEqual(
-            [p.name for p in filter_sensor_presets(self.presets, "", PRESET_FILTER_ALL)],
-            [p.name for p in self.presets],
+            [p.name for p in search_sensor_presets(self.presets, "GAMMA")],
+            ["Gamma YUYV"],
+        )
+
+    def test_bracketed_structured_search_supports_aliases_and_casefolding(self):
+        presets = self.presets + [
+            SensorPreset(name="testpreset", image_type="YUV", format_name="YUYV"),
+            SensorPreset(name="testpreset raw", image_type="RAW", format_name="RAW10 Packed"),
+        ]
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(presets, "<type:yuv>testpreset")],
+            ["testpreset"],
+        )
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(presets, "<T:YUV>TESTPRESET")],
+            ["testpreset"],
+        )
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(presets, "<t:raw + f:raw10 packed>testpreset")],
+            ["testpreset raw"],
+        )
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(
+                presets, "< type : raw+format : raw10packed > TESTPRESET"
+            )],
+            ["testpreset raw"],
+        )
+
+    def test_structured_search_ands_name_and_fails_closed_for_invalid_controls(self):
+        presets = self.presets + [
+            SensorPreset(name="testpreset", image_type="YUV", format_name="YUYV"),
+            SensorPreset(name="legacy test", image_type="RAW", format_name="VendorRAW"),
+        ]
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(presets, "<type:yuv>test")],
+            ["testpreset"],
+        )
+        # Brackets are mandatory: this is a literal name query, not a filter.
+        self.assertEqual(search_sensor_presets(presets, "type:yuv"), [])
+        for invalid in (
+            "<type:camera>test", "<type:standard>test", "<bit:12>test",
+            "<type:yuv + type:raw>test", "<type:yuv +>test",
+            "<type:yuv>test<format:yuyv>", "<type:yuv",
+        ):
+            with self.subTest(query=invalid):
+                self.assertEqual(search_sensor_presets(presets, invalid), [])
+        # Explicit format still safely finds legacy identifiers without making
+        # them a category or making their decoder path valid.
+        self.assertEqual(
+            [p.name for p in search_sensor_presets(presets, "<f:vendorraw>legacy")],
+            ["legacy test"],
         )
 
     def test_type_aware_format_validation_rejects_cross_type_pairs(self):
@@ -197,14 +380,11 @@ class LegacyPresetCompatibilityTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 preset = SensorPreset.from_dict({"name": "bad legacy", "format_name": raw})
                 self.assertEqual(preset.format_name, expected)
-                # All helper paths must tolerate both normalized JSON and a
-                # programmatic malformed SensorPreset without AttributeError.
-                choices = preset_format_filter_choices([preset])
-                self.assertIn(expected, choices) if expected else self.assertTrue(choices)
-                self.assertEqual(filter_sensor_presets([preset], "bad"), [preset])
+                # Malformed values remain safely searchable but never become a
+                # category option or a decoder-format filter label.
+                self.assertEqual(search_sensor_presets([preset], "bad"), [preset])
         direct_bad = SensorPreset(name="direct bad", format_name=12)
-        self.assertIn("12", preset_format_filter_choices([direct_bad]))
-        self.assertEqual(filter_sensor_presets([direct_bad], "direct", "12"), [direct_bad])
+        self.assertEqual(search_sensor_presets([direct_bad], "direct"), [direct_bad])
         self.assertEqual(SensorPreset.from_dict(None).format_name, "RAW12")
 
     def test_from_dict_normalizes_non_string_image_type_values(self):
@@ -276,41 +456,58 @@ class PresetManagerFormatFilterTests(unittest.TestCase):
     def _names(self):
         return [self.dlg.list_widget.item(i).text() for i in range(self.dlg.list_widget.count())]
 
-    def test_existing_search_and_new_format_filter_are_anded(self):
-        self.dlg.search_edit.setText("BETA")
-        self.assertEqual(self._names(), ["beta RAW12"])
-        self.dlg.format_filter_combo.setCurrentText("RAW8")
+    def test_search_ignores_category_and_empty_browse_uses_category(self):
+        choices = [self.dlg.category_filter_combo.itemText(i)
+                   for i in range(self.dlg.category_filter_combo.count())]
+        self.assertEqual(choices, [
+            PRESET_CATEGORY_ALL, PRESET_CATEGORY_RAW,
+            PRESET_CATEGORY_YUV, PRESET_CATEGORY_STANDARD,
+        ])
+        self.assertEqual(choices, ["All", "RAW", "YUV", "Standard images"])
+        self.assertNotIn("Current format", choices)
+        self.assertNotIn("N/A", choices)
+        self.assertNotIn("12", choices)
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
+        self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12"])
+        self.dlg.search_edit.setText("GAMMA")
+        self.assertEqual(self._names(), ["Gamma YUYV"])
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_STANDARD)
+        self.assertEqual(self._names(), ["Gamma YUYV"], "search remains cross-category")
+        self.dlg.search_edit.clear()
         self.assertEqual(self._names(), [])
         self.assertEqual(self.dlg._current_index, -1)
         self.assertFalse(self.dlg.delete_btn.isEnabled())
-        self.dlg.search_edit.clear()
-        self.assertEqual(self._names(), ["Alpha RAW8"])
 
-    def test_editing_format_refreshes_filtered_rows_and_source_mapping(self):
-        self.dlg.format_filter_combo.setCurrentText("RAW12")
-        self.assertEqual(self._names(), ["beta RAW12"])
-        self.assertEqual(self.dlg._current_index, 1)  # canonical, not visible row 0
-        self.dlg.format_combo.setCurrentText("RAW8")
+    def test_manager_uses_shared_bracketed_search_while_category_is_ignored(self):
+        self.settings.sensor_presets.append(
+            SensorPreset(name="testpreset", image_type="YUV", format_name="YUYV")
+        )
+        self.dlg._presets = list(self.settings.sensor_presets)
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
+        self.dlg.search_edit.setText("<type:yuv>testpreset")
+        self.assertEqual(self._names(), ["testpreset"])
+        self.dlg.search_edit.setText("<f:raw10 packed>testpreset")
         self.assertEqual(self._names(), [])
-        self.assertEqual(self.dlg._current_index, -1)
-        self.dlg.format_filter_combo.setCurrentText(PRESET_FILTER_ALL)
+
+    def test_editing_format_refreshes_category_rows_and_source_mapping(self):
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
+        self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12"])
+        self.dlg.list_widget.setCurrentRow(1)
+        self.assertEqual(self.dlg._current_index, 1)  # canonical source index
+        self.dlg.format_combo.setCurrentText("RAW8")
         self.assertIn("beta RAW12", self._names())
         beta = next(p for p in self.dlg._presets if p.name == "beta RAW12")
         self.assertEqual(beta.format_name, "RAW8")
 
-    def test_add_and_import_style_refresh_keep_active_filter_safe(self):
-        self.dlg.format_filter_combo.setCurrentText("YUYV")
+    def test_add_and_import_style_refresh_keep_active_category_safe(self):
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_YUV)
         self.assertEqual(self._names(), ["Gamma YUYV"])
-        # Simulate CRUD/import mutation; refresh must retain exact filter and
-        # select only visible canonical entries (no stale list row mapping).
+        # Simulate CRUD/import mutation; source-index mapping stays canonical.
         self.dlg._presets.append(
             SensorPreset(name="New NV12", image_type="YUV", format_name="NV12")
         )
         self.dlg._refresh_list(select_index=len(self.dlg._presets) - 1)
-        self.assertEqual(self._names(), ["Gamma YUYV"])
-        self.assertEqual(self.dlg._current_index, 2)
-        self.dlg.format_filter_combo.setCurrentText("NV12")
-        self.assertEqual(self._names(), ["New NV12"])
+        self.assertEqual(self._names(), ["Gamma YUYV", "New NV12"])
         self.assertEqual(self.dlg._current_index, 3)
 
 

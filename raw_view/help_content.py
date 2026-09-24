@@ -91,6 +91,21 @@ HELP_HTML = """
 <li>RAW viewing supports Bayer color preview (RGGB/GRBG/GBRG/BGGR) or grayscale preview.</li>
 <li>YUV conversion uses RGB-to-YUV conversion with subformat-specific chroma sampling.</li>
 </ul>
+<h3>Sensor presets</h3>
+<ul>
+<li><b>Preset type</b> browses <code>All</code>, <code>RAW</code>, <code>YUV</code>, or
+<code>Standard images</code> while search is empty. RAW includes Packed; YUV includes YOnly.</li>
+<li>Type in <b>Preset</b> to search names across every type. The arrow clears the query and
+browses the selected Preset type. Choosing an item fills the panel; click Apply to render.</li>
+<li>Official structured search is bracket-only:
+<code>&lt;type:VALUE + format:VALUE&gt;name</code>. Supported keys are <code>type</code>/<code>t</code>
+and <code>format</code>/<code>f</code>; requirements and the outside name term all AND together.
+Examples: <code>&lt;type:yuv&gt;testpreset</code>,
+<code>&lt;t:raw + f:raw10 packed&gt;testpreset</code>.</li>
+<li>Search is case-insensitive; format comparison ignores whitespace, so
+<code>raw10 packed</code> and <code>raw10packed</code> match alike. Bare <code>type:yuv</code>
+is only a name search. Invalid/unknown bracket requirements return no results.</li>
+</ul>
 <h3>Productivity</h3>
 <ul>
 <li>Support dragging files into the main window to open quickly.</li>

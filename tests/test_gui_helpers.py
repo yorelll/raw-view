@@ -5,6 +5,10 @@ import unittest
 import unittest.mock as mock
 from pathlib import PurePosixPath
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 from raw_view.models import (
     THEME_PALETTES,
     add_recent_file_entry,

@@ -33,16 +33,17 @@ from raw_view.gui.panels import ControlPanel, _qta_icon
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
-    PRESET_FILTER_ALL,
+    PRESET_CATEGORY_ALL,
+    PRESET_CATEGORY_CHOICES,
     PRESET_IMAGE_TYPES,
     PRESET_RAW_FORMATS,
     PRESET_STANDARD_FORMATS,
     PRESET_YUV_FORMATS,
     SensorPreset,
-    filter_sensor_presets,
+    filter_sensor_presets_by_category,
     normalize_preset_format_name,
     normalize_preset_image_type,
-    preset_format_filter_choices,
+    search_sensor_presets,
 )
 
 
@@ -72,19 +73,25 @@ class PresetManagerDialog(QDialog):
         header = QLabel("Presets")
         header.setStyleSheet("font-weight: bold;")
 
-        # Name search + exact stored-format filter are ANDed.  Search remains a
-        # dedicated field (not an editable selection control), so filtering can
-        # never create a fake preset value.
+        # Name search covers every preset type.  The simplified category filter
+        # only constrains browsing when search is empty, matching the main
+        # selector and never exposing Current format/N/A/malformed "12" values.
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search presets…")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setToolTip("Filter preset names as you type (case-insensitive).")
-        self.format_filter_combo = QComboBox()
-        self.format_filter_combo.setToolTip(
-            "Show all presets or one exact stored format. Search and format are combined."
+        self.search_edit.setToolTip(
+            "Search names across all preset types. Use <type:raw + format:raw10 packed>name "
+            "for official structured search."
         )
+        self.category_filter_combo = QComboBox()
+        self.category_filter_combo.addItems(PRESET_CATEGORY_CHOICES)
+        self.category_filter_combo.setToolTip(
+            "Browse All, RAW (including Packed), YUV (including YOnly), or Standard images "
+            "when search is empty."
+        )
+        self.category_filter_combo.setAccessibleName("Preset type")
         self.search_edit.textChanged.connect(self._apply_filter)
-        self.format_filter_combo.currentTextChanged.connect(self._apply_filter)
+        self.category_filter_combo.currentTextChanged.connect(self._apply_filter)
 
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
@@ -111,10 +118,16 @@ class PresetManagerDialog(QDialog):
         list_btn_row.addWidget(self.add_btn, 1)
         list_btn_row.addWidget(self.delete_btn, 1)
 
+        type_row = QHBoxLayout()
+        type_row.setContentsMargins(0, 0, 0, 0)
+        type_label = QLabel("Preset type:")
+        type_row.addWidget(type_label, 0)
+        type_row.addWidget(self.category_filter_combo, 1)
+
         left = QVBoxLayout()
         left.addWidget(header)
+        left.addLayout(type_row)
         left.addWidget(self.search_edit)
-        left.addWidget(self.format_filter_combo)
         left.addWidget(self.list_widget, 1)
         left.addLayout(list_btn_row)
 
@@ -229,28 +242,21 @@ class PresetManagerDialog(QDialog):
 
     # ── List management ─────────────────────────────────────────────────
 
-    def _refresh_format_filter_choices(self, preserve: str | None = None) -> None:
-        """Refresh exact-format choices from registry + current/imported presets."""
-        choices = preset_format_filter_choices(self._presets)
-        selected = preserve if preserve in choices else PRESET_FILTER_ALL
-        self.format_filter_combo.blockSignals(True)
-        self.format_filter_combo.clear()
-        self.format_filter_combo.addItems(choices)
-        self.format_filter_combo.setCurrentText(selected)
-        self.format_filter_combo.blockSignals(False)
-
     def _refresh_list(self, select_index: int = -1) -> None:
         """Rebuild visible rows while retaining canonical indices in item data."""
-        selected_format = self.format_filter_combo.currentText()
-        self._refresh_format_filter_choices(preserve=selected_format)
         self._apply_filter(select_index=select_index)
 
     def _apply_filter(self, *_signal_args, select_index: int = -1) -> None:
-        """Apply name + exact-format filters and keep selection/model mapping safe."""
+        """Search all types when typing; otherwise browse one simplified category."""
         previous_index = self._current_index if select_index < 0 else select_index
-        selected_format = self.format_filter_combo.currentText() or PRESET_FILTER_ALL
-        filtered = filter_sensor_presets(
-            self._presets, self.search_edit.text(), selected_format,
+        query = self.search_edit.text()
+        filtered = (
+            search_sensor_presets(self._presets, query)
+            if query.strip()
+            else filter_sensor_presets_by_category(
+                self._presets,
+                self.category_filter_combo.currentText() or PRESET_CATEGORY_ALL,
+            )
         )
         # Names are unique by model contract; retain each source index so rows
         # can safely map back after filtering, import, editing, or deletion.

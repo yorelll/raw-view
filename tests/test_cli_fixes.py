@@ -27,6 +27,10 @@ from unittest import mock
 
 import numpy as np
 
+from _settings_isolation import ensure_test_settings_file
+
+ensure_test_settings_file()
+
 _MAIN_DIR = Path(__file__).resolve().parents[1]
 
 
