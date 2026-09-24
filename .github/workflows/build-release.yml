@@ -196,7 +196,7 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**367 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**382 passed**）。
 
             ### 🐛 修复（0.4.6）
 
@@ -210,12 +210,20 @@ jobs:
             - **legacy/imported preset 可能静默改坏或误解码**：未知格式、损坏的 type/format 字段或 RAW/YUV 类型错配
               可能回退为默认格式、触发错误 decoder。**修复**：保留原始 legacy identifier 供筛选、编辑、导入导出；
               不支持或不匹配的组合明确禁用 Apply，运行时再次拦截，只有用户主动选择兼容格式才允许解码。
-            - 新增保存路径、preset 兼容/过滤、静默解码竞争与快捷键等回归测试；全量测试 **367 passed, 93 subtests**。
+            - **测试可能污染用户本地预设，嵌入式宿主也可能丢失设置**：测试曾可无隔离地创建 `AppSettings`；
+              根据已导入 `unittest`/`pytest` 猜测测试环境还会让生产宿主误走临时 INI。**修复**：生产只在明确
+              `RAW_VIEW_TEST_SETTINGS_FILE` 或注入 store 时使用 INI；pytest/unittest 从测试启动侧各自建立临时隔离 store，
+              生产即使已导入 unittest/pytest 仍稳定使用 HKCU Settings。
+            - 新增保存路径、Preset 搜索/分类、Settings 隔离、Preset 兼容、静默解码竞争与快捷键等回归测试；
+              全量测试 **382 passed, 100 subtests**。
 
             ### 🆕 新功能 / 增强（0.4.6）
-            - **Preset 搜索与精确格式过滤**：主界面新增名称搜索，以及“全部 / 当前格式 / 每个实际格式”过滤；
-              Preset Manager 保留搜索并加入相同 format filter，两个条件按 AND 组合。支持 RAW、Packed RAW、
-              YOnly bit-depth 与所有 YUV 子格式，列表刷新、编辑、删除、导入导出均保持安全选择。
+            - **合一 Preset 搜索与选择**：主界面将 Select 与 Search 合成一个可编辑下拉框：输入名称时跨全部类别搜索；
+              点击右侧下拉箭头时清除查询，并按当前类别浏览。输入文本与已选 preset 身份分离，清除/退格后不会回填旧名称。
+              Preset Manager 使用相同规则。
+            - **简化 Preset 分类与结构化搜索**：浏览筛选仅保留 **All / RAW / YUV / Standard images**，不再暴露
+              `Current format`、`N/A`、损坏的 `12` 或一长串精确 decoder format。可用 `<type:yuv>name`、
+              `<t:raw + f:raw10 packed>name` 做跨类别的 type/format + 名称 AND 搜索（大小写/空格不敏感）。
             - **Ctrl+A 快速 Apply**：图像视图或主窗口非文本控件有焦点时，`Ctrl+A` 走同一条 Apply 解码路径；
               在搜索框、数值输入框、可编辑下拉框和文本编辑器中仍保持标准的 Select All，不会误解码。
 

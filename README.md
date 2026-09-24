@@ -34,7 +34,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **转换反馈**：Convert 转换中按钮显示 “Converting…” 并禁用防重复点击，完成后提示 ✅ 输出路径 + 文件大小、失败提示 ❌ 原因；Generate Variants 显示 “Generating n/N…” 进度；批量转换显示逐文件进度与汇总报告
 - **应用图标 / Logo**：内置 indigo/violet 传感器 Bayer 马赛克风格 logo（`assets/logo.svg`），用作窗口/任务栏图标与工具栏品牌标识；打包 exe 使用 `assets/raw-view.ico`
 - **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
-- **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部下拉框中选中即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。面板顶部 Preset 行用图标按钮 💾 保存 / ⚙ 管理。预设管理对话框仅保留 **Add / Delete** 按钮，其余 **Rename / Import / Export** 均在列表右键菜单中（右键也支持 Add / Delete，双击列表项就地重命名）；预设超过 8 条时自动出现搜索框过滤
+- **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部**可输入/下拉合一**的 Preset 控件中搜索或选择，即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。输入名称时跨全部预设搜索；点右侧下拉箭头时按 **All presets / RAW（含 Packed）/ YUV（含 YOnly）/ Standard images** 四类浏览。面板顶部 Preset 行用图标按钮 💾 保存 / ⚙ 管理；管理对话框使用同样的分类与搜索语义，右键菜单支持 Rename / Import / Export，双击列表项可就地重命名
 - **RAW Packed 标准布局**：RAW10P / RAW12P / RAW14P 的解码与编码均遵循 MIPI CSI-2 标准布局（B0..Bn-1 = 高 8bit，末字节 = LSBs，MSB-first），与真实 sensor 数据互通
 - **FourCC 查找工具**：Tools → FourCC Lookup，浏览 FourCC ↔ 描述 ↔ MBUS 名称/值的对应关系，支持实时搜索（任意字段）和自定义格式管理（添加/编辑/删除，持久化存储）
 
@@ -246,11 +246,13 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 
 ## Sensor 预设（一键 apply）
 
-为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部提供了 **Preset** 行：
+为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部依次提供 **Preset type** 与 **Preset**：
 
-- **下拉框**：列出所有已保存的预设；选中后立即把所有字段写入面板并自动 Apply（如果当前已打开文件）。
+- **Preset type**：空搜索时的下拉浏览范围：`All`、`RAW`、`YUV`、`Standard images`。RAW 包含 Packed，YUV 包含 YOnly。
+- **Preset**：可输入搜索或从箭头下拉选择。选择预设后会把所有字段写入面板；请再点击 **Apply** 才会渲染当前文件。键入搜索始终跨越所有类型；点击箭头会清空搜索并按当前 Preset type 浏览。
+- **官方结构化搜索**：仅在尖括号内支持条件，语法为 `<type:VALUE + format:VALUE>名称`。`type`/`t` 和 `format`/`f` 是唯一支持的键；条件与尖括号外的名称都为 AND。例如 `<type:yuv>testpreset`、`<t:raw + f:raw10 packed>testpreset`、`< type : raw+format : raw10packed > TESTPRESET`。大小写不敏感，格式比较忽略空白；裸 `type:yuv` 只是普通名称搜索，不是筛选语法。语法错误、未知键或未知 type 会显示无结果，避免意外扩大范围。
 - **Save 按钮**：把面板当前的所有字段（type、format、alignment、endianness、RAW preview、Bayer pattern、width、height、offset）保存为命名预设；同名时会询问是否覆盖。
-- **Manage 按钮**：打开预设管理对话框，可新增 / 重命名 / 编辑 / 删除任意预设。
+- **Manage 按钮**：打开预设管理对话框，可新增 / 重命名 / 编辑 / 删除任意预设；管理器使用相同的 Preset type 与搜索语法。
 
 未打开文件时也可以通过 **Settings → Manage sensor presets** 进入相同的管理对话框。
 
