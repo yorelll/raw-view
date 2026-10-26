@@ -91,6 +91,7 @@ jobs:
               --collect-all=PyQt5 `
               --collect-all=qt_material `
               --collect-all=qtawesome `
+              --collect-all=pypinyin `
               --icon assets/raw-view.ico `
               --add-data "assets;assets" `
               --add-data "$QT_TRANSLATIONS;Qt5/translations" `
@@ -104,6 +105,7 @@ jobs:
               --collect-all=PyQt5 `
               --collect-all=qt_material `
               --collect-all=qtawesome `
+              --collect-all=pypinyin `
               --icon assets/raw-view.ico `
               --add-data "assets;assets" `
               raw_view/__main__.py
@@ -123,6 +125,7 @@ jobs:
             --collect-all=PyQt5 `
             --collect-all=qt_material `
             --collect-all=qtawesome `
+            --collect-all=pypinyin `
             --icon assets/raw-view.ico `
             --add-data "assets;assets" `
             raw_view/__main__.py
@@ -196,36 +199,36 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**382 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**395 passed**）。
 
-            ### 🐛 修复（0.4.6）
+            ### 🐛 修复（0.4.7）
 
-            - **保存图像没有可用默认文件名**：Save Display 对话框此前初始路径为空。**修复**：以当前输入文件的
-              basename 去除最后一个后缀作为保存名，并保留原目录；例如 `capture.raw.bin` → `capture.raw.png`，
-              无后缀与中文路径同样适用，手动输入裸名时仍按 PNG/JPEG 筛选器补后缀。
-            - **首次打开 RAW/YUV 被默认参数错误阻断**：小文件首次自动套用 RAW12/2560×1440 时，默认参数不匹配会弹出
-              Decode Failed，用户必须先关闭弹窗才能修改参数。**修复**：首次自动解码的错误仅更新状态/日志；用户随后
-              明确点击 Apply、翻帧或修改参数产生的错误仍弹窗。解码请求携带独立错误展示意图并在预检前废弃旧 worker，
-              避免迟到结果覆盖当前错误状态。
-            - **legacy/imported preset 可能静默改坏或误解码**：未知格式、损坏的 type/format 字段或 RAW/YUV 类型错配
-              可能回退为默认格式、触发错误 decoder。**修复**：保留原始 legacy identifier 供筛选、编辑、导入导出；
-              不支持或不匹配的组合明确禁用 Apply，运行时再次拦截，只有用户主动选择兼容格式才允许解码。
-            - **测试可能污染用户本地预设，嵌入式宿主也可能丢失设置**：测试曾可无隔离地创建 `AppSettings`；
-              根据已导入 `unittest`/`pytest` 猜测测试环境还会让生产宿主误走临时 INI。**修复**：生产只在明确
-              `RAW_VIEW_TEST_SETTINGS_FILE` 或注入 store 时使用 INI；pytest/unittest 从测试启动侧各自建立临时隔离 store，
+            - **主界面 Preset 搜索不可靠**：主界面可编辑 Preset 框输入 `te` 无法匹配名为 `test` 的预设，且输入文本
+              可能被自动补全/旧选择污染。**修复**：主界面改为**只选择、不搜索**的纯下拉；搜索能力保留在
+              Preset Manager，避免两套不一致的搜索行为。
+            - **Preset 下拉方向键导航被重排打断**：选中预设后立即按最近使用重排模型，按住 Down/Up 会在两项间
+              乒乓、无法到达后续预设。**修复**：选择时只记录使用历史，重排延迟到 popup 关闭/失焦后执行，
+              并按预设身份恢复选中；新增真实 MainWindow 键盘回归。
+            - **被筛选隐藏的当前预设挡住键盘导航**：隐藏选中项的提示曾位于列表末尾。**修复**：提示移到
+              index 0，方向键可立即浏览筛选后的候选。
+            - **测试可能污染用户本地预设，嵌入式宿主也可能丢失设置**：生产只在明确
+              `RAW_VIEW_TEST_SETTINGS_FILE` 或注入 store 时使用 INI；pytest/unittest 从测试启动侧建立隔离 store，
               生产即使已导入 unittest/pytest 仍稳定使用 HKCU Settings。
-            - 新增保存路径、Preset 搜索/分类、Settings 隔离、Preset 兼容、静默解码竞争与快捷键等回归测试；
-              全量测试 **382 passed, 100 subtests**。
+            - 恢复面板级 type/format 安全门禁、dynamic legacy format、未知 type 原子修正等回归测试；
+              新增真实右键事件测试。全量测试 **395 passed, 102 subtests**。
 
-            ### 🆕 新功能 / 增强（0.4.6）
-            - **合一 Preset 搜索与选择**：主界面将 Select 与 Search 合成一个可编辑下拉框：输入名称时跨全部类别搜索；
-              点击右侧下拉箭头时清除查询，并按当前类别浏览。输入文本与已选 preset 身份分离，清除/退格后不会回填旧名称。
-              Preset Manager 使用相同规则。
-            - **简化 Preset 分类与结构化搜索**：浏览筛选仅保留 **All / RAW / YUV / Standard images**，不再暴露
-              `Current format`、`N/A`、损坏的 `12` 或一长串精确 decoder format。可用 `<type:yuv>name`、
-              `<t:raw + f:raw10 packed>name` 做跨类别的 type/format + 名称 AND 搜索（大小写/空格不敏感）。
+            ### 🆕 新功能 / 增强（0.4.7）
+            - **Preset 行整合为「下拉 + 筛选图标」**：删除单独 Preset type 行；点击漏斗图标可在
+              **All / RAW / YUV / Standard images** 间切换，Preset 下拉只显示所选类型的预设。
+            - **最近使用优先排序**：经常使用的预设自动排在下拉前部；使用历史持久化，删除预设时自动清理，
+              重命名保留历史。
+            - **右键菜单取代按钮**：主界面移除 Preset 右侧保存/管理按钮；在左侧参数面板空白处右键即可访问
+              **Manage presets… / Save current as preset…**，文本输入框仍保留原生右键菜单。
+            - **Preset Manager 搜索与排序增强**：名称搜索直接输入即可（如 `te` 命中 `test`）；结构化搜索改为
+              空格分隔的 `<t:yuv f:yuyv>`（继续兼容 `+`）；搜索框提供悬浮/点击示例提示；列表按英文 A→Z、
+              中文拼音排序。
             - **Ctrl+A 快速 Apply**：图像视图或主窗口非文本控件有焦点时，`Ctrl+A` 走同一条 Apply 解码路径；
-              在搜索框、数值输入框、可编辑下拉框和文本编辑器中仍保持标准的 Select All，不会误解码。
+              文本控件中仍保持标准 Select All。
 
             ### 使用方式
             - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
