@@ -137,13 +137,38 @@ class _FakeUrl:
 
 
 class _PresetSettings:
-    """Small AppSettings-compatible preset source for manager dialog tests."""
+    """Small AppSettings-compatible preset source for dialog/window tests."""
 
-    def __init__(self, presets):
+    def __init__(self, presets, usage=None):
         self.sensor_presets = list(presets)
+        self.preset_usage = dict(usage or {})
+        self.preset_category = PRESET_CATEGORY_ALL
+        self.usage_writes: list[str] = []
+        self.usage_renames: list[tuple[str, str]] = []
+
+    def get_sensor_preset(self, name):
+        return next((p for p in self.sensor_presets if p.name == name), None)
 
     def replace_sensor_presets(self, presets):
         self.sensor_presets = list(presets)
+        self.prune_preset_usage()
+
+    def record_preset_use(self, name):
+        self.usage_writes.append(name)
+        record = self.preset_usage.setdefault(name, {"last_used": 0, "count": 0})
+        record["last_used"] = record.get("last_used", 0) + 1
+        record["count"] = record.get("count", 0) + 1
+
+    def prune_preset_usage(self, valid_names=None):
+        valid = {p.name for p in self.sensor_presets} if valid_names is None else set(valid_names)
+        self.preset_usage = {
+            name: record for name, record in self.preset_usage.items() if name in valid
+        }
+
+    def rename_preset_usage(self, old, new):
+        self.usage_renames.append((old, new))
+        if old in self.preset_usage:
+            self.preset_usage[new] = self.preset_usage.pop(old)
 
 
 class AppSettingsIsolationTests(unittest.TestCase):
@@ -218,33 +243,98 @@ class AppSettingsIsolationTests(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-class PersistentPresetSearchPathTests(unittest.TestCase):
-    """Saved preset -> MainWindow refresh -> editable-combo search integration."""
+class PresetUsageSettingsTests(unittest.TestCase):
+    """Recent-use and browse-category persistence stays isolated and robust."""
 
-    def test_saved_test_preset_is_immediately_searchable_from_injected_store(self):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rv-usage-")
+        self.settings = AppSettings(
+            QSettings(os.path.join(self.tmp, "settings.ini"), QSettings.IniFormat)
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_usage_round_trip_and_corruption_tolerance(self):
+        self.settings.save_sensor_preset(SensorPreset(name="a", image_type="RAW", format_name="RAW8"))
+        self.settings.record_preset_use("a", timestamp=100.0)
+        self.settings.record_preset_use("a", timestamp=200.0)
+        usage = self.settings.preset_usage
+        self.assertEqual(usage["a"], {"last_used": 200.0, "count": 2})
+        self.settings._store.setValue("presets/usage", "{not json")
+        self.assertEqual(self.settings.preset_usage, {})
+        self.settings._store.setValue("presets/usage", '{"a": {"last_used": "bad"}}')
+        self.assertEqual(self.settings.preset_usage, {})
+
+    def test_delete_prunes_usage_and_rename_preserves_it(self):
+        for name in ("old", "keep"):
+            self.settings.save_sensor_preset(
+                SensorPreset(name=name, image_type="RAW", format_name="RAW8")
+            )
+        self.settings.record_preset_use("old", timestamp=10.0)
+        self.settings.record_preset_use("keep", timestamp=20.0)
+        self.settings.rename_preset_usage("old", "new")
+        self.assertEqual(set(self.settings.preset_usage), {"new", "keep"})
+        # Mirror what the manager does on Save: the renamed record replaces the
+        # original list, and pruning keeps only names that still exist.
+        self.settings.replace_sensor_presets([
+            SensorPreset(name="new", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="keep", image_type="RAW", format_name="RAW8"),
+        ])
+        self.assertEqual(set(self.settings.preset_usage), {"new", "keep"})
+        self.settings.delete_sensor_preset("new")
+        self.assertEqual(set(self.settings.preset_usage), {"keep"})
+
+    def test_replace_prunes_unknown_usage_and_browse_category_is_safe(self):
+        self.settings.record_preset_use("ghost", timestamp=5.0)
+        self.settings.replace_sensor_presets([
+            SensorPreset(name="real", image_type="RAW", format_name="RAW8"),
+        ])
+        self.assertEqual(self.settings.preset_usage, {})
+        self.assertEqual(self.settings.preset_category, PRESET_CATEGORY_ALL)
+        self.settings.preset_category = PRESET_CATEGORY_YUV
+        self.assertEqual(self.settings.preset_category, PRESET_CATEGORY_YUV)
+        self.settings._store.setValue("presets/browse_category", "bogus")
+        self.assertEqual(self.settings.preset_category, PRESET_CATEGORY_ALL)
+
+    def test_recent_first_browse_sort(self):
+        from raw_view.models import sort_presets_for_browse
+        presets = [
+            SensorPreset(name="Zulu", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="alpha", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="beta", image_type="RAW", format_name="RAW8"),
+        ]
+        ordered = sort_presets_for_browse(
+            presets, {"beta": {"last_used": 50.0}, "Zulu": {"last_used": 90.0}},
+        )
+        self.assertEqual([p.name for p in ordered], ["Zulu", "beta", "alpha"])
+
+
+class PersistentPresetSearchPathTests(unittest.TestCase):
+    """Saved records -> MainWindow selection-only refresh path."""
+
+    def test_saved_preset_is_selectable_from_injected_store(self):
         temp_dir = tempfile.mkdtemp(prefix="rv-preset-search-")
         try:
-            isolated = AppSettings(QSettings(os.path.join(temp_dir, "settings.ini"), QSettings.IniFormat))
+            isolated = AppSettings(
+                QSettings(os.path.join(temp_dir, "settings.ini"), QSettings.IniFormat)
+            )
             isolated.save_sensor_preset(
                 SensorPreset(name="test", image_type="RAW", format_name="RAW12")
             )
             w = MainWindow()
             try:
-                # MainWindow itself uses the test harness's INI; substitute a
-                # second injected store to exercise the actual save/read schema
-                # and refresh path without constructing a production QSettings.
                 w.settings = isolated
                 w._refresh_preset_combo(current="test")
-                line = w.panel.preset_combo.lineEdit()
-                line.setText("test")
-                w.panel._on_preset_query_edited("test")
-                self.assertGreaterEqual(w.panel.preset_combo.findData("test"), 0)
                 index = w.panel.preset_combo.findData("test")
-                w.panel.preset_combo.setCurrentIndex(index)
+                self.assertGreaterEqual(index, 0)
                 selected: list[str] = []
                 w.panel.presetSelected.connect(selected.append)
+                w.panel.preset_combo.setCurrentIndex(index)
                 w.panel._on_preset_activated(index)
                 self.assertEqual(selected, ["test"])
+                # Usage was persisted because this was a real selection signal.
+                self.assertEqual(isolated.preset_usage["test"]["count"], 1)
             finally:
                 w.close()
                 w.deleteLater()
@@ -459,14 +549,7 @@ class PresetManagerFormatFilterTests(unittest.TestCase):
     def test_search_ignores_category_and_empty_browse_uses_category(self):
         choices = [self.dlg.category_filter_combo.itemText(i)
                    for i in range(self.dlg.category_filter_combo.count())]
-        self.assertEqual(choices, [
-            PRESET_CATEGORY_ALL, PRESET_CATEGORY_RAW,
-            PRESET_CATEGORY_YUV, PRESET_CATEGORY_STANDARD,
-        ])
         self.assertEqual(choices, ["All", "RAW", "YUV", "Standard images"])
-        self.assertNotIn("Current format", choices)
-        self.assertNotIn("N/A", choices)
-        self.assertNotIn("12", choices)
         self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
         self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12"])
         self.dlg.search_edit.setText("GAMMA")
@@ -478,21 +561,47 @@ class PresetManagerFormatFilterTests(unittest.TestCase):
         self.assertEqual(self.dlg._current_index, -1)
         self.assertFalse(self.dlg.delete_btn.isEnabled())
 
-    def test_manager_uses_shared_bracketed_search_while_category_is_ignored(self):
+    def test_manager_supports_space_and_plus_structured_search(self):
         self.settings.sensor_presets.append(
             SensorPreset(name="testpreset", image_type="YUV", format_name="YUYV")
         )
         self.dlg._presets = list(self.settings.sensor_presets)
         self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
-        self.dlg.search_edit.setText("<type:yuv>testpreset")
-        self.assertEqual(self._names(), ["testpreset"])
+        for query in ("<type:yuv>testpreset", "<t:yuv + f:yuyv>testpreset"):
+            with self.subTest(query=query):
+                self.dlg.search_edit.setText(query)
+                self.assertEqual(self._names(), ["testpreset"])
+        # A bare condition block intentionally lists every YUV/YUYV preset.
+        self.dlg.search_edit.setText("<type:yuv f:yuyv>")
+        self.assertEqual(self._names(), ["Gamma YUYV", "testpreset"])
         self.dlg.search_edit.setText("<f:raw10 packed>testpreset")
         self.assertEqual(self._names(), [])
+
+    def test_manager_sorts_after_filter_and_keeps_canonical_mapping(self):
+        self.settings.sensor_presets.extend([
+            SensorPreset(name="zeta yuv", image_type="YUV", format_name="NV12"),
+            SensorPreset(name="中文预设", image_type="YUV", format_name="NV12"),
+            SensorPreset(name="Alpha yuv", image_type="YUV", format_name="NV12"),
+        ])
+        self.dlg._presets = list(self.settings.sensor_presets)
+        self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_YUV)
+        # Category browse (no search): Latin A-Z, Chinese afterwards by pinyin.
+        self.assertEqual(self._names(), ["Alpha yuv", "Gamma YUYV", "zeta yuv", "中文预设"])
+        row = self._names().index("zeta yuv")
+        self.dlg.list_widget.setCurrentRow(row)
+        source = self.dlg._current_index
+        self.assertEqual(self.dlg._presets[source].name, "zeta yuv")
+        self.dlg.width_spin.setValue(1234)
+        self.assertEqual(self.dlg._presets[source].width, 1234)
+        self.assertEqual(
+            next(p for p in self.dlg._presets if p.name == "zeta yuv").width, 1234,
+        )
 
     def test_editing_format_refreshes_category_rows_and_source_mapping(self):
         self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
         self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12"])
-        self.dlg.list_widget.setCurrentRow(1)
+        row = self._names().index("beta RAW12")
+        self.dlg.list_widget.setCurrentRow(row)
         self.assertEqual(self.dlg._current_index, 1)  # canonical source index
         self.dlg.format_combo.setCurrentText("RAW8")
         self.assertIn("beta RAW12", self._names())
@@ -502,13 +611,85 @@ class PresetManagerFormatFilterTests(unittest.TestCase):
     def test_add_and_import_style_refresh_keep_active_category_safe(self):
         self.dlg.category_filter_combo.setCurrentText(PRESET_CATEGORY_YUV)
         self.assertEqual(self._names(), ["Gamma YUYV"])
-        # Simulate CRUD/import mutation; source-index mapping stays canonical.
         self.dlg._presets.append(
             SensorPreset(name="New NV12", image_type="YUV", format_name="NV12")
         )
         self.dlg._refresh_list(select_index=len(self.dlg._presets) - 1)
         self.assertEqual(self._names(), ["Gamma YUYV", "New NV12"])
         self.assertEqual(self.dlg._current_index, 3)
+
+    def test_search_hint_tooltip_and_first_focus_hint(self):
+        self.assertIn("<t:yuv f:yuyv>", self.dlg.search_edit.toolTip())
+        self.assertIn("<type:raw format:raw10 packed>name", self.dlg.search_edit.toolTip())
+        self.assertIn("name", self.dlg.search_edit.toolTip())
+        from PyQt5.QtCore import QEvent
+        from PyQt5.QtGui import QFocusEvent
+        with mock.patch("raw_view.gui.dialogs.preset.QToolTip.showText") as show:
+            self.dlg.eventFilter(self.dlg.search_edit, QFocusEvent(QEvent.FocusIn))
+            self.dlg.eventFilter(self.dlg.search_edit, QFocusEvent(QEvent.FocusIn))
+        self.assertEqual(show.call_count, 1, "focus hint must show only once")
+
+
+class MainWindowPresetWorkflowTests(unittest.TestCase):
+    """Main-window preset selection: fill values, record usage, never auto-Apply."""
+
+    def setUp(self):
+        self.w = MainWindow()
+        self.w.settings = _PresetSettings([
+            SensorPreset(name="raw10test", image_type="RAW", format_name="RAW10 Packed", width=64),
+            SensorPreset(name="yuvpreset", image_type="YUV", format_name="YUYV", width=32),
+        ])
+        self.w._refresh_preset_combo()
+        self.applied: list[object] = []
+        self.w._on_apply_clicked = lambda *a, **k: self.applied.append((a, k))
+        self.w._current_item = lambda: None
+
+    def tearDown(self):
+        self.w.close()
+        self.w.deleteLater()
+        _APP.processEvents()
+
+    def test_user_selection_fills_values_records_usage_and_never_applies(self):
+        index = self.w.panel.preset_combo.findData("raw10test")
+        self.assertGreaterEqual(index, 0)
+        self.w.panel.preset_combo.setCurrentIndex(index)
+        self.w.panel._on_preset_activated(index)
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.format_combo.currentText(), "RAW10 Packed")
+        self.assertEqual(self.w.panel.width_spin.value(), 64)
+        self.assertEqual(self.w.settings.usage_writes, ["raw10test"])
+        self.assertEqual(self.applied, [])
+        # Usage reorder is deferred out of the selection call stack (P1-1), so
+        # the rows are untouched until the combo stops being navigated.
+        self.assertEqual(self.w.panel.preset_combo.currentData(), "raw10test")
+        self.assertEqual(self.w.panel.preset_combo.itemText(1), "raw10test")
+        self.assertEqual(self.w.panel.preset_combo.itemData(0), None)
+        # Programmatic activation with no combo focus/navigation may apply the
+        # deferred reorder immediately; the identity must still be preserved.
+        from PyQt5.QtWidgets import QLineEdit
+        other = QLineEdit(self.w)
+        other.show()
+        other.setFocus()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.preset_combo.currentData(), "raw10test")
+        self.assertFalse(self.w.panel._preset_reorder_pending)
+
+    def test_programmatic_refresh_does_not_record_usage(self):
+        self.w._refresh_preset_combo(current="yuvpreset")
+        self.assertEqual(self.w.settings.usage_writes, [])
+        self.assertEqual(self.w.panel.preset_combo.currentData(), "yuvpreset")
+
+    def test_filter_change_persists_category_via_main_window(self):
+        self.w.panel._on_preset_filter_action(
+            self.w.panel._preset_filter_actions[PRESET_CATEGORY_YUV]
+        )
+        self.assertEqual(self.w.settings.preset_category, PRESET_CATEGORY_YUV)
+        self.assertEqual(
+            [self.w.panel.preset_combo.itemText(i)
+             for i in range(self.w.panel.preset_combo.count())
+             if self.w.panel.preset_combo.itemData(i)],
+            ["yuvpreset"],
+        )
 
 
 # ── Save Display default filename ─────────────────────────────────────────

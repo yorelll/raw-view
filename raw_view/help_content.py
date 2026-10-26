@@ -93,15 +93,20 @@ HELP_HTML = """
 </ul>
 <h3>Sensor presets</h3>
 <ul>
-<li><b>Preset type</b> browses <code>All</code>, <code>RAW</code>, <code>YUV</code>, or
-<code>Standard images</code> while search is empty. RAW includes Packed; YUV includes YOnly.</li>
-<li>Type in <b>Preset</b> to search names across every type. The arrow clears the query and
-browses the selected Preset type. Choosing an item fills the panel; click Apply to render.</li>
-<li>Official structured search is bracket-only:
-<code>&lt;type:VALUE + format:VALUE&gt;name</code>. Supported keys are <code>type</code>/<code>t</code>
-and <code>format</code>/<code>f</code>; requirements and the outside name term all AND together.
-Examples: <code>&lt;type:yuv&gt;testpreset</code>,
-<code>&lt;t:raw + f:raw10 packed&gt;testpreset</code>.</li>
+<li>The main <b>Preset</b> control is selection-only (no typing). It fills the panel fields;
+click Apply to render. Its list shows recently used presets first, then unused names A-Z.</li>
+<li>The funnel button browses <code>All</code>, <code>RAW</code>, <code>YUV</code>, or
+<code>Standard images</code> (RAW includes Packed; YUV includes YOnly). A selected preset that is
+filtered out shows <code>(Current preset hidden by filter)</code> and keeps the filled values.</li>
+<li>Right-click empty panel space for <b>Save current as preset…</b> and
+<b>Manage presets…</b>. Text/field controls keep their native context menus.</li>
+<li>Name and structured search live only in the preset manager; its list is sorted A-Z
+(pinyin for Chinese). Search accepts a plain name or bracket-only conditions:
+<code>&lt;type:VALUE format:VALUE&gt;name</code>. Conditions are space-separated (the older
+<code>+</code> separator also works). Supported keys are <code>type</code>/<code>t</code> and
+<code>format</code>/<code>f</code>; they AND with the outside name. Examples:
+<code>&lt;t:yuv f:yuyv&gt;</code>,
+<code>&lt;type:raw format:raw10 packed&gt;name</code>.</li>
 <li>Search is case-insensitive; format comparison ignores whitespace, so
 <code>raw10 packed</code> and <code>raw10packed</code> match alike. Bare <code>type:yuv</code>
 is only a name search. Invalid/unknown bracket requirements return no results.</li>

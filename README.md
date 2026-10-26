@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.4.6** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.4.7** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -34,7 +34,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **转换反馈**：Convert 转换中按钮显示 “Converting…” 并禁用防重复点击，完成后提示 ✅ 输出路径 + 文件大小、失败提示 ❌ 原因；Generate Variants 显示 “Generating n/N…” 进度；批量转换显示逐文件进度与汇总报告
 - **应用图标 / Logo**：内置 indigo/violet 传感器 Bayer 马赛克风格 logo（`assets/logo.svg`），用作窗口/任务栏图标与工具栏品牌标识；打包 exe 使用 `assets/raw-view.ico`
 - **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
-- **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部**可输入/下拉合一**的 Preset 控件中搜索或选择，即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。输入名称时跨全部预设搜索；点右侧下拉箭头时按 **All presets / RAW（含 Packed）/ YUV（含 YOnly）/ Standard images** 四类浏览。面板顶部 Preset 行用图标按钮 💾 保存 / ⚙ 管理；管理对话框使用同样的分类与搜索语义，右键菜单支持 Rename / Import / Export，双击列表项可就地重命名
+- **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部 **Preset** 下拉框中选择，即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。主界面只负责选择：右侧漏斗按钮可在 **All / RAW / YUV / Standard images** 四类间切换浏览范围，下拉列表按最近使用优先、其余按名称排序；名称/结构化搜索只在 **Manage presets** 管理对话框中进行。保存与管理通过左侧控制面板的右键菜单进入；管理对话框支持 Rename / Import / Export 与右键操作，双击列表项可就地重命名
 - **RAW Packed 标准布局**：RAW10P / RAW12P / RAW14P 的解码与编码均遵循 MIPI CSI-2 标准布局（B0..Bn-1 = 高 8bit，末字节 = LSBs，MSB-first），与真实 sensor 数据互通
 - **FourCC 查找工具**：Tools → FourCC Lookup，浏览 FourCC ↔ 描述 ↔ MBUS 名称/值的对应关系，支持实时搜索（任意字段）和自定义格式管理（添加/编辑/删除，持久化存储）
 
@@ -246,13 +246,12 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 
 ## Sensor 预设（一键 apply）
 
-为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部依次提供 **Preset type** 与 **Preset**：
+为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部提供 **Preset** 行：
 
-- **Preset type**：空搜索时的下拉浏览范围：`All`、`RAW`、`YUV`、`Standard images`。RAW 包含 Packed，YUV 包含 YOnly。
-- **Preset**：可输入搜索或从箭头下拉选择。选择预设后会把所有字段写入面板；请再点击 **Apply** 才会渲染当前文件。键入搜索始终跨越所有类型；点击箭头会清空搜索并按当前 Preset type 浏览。
-- **官方结构化搜索**：仅在尖括号内支持条件，语法为 `<type:VALUE + format:VALUE>名称`。`type`/`t` 和 `format`/`f` 是唯一支持的键；条件与尖括号外的名称都为 AND。例如 `<type:yuv>testpreset`、`<t:raw + f:raw10 packed>testpreset`、`< type : raw+format : raw10packed > TESTPRESET`。大小写不敏感，格式比较忽略空白；裸 `type:yuv` 只是普通名称搜索，不是筛选语法。语法错误、未知键或未知 type 会显示无结果，避免意外扩大范围。
-- **Save 按钮**：把面板当前的所有字段（type、format、alignment、endianness、RAW preview、Bayer pattern、width、height、offset）保存为命名预设；同名时会询问是否覆盖。
-- **Manage 按钮**：打开预设管理对话框，可新增 / 重命名 / 编辑 / 删除任意预设；管理器使用相同的 Preset type 与搜索语法。
+- **Preset 下拉框**：只用于选择，不能输入搜索。选择后会把所有字段写入面板；请再点击 **Apply** 才会渲染当前文件。列表按**最近使用优先**排序，未使用过的名称按 A→Z / 拼音排序。
+- **筛选按钮（漏斗图标）**：点击后在 `All`、`RAW`、`YUV`、`Standard images` 四类间切换浏览范围；tooltip 显示当前类型。若当前已选 preset 不在新范围内，下拉框显示 `(Current preset hidden by filter)`，面板已填字段保持不变，也不会静默加载其它 preset。
+- **右键菜单**：在左侧控制面板空白/非文本控件上右键，可选择 **Save current as preset…** 或 **Manage presets…**；文本框、数值框与下拉框保留各自的原生右键菜单。
+- **管理对话框**：独立保留 **Preset type** 行与搜索框；列表按名称 A→Z（中文按拼音）排序。名称可直接输入搜索，也支持仅尖括号内的结构化条件：`<type:VALUE format:VALUE>名称`。`type`/`t`、`format`/`f` 是唯一支持的键，条件之间用**空格**分隔（旧写法 `+` 仍兼容），条件与尖括号外的名称 AND。例如 `<t:yuv f:yuyv>`、`<type:raw format:raw10 packed>name`、`< t : yuv   f : raw10packed > NAME`。大小写不敏感，格式比较忽略空白；裸 `type:yuv` 只是普通名称搜索。语法错误、未知键或未知 type 显示无结果，避免意外扩大范围。
 
 未打开文件时也可以通过 **Settings → Manage sensor presets** 进入相同的管理对话框。
 
@@ -347,7 +346,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.4.6` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.4.7` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

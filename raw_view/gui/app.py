@@ -395,6 +395,7 @@ class MainWindow(QMainWindow):
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
         self.panel.zoomChanged.connect(self._on_panel_zoom_changed)
         self.panel.presetSelected.connect(self._on_preset_selected)
+        self.panel.presetCategoryChanged.connect(self._on_preset_category_changed)
         self.panel.savePresetRequested.connect(self._on_save_preset_clicked)
         self.panel.managePresetsRequested.connect(self._open_preset_manager_dialog)
         self.panel.valuesChanged.connect(self._on_panel_values_changed)
@@ -2263,15 +2264,31 @@ class MainWindow(QMainWindow):
         user explicitly changes format or switches item; otherwise Qt may
         silently select a neighbouring RAW format and corrupt the item on Apply.
         """
-        self.panel.set_presets(self.settings.sensor_presets, current=current)
+        self.panel.set_preset_category(self.settings.preset_category)
+        # Programmatic/structural refresh (startup, save, delete, manager close)
+        # is outside selection dispatch, so the new recent-use order is applied
+        # immediately here.
+        self.panel.set_presets(
+            self.settings.sensor_presets,
+            current=current,
+            usage=self.settings.preset_usage,
+            reorder=True,
+        )
+
+    def _on_preset_category_changed(self, category: str) -> None:
+        """Persist the main panel's browse filter for the next launch."""
+        self.settings.preset_category = category
 
     def _on_preset_selected(self, name: str) -> None:
-        """User picked a preset — populate the panel and trigger Apply."""
+        """User picked a preset — populate the panel (no automatic Apply)."""
         preset = self.settings.get_sensor_preset(name)
         if preset is None:
             logger.warning("Preset '%s' not found in settings", name)
             self._refresh_preset_combo()
             return
+        # Only a real user selection reaches this slot (never refresh/programmatic
+        # selection), so this is the correct place to update recent-use ranking.
+        self.settings.record_preset_use(name)
         # Push every value from the preset onto the panel. set_values follows
         # the same key names as the preset dataclass, so we can splat directly.
         self.panel.set_values(
@@ -2293,6 +2310,19 @@ class MainWindow(QMainWindow):
         item = self._current_item()
         if item is not None:
             self._save_panel_to_item(item)
+        # Recent-use ranking is refreshed only after the user stops navigating
+        # the combo.  Rebuilding the QComboBox model inside this selection call
+        # stack makes held Down/Up keys swap rows and ping-pong between two
+        # presets; the panel defers until popup close / focus-out instead.
+        # ``reorder=False`` is mandatory: without it the guard below rebuilds
+        # synchronously and the P1-1 ping-pong returns.
+        self.panel.set_presets(
+            self.settings.sensor_presets,
+            current=name,
+            usage=self.settings.preset_usage,
+            reorder=False,
+        )
+        self.panel.schedule_preset_reorder()
         self._set_state(f"Preset '{name}' loaded — click Apply", "busy")
 
     def _on_save_preset_clicked(self) -> None:

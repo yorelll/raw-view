@@ -70,6 +70,7 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
     --collect-all=PyQt5 `
     --collect-all=qt_material `
     --collect-all=qtawesome `
+    --collect-all=pypinyin `
     --icon assets/raw-view.ico `
     --add-data "assets;assets" `
     raw_view/__main__.py
@@ -96,6 +97,7 @@ pyinstaller --noconfirm --clean --windowed --name raw-view `
     --collect-all=PyQt5 `
     --collect-all=qt_material `
     --collect-all=qtawesome `
+    --collect-all=pypinyin `
     --icon assets/raw-view.ico `
     --add-data "assets;assets" `
     --add-data ".venv/Lib/site-packages/PyQt5/Qt5/translations;Qt5/translations" `

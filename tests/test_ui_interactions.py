@@ -37,7 +37,7 @@ from _settings_isolation import ensure_test_settings_file  # noqa: E402
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QEvent, QSize, Qt  # noqa: E402
+from PyQt5.QtCore import QEvent, QSettings, QSize, Qt  # noqa: E402
 from PyQt5.QtGui import QKeyEvent  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
@@ -64,6 +64,7 @@ from raw_view.models import (  # noqa: E402
     PRESET_CATEGORY_RAW,
     PRESET_CATEGORY_STANDARD,
     PRESET_CATEGORY_YUV,
+    AppSettings,
     SensorPreset,
     ViewerItem,
 )
@@ -157,7 +158,7 @@ def _add_tab(w, name: str) -> ViewerItem:
 
 
 class MainPanelPresetFilterTests(unittest.TestCase):
-    """Unified editable preset selector: all-type search + coarse browse categories."""
+    """Main-panel selector is selection-only; a funnel button filters by type."""
 
     def setUp(self):
         self.p = _panel()
@@ -182,245 +183,390 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         return [self.p.preset_combo.itemText(i) for i in range(self.p.preset_combo.count())
                 if self.p.preset_combo.itemData(i)]
 
-    def _type_query(self, text: str):
-        # Use real Qt key delivery: the custom editor must detach selected
-        # display text before the first character becomes the query.
-        edit = self.p._preset_line_edit
-        edit.setFocus()
-        QTest.keyClicks(edit, text)
-        QApplication.processEvents()
-
     def _select(self, name: str):
         index = self.p.preset_combo.findData(name)
         self.assertGreaterEqual(index, 0)
+        # A real popup activation leaves the combo on that row before emitting.
         self.p.preset_combo.setCurrentIndex(index)
         self.p._on_preset_activated(index)
         QApplication.processEvents()
 
-    def test_browse_default_all_and_categories_are_coarse(self):
-        self.assertEqual(self.p.preset_category_filter_combo.currentText(), PRESET_CATEGORY_ALL)
+    def test_selector_is_not_editable_and_has_no_search_state(self):
+        self.assertFalse(self.p.preset_combo.isEditable())
+        self.assertIsNone(self.p.preset_combo.lineEdit())
+        for removed in (
+            "_preset_query", "_preset_search_mode", "_preset_line_edit",
+            "preset_category_filter_combo", "preset_save_btn", "preset_manage_btn",
+        ):
+            self.assertFalse(hasattr(self.p, removed), removed)
+
+    def test_funnel_menu_offers_four_categories_and_filters_selector(self):
+        self.assertEqual(self.p.preset_filter_btn.objectName(), "presetFilterButton")
+        actions = self.p._preset_filter_menu.actions()
+        self.assertEqual([a.text() for a in actions], ["All", "RAW", "YUV", "Standard images"])
+        for excluded in ("Current format", "N/A", "12"):
+            self.assertNotIn(excluded, [a.text() for a in actions])
         self.assertEqual(
             self._names(), [
-                "Alpha RAW8", "beta RAW12", "test-yuv", "raw10test", "raw12test",
-                "YOnly twelve", "Standard photo", "legacy unknown",
+                "Alpha RAW8", "beta RAW12", "legacy unknown", "raw10test",
+                "raw12test", "Standard photo", "test-yuv", "YOnly twelve",
             ],
+            "unused presets sort A-Z with pinyin tie-breaking",
         )
-        choices = [self.p.preset_category_filter_combo.itemText(i)
-                   for i in range(self.p.preset_category_filter_combo.count())]
-        self.assertEqual(choices, [
-            PRESET_CATEGORY_ALL, PRESET_CATEGORY_RAW,
-            PRESET_CATEGORY_YUV, PRESET_CATEGORY_STANDARD,
-        ])
-        self.assertEqual(choices, ["All", "RAW", "YUV", "Standard images"])
-        self.assertNotIn("Current format", choices)
-        self.assertNotIn("N/A", choices)
-        self.assertNotIn("12", choices)
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
+        self.assertEqual(self.p.preset_combo.itemText(0), self.p._PRESET_PLACEHOLDER)
+        self.assertIsNone(self.p.preset_combo.itemData(0))
+        self.p._on_preset_filter_action(action_for(self.p, PRESET_CATEGORY_RAW))
+        self.assertEqual(self.p.preset_filter_btn.toolTip().split(".")[0], "Preset type: RAW")
         self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12", "raw10test", "raw12test"])
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_YUV)
+        self.p._on_preset_filter_action(action_for(self.p, PRESET_CATEGORY_YUV))
         self.assertEqual(self._names(), ["test-yuv", "YOnly twelve"])
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_STANDARD)
+        self.p._on_preset_filter_action(action_for(self.p, PRESET_CATEGORY_STANDARD))
         self.assertEqual(self._names(), ["Standard photo"])
 
-    def test_preset_type_is_a_form_row_above_preset_with_aligned_columns(self):
+    def test_selecting_preset_emits_identity_without_changing_fields(self):
+        # The panel itself only reports selection; MainWindow fills the fields.
+        emitted: list[str] = []
+        self.p.presetSelected.connect(emitted.append)
+        self.p.set_values(image_type="RAW", format_name="RAW8", width=1, height=1)
+        self._select("raw10test")
+        self.assertEqual(emitted, ["raw10test"])
+        self.assertEqual(self.p.preset_combo.currentData(), "raw10test")
+        self.assertEqual(self.p.format_combo.currentText(), "RAW8")
+
+    def test_hidden_selected_preset_shows_placeholder_and_keeps_fields(self):
+        self._select("test-yuv")
+        self.p.set_values(image_type="YUV", format_name="YUYV")
+        self.p.set_preset_category(PRESET_CATEGORY_RAW)
+        self.assertEqual(self.p.preset_combo.currentData(), None)
+        self.assertEqual(self.p.preset_combo.itemText(0), self.p._PRESET_HIDDEN_SELECTION)
+        self.assertEqual(
+            self.p.preset_combo.currentText(), self.p._PRESET_HIDDEN_SELECTION,
+        )
+        self.assertEqual(self.p._preset_selected_name, "test-yuv")
+        self.assertEqual(self.p.format_combo.currentText(), "YUYV")
+        # Choosing a real preset still works after returning to All.
+        self.p.set_preset_category(PRESET_CATEGORY_ALL)
+        self.assertEqual(self.p.preset_combo.currentData(), "test-yuv")
+
+    def test_context_menu_actions_emit_existing_signals(self):
+        saved: list[str] = []
+        managed: list[str] = []
+        self.p.savePresetRequested.connect(lambda: saved.append("save"))
+        self.p.managePresetsRequested.connect(lambda: managed.append("manage"))
+        menu = self.p._preset_context_menu()
+        actions = {a.text(): a for a in menu.actions()}
+        self.assertEqual(list(actions), ["Manage presets…", "Save current as preset…"])
+        actions["Manage presets…"].trigger()
+        actions["Save current as preset…"].trigger()
+        self.assertEqual(saved, ["save"])
+        self.assertEqual(managed, ["manage"])
+
+    def test_context_menu_is_not_hijacked_over_input_controls(self):
+        from PyQt5.QtWidgets import QApplication as App
+        self.p.show()
+        App.processEvents()
+        # Text/selection controls own their native context menu.
+        self.assertTrue(self.p._context_menu_blocked(self.p.format_combo))
+        self.assertTrue(self.p._context_menu_blocked(self.p.width_spin))
+        self.assertTrue(self.p._context_menu_blocked(self.p.zoom_slider))
+        self.assertFalse(self.p._context_menu_blocked(self.p._main_form.labelForField(self.p.format_combo)))
+        self.p.close()
+
+    def test_real_context_menu_event_opens_on_blank_but_not_over_fields(self):
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtGui import QContextMenuEvent
+        from unittest import mock
+        self.p.resize(380, 760)
         self.p.show()
         QApplication.processEvents()
-        preset_row = self.p.preset_combo.parentWidget()
-        type_label = self.p._main_form.labelForField(self.p.preset_category_filter_combo)
-        preset_label = self.p._main_form.labelForField(preset_row)
-        self.assertEqual(self.p._main_form.getWidgetPosition(self.p.preset_category_filter_combo)[0], 0)
-        self.assertEqual(self.p._main_form.getWidgetPosition(preset_row)[0], 1)
-        self.assertEqual(type_label.x(), preset_label.x())
-        self.assertEqual(self.p.preset_category_filter_combo.x(), preset_row.x())
+        QApplication.processEvents()
+        shown: list[str] = []
+        with mock.patch("PyQt5.QtWidgets.QMenu.exec_", side_effect=lambda *a: shown.append("menu")):
+            blank = QPoint(4, self.p.height() - 6)
+            self.assertIsNone(self.p.childAt(blank))
+            QApplication.sendEvent(
+                self.p,
+                QContextMenuEvent(QContextMenuEvent.Mouse, blank, self.p.mapToGlobal(blank)),
+            )
+            self.assertEqual(shown, ["menu"])
+            # A spinbox editor is the deepest child; it must keep its own
+            # native menu through the ancestor walk in _context_menu_blocked.
+            editor = self.p.width_spin.lineEdit()
+            spin_pos = editor.mapTo(self.p, editor.rect().center())
+            self.assertTrue(self.p._context_menu_blocked(editor))
+            self.assertTrue(self.p._context_menu_blocked(self.p.width_spin))
+            QApplication.sendEvent(
+                self.p,
+                QContextMenuEvent(QContextMenuEvent.Mouse, spin_pos, self.p.mapToGlobal(spin_pos)),
+            )
+            self.assertEqual(shown, ["menu"], "field context menu must not be hijacked")
+        self.p.close()
+
+    def test_real_right_mouse_click_on_spinbox_editor_does_not_open_panel_menu(self):
+        """Real right-click must be filtered by the panel context-menu handler.
+
+        On Windows the right-click press arrives first, then Qt delivers a
+        ``QContextMenuEvent`` to the deepest child.  A QLineEdit opens its own
+        native (C++-side) menu for that event, so the test sends the press to
+        the editor and the context event to the panel with the same position:
+        this covers the panel's routing decision without opening Qt's blocking
+        native text menu.
+        """
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtGui import QContextMenuEvent
+        from unittest import mock
+        self.p.resize(380, 760)
+        self.p.show()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        seen_texts: list[list[str]] = []
+        original = ControlPanel._preset_context_menu
+
+        def _spy(panel_self):
+            menu = original(panel_self)
+            seen_texts.append([action.text() for action in menu.actions()])
+            return menu
+
+        def _right_click_at(pos):
+            QTest.mouseClick(self.p, Qt.RightButton, Qt.NoModifier, pos)
+            QApplication.sendEvent(
+                self.p,
+                QContextMenuEvent(
+                    QContextMenuEvent.Mouse, pos, self.p.mapToGlobal(pos),
+                ),
+            )
+            QApplication.processEvents()
+
+        with mock.patch.object(ControlPanel, "_preset_context_menu", _spy), \
+             mock.patch("PyQt5.QtWidgets.QMenu.exec_", return_value=None):
+            editor = self.p.width_spin.lineEdit()
+            spin_pos = editor.mapTo(self.p, editor.rect().center())
+            self.assertIs(self.p.childAt(spin_pos), editor)
+            _right_click_at(spin_pos)
+            self.assertEqual(seen_texts, [], "spinbox editor must keep its native menu")
+
+            blank = QPoint(4, self.p.height() - 6)
+            self.assertIsNone(self.p.childAt(blank))
+            _right_click_at(blank)
         self.assertEqual(
-            self.p.preset_category_filter_combo.sizePolicy().verticalPolicy(),
-            self.p.format_combo.sizePolicy().verticalPolicy(),
+            seen_texts,
+            [["Manage presets…", "Save current as preset…"]],
         )
+        self.p.close()
 
-    def test_typed_search_is_case_insensitive_and_ignores_category(self):
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
-        self._type_query("TEST")
-        self.assertEqual(self._names(), ["test-yuv", "raw10test", "raw12test"])
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_STANDARD)
-        self.assertEqual(
-            self._names(), ["test-yuv", "raw10test", "raw12test"],
-            "category cannot constrain active search",
+    def test_recent_usage_reorders_and_new_selection_moves_first(self):
+        # Programmatic refresh (outside selection dispatch) must request the
+        # rebuilt order explicitly; the API default is deferred by design.
+        self.p.set_presets(
+            self.presets,
+            usage={"raw12test": {"last_used": 20.0, "count": 2},
+                   "test-yuv": {"last_used": 10.0, "count": 1}},
+            reorder=True,
         )
-        QTest.keyClick(self.p._preset_line_edit, Qt.Key_A, Qt.ControlModifier)
-        QTest.keyClicks(self.p._preset_line_edit, "no such preset")
-        QApplication.processEvents()
-        self.assertEqual(self._names(), [])
-        self.assertEqual(self.p.preset_combo.itemData(self.p.preset_combo.currentIndex()), None)
+        self.assertEqual(self._names()[:2], ["raw12test", "test-yuv"])
+        self.assertEqual(self._names()[2:], sorted(
+            ["Alpha RAW8", "beta RAW12", "raw10test", "YOnly twelve",
+             "Standard photo", "legacy unknown"],
+            key=str.casefold,
+        ))
 
-    def test_arrow_clears_search_then_browses_category_without_loading(self):
-        emitted: list[str] = []
-        self.p.presetSelected.connect(emitted.append)
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
-        self._type_query("test-yuv")
-        self.assertEqual(self._names(), ["test-yuv"])
-        self.p.preset_combo.showPopup()  # native-arrow mode transition hook
-        QApplication.processEvents()
-        self.assertEqual(self.p._preset_line_edit.text(), "")
-        self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12", "raw10test", "raw12test"])
-        self.assertEqual(emitted, [])
-        self.assertIsNone(self.p._preset_selected_name)
-
-    def test_select_search_result_loads_exact_preset_and_display_settles(self):
-        emitted: list[str] = []
-        self.p.presetSelected.connect(emitted.append)
-        self._type_query("test-yuv")
-        self._select("test-yuv")
-        self.assertEqual(emitted, ["test-yuv"])
-        self.assertEqual(self.p._preset_line_edit.text(), "test-yuv")
-        self.assertFalse(self.p._preset_search_mode)
-
-    def test_shown_editor_query_exactly_matches_typed_pasted_and_deleted_text(self):
-        """No QComboBox inline-completion suffix may appear in a real visible UI."""
-        host = QWidget()
-        layout = QVBoxLayout(host)
-        layout.addWidget(self.p)
-        host.resize(520, 640)
-        host.show()
-        QApplication.processEvents()
-        emitted: list[str] = []
-        self.p.presetSelected.connect(emitted.append)
-        try:
-            self._select("raw10test")
-            edit = self.p._preset_line_edit
-            self.assertEqual(edit.text(), "raw10test")
-            self.assertIsNone(edit.completer())
-            self.assertIsNone(self.p.preset_combo.completer())
-
-            edit.setFocus()
-            QTest.keyClicks(edit, "raw12")
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "raw12")
-            self.assertEqual(self.p._preset_query, "raw12")
-            self.assertEqual(self._names(), ["beta RAW12", "raw12test"])
-            self.assertEqual(self.p.preset_combo.currentIndex(), -1)
-            self.assertEqual(emitted, ["raw10test"])
-
-            QTest.keyClicks(edit, "x")
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "raw12x")
-            self.assertEqual(self.p._preset_query, "raw12x")
-            QTest.keyClick(edit, Qt.Key_Backspace)
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "raw12")
-            self.assertEqual(self.p._preset_query, "raw12")
-
-            QApplication.clipboard().setText("<t:raw + f:raw10packed>test")
-            QTest.keyClick(edit, Qt.Key_A, Qt.ControlModifier)
-            QTest.keyClick(edit, Qt.Key_V, Qt.ControlModifier)
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "<t:raw + f:raw10packed>test")
-            self.assertEqual(self.p._preset_query, "<t:raw + f:raw10packed>test")
-            self.assertEqual(self._names(), ["raw10test"])
-
-            clear = edit.findChild(QToolButton)
-            self.assertIsNotNone(clear)
-            clear.click()
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "")
-            self.assertEqual(self.p._preset_query, "")
-            self.assertEqual(self.p.preset_combo.currentIndex(), -1)
-            self.assertEqual(emitted, ["raw10test"])
-
-            # Actual popup keyboard navigation/Enter still selects the filtered
-            # item with completion disabled; typing itself never emitted a load.
-            QTest.keyClicks(edit, "raw12")
-            self.p.preset_combo.showPopup()
-            QApplication.processEvents()
-            popup = self.p.preset_combo.view()
-            self.assertTrue(popup.isVisible())
-            popup.setFocus()
-            index = self.p.preset_combo.findData("raw12test")
-            self.assertGreaterEqual(index, 0)
-            popup.setCurrentIndex(self.p.preset_combo.model().index(index, 0))
-            QTest.keyClick(popup, Qt.Key_Return)
-            QApplication.processEvents()
-            self.assertEqual(edit.text(), "raw12test")
-            self.assertEqual(emitted, ["raw10test", "raw12test"])
-        finally:
-            host.close()
-            host.deleteLater()
-            QApplication.processEvents()
-
-    def test_clear_button_clears_entire_query_without_loading_or_restoring_selection(self):
-        emitted: list[str] = []
-        self.p.presetSelected.connect(emitted.append)
-        self._select("raw10test")
-        self._type_query("raw12")
-        # Qt's native clear control is a QToolButton; invoke it directly so
-        # this covers the actual clear-X signal path rather than setText("").
-        clear = self.p._preset_line_edit.findChild(QToolButton)
-        self.assertIsNotNone(clear)
-        clear.click()
-        QApplication.processEvents()
-        self.assertEqual(self.p._preset_line_edit.text(), "")
-        self.assertEqual(self.p._preset_query, "")
-        self.assertEqual(emitted, ["raw10test"])
-        self.assertEqual(self._names(), [
-            "Alpha RAW8", "beta RAW12", "test-yuv", "raw10test", "raw12test",
-            "YOnly twelve", "Standard photo", "legacy unknown",
-        ])
-
-    def test_backspace_to_empty_keeps_empty_browse_ready_state(self):
-        self._select("raw10test")
-        self._type_query("raw12")
-        for _ in "raw12":
-            QTest.keyClick(self.p._preset_line_edit, Qt.Key_Backspace)
-        QApplication.processEvents()
-        self.assertEqual(self.p._preset_line_edit.text(), "")
-        self.assertEqual(self.p._preset_query, "")
-        self.assertTrue(self.p._preset_search_mode)
-        self.assertNotEqual(self.p._preset_line_edit.text(), "raw10test")
-        self._type_query("test-yuv")
-        self.assertEqual(self._names(), ["test-yuv"])
-
-    def test_refresh_or_deletion_never_restores_stale_selected_text(self):
-        self._select("raw10test")
-        self._type_query("raw12")
-        self.p.set_presets([p for p in self.presets if p.name != "raw10test"])
-        self.assertEqual(self.p._preset_line_edit.text(), "raw12")
-        self.assertIsNone(self.p._preset_selected_name)
-        self.assertEqual(self._names(), ["beta RAW12", "raw12test"])
-        # Enter cannot load an arbitrary query or the just-deleted identity.
-        self.p._on_preset_activated(-1)
-        self.assertEqual(self.p._preset_line_edit.text(), "raw12")
-
-    def test_structured_search_uses_shared_parser_and_ignores_category(self):
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_RAW)
-        self._type_query("<type:yuv>test")
-        self.assertEqual(self._names(), ["test-yuv"])
-        QTest.keyClick(self.p._preset_line_edit, Qt.Key_A, Qt.ControlModifier)
-        QTest.keyClicks(self.p._preset_line_edit, "<t:raw + f:raw10packed>test")
-        QApplication.processEvents()
-        self.assertEqual(self._names(), ["raw10test"])
-
-    def test_saved_test_preset_remains_searchable_after_refresh(self):
-        self.p.set_presets(self.presets + [
-            SensorPreset(name="test", image_type="RAW", format_name="RAW12"),
-        ], current="test")
-        self._type_query("test")
-        self.assertEqual(self._names(), ["test-yuv", "raw10test", "raw12test", "test"])
-        self.assertIn("test", self._names())
-
-    def test_unknown_legacy_format_is_preserved_and_apply_is_safely_disabled(self):
-        legacy = SensorPreset(
-            name="legacy", image_type="RAW", format_name="VendorRAW", width=111,
-        )
-        self.p.set_presets([legacy])
-        self.p.preset_category_filter_combo.setCurrentText(PRESET_CATEGORY_ALL)
-        self.assertEqual(self._names(), ["legacy"])
+    def test_legacy_unknown_format_remains_selectable_with_apply_disabled(self):
+        self.p.set_presets([SensorPreset(name="legacy", image_type="RAW", format_name="VendorRAW")])
+        self.p.set_preset_category(PRESET_CATEGORY_ALL)
+        self.assertIn("legacy", self._names())
+        self._select("legacy")
         self.p.set_values(image_type="RAW", format_name="VendorRAW", width=111)
         self.assertEqual(self.p.format_combo.currentText(), "VendorRAW")
-        self.assertEqual(self.p.get_values()["format_name"], "VendorRAW")
         self.assertFalse(self.p.apply_btn.isEnabled())
         self.assertIn("Unsupported format 'VendorRAW' for RAW", self.p.apply_btn.toolTip())
-        # Switching back to a real codec format restores normal Apply behavior.
         self.p.set_format("RAW8")
         self.assertTrue(self.p.apply_btn.isEnabled())
+
+
+class PresetKeyboardNavigationTests(unittest.TestCase):
+    """P1-1 production-path regression: use a real MainWindow + real settings.
+
+    Earlier coverage mirrored ``_on_preset_selected`` in the test, which hid a
+    real bug (the production call omitted ``reorder=False``).  These tests drive
+    ``MainWindow`` end-to-end so the actual signal wiring is exercised.
+    """
+
+    NAMES = ("Alpha", "Beta", "Delta", "Gamma")
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix="rv-nav-presets-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = QSettings(os.path.join(tmp, "settings.ini"), QSettings.IniFormat)
+        self.settings = AppSettings(store)
+        for name in self.NAMES:
+            self.settings.save_sensor_preset(
+                SensorPreset(name=name, image_type="RAW", format_name="RAW8", width=32)
+            )
+        self.w = MainWindow()
+        self.w.settings = self.settings
+        self.w.resize(900, 720)
+        self.w.show()
+        QApplication.processEvents()
+        self.w._refresh_preset_combo()
+        QApplication.processEvents()
+        self.emitted: list[str] = []
+        self.w.panel.presetSelected.connect(self.emitted.append)
+        self.applied: list[str] = []
+        self.w._on_apply_clicked = lambda *a, **k: self.applied.append("apply")
+        self.w._current_item = lambda: None
+        # The panel starts disabled when no item is open; enable it exactly as
+        # opening a file would, so the selector accepts real keyboard input.
+        self.w.panel.set_enabled(True)
+        self.w.panel.preset_combo.setFocus()
+        QApplication.processEvents()
+
+    def tearDown(self):
+        self.w.close()
+        self.w.deleteLater()
+        QApplication.processEvents()
+
+    def _combo(self):
+        return self.w.panel.preset_combo
+
+    def _current(self):
+        return self._combo().currentData()
+
+    def _names(self):
+        return [self._combo().itemText(i) for i in range(self._combo().count())]
+
+    def _usage_count(self, name: str) -> int:
+        return int(self.settings.preset_usage.get(name, {}).get("count", 0))
+
+    def test_down_visits_every_preset_without_ping_pong(self):
+        visited = []
+        for _ in range(8):
+            QTest.keyClick(self._combo(), Qt.Key_Down)
+            QApplication.processEvents()
+            visited.append(self._current())
+        self.assertEqual(visited[:4], list(self.NAMES))
+        self.assertEqual(len(set(visited[:4])), 4, visited)
+        self.assertEqual(visited[4:], ["Gamma"] * 4, "end is clamped")
+        # Rows never reordered during navigation, and exactly one usage count
+        # per key press (no duplicate re-count from a rebuild).
+        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+        self.assertTrue(self.w.panel._preset_reorder_pending)
+        self.assertEqual([self._usage_count(n) for n in self.NAMES], [1, 1, 1, 1])
+        self.assertEqual(self.applied, [], "navigation must never Apply")
+
+    def test_up_visits_every_preset_without_ping_pong(self):
+        index = self._combo().findData("Gamma")
+        self._combo().setCurrentIndex(index)
+        visited = []
+        for _ in range(4):
+            QTest.keyClick(self._combo(), Qt.Key_Up)
+            QApplication.processEvents()
+            visited.append(self._current())
+        self.assertEqual(visited, ["Delta", "Beta", "Alpha", None])
+        self.assertEqual(len({v for v in visited if v}), 3)
+        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+        self.assertEqual(self.applied, [])
+
+    def test_popup_keyboard_navigation_reaches_every_row(self):
+        self._combo().showPopup()
+        QApplication.processEvents()
+        popup = self._combo().view()
+        self.assertTrue(popup.isVisible())
+        popup.setFocus()
+        seen = []
+        for _ in range(4):
+            QTest.keyClick(popup, Qt.Key_Down)
+            QApplication.processEvents()
+            seen.append(popup.currentIndex().row())
+        for _ in range(4):
+            QTest.keyClick(popup, Qt.Key_Up)
+            QApplication.processEvents()
+            seen.append(popup.currentIndex().row())
+        self.assertEqual(len(set(seen)), 5, f"all rows reachable: {seen}")
+        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+
+    def test_reorder_after_focus_out_keeps_identity_fields_and_never_reapplies(self):
+        QTest.keyClick(self._combo(), Qt.Key_Down)
+        QTest.keyClick(self._combo(), Qt.Key_Down)
+        QApplication.processEvents()
+        self.assertEqual(self._current(), "Beta")
+        self.assertEqual(self.emitted, ["Alpha", "Beta"])
+        width_before = self.w.panel.width_spin.value()
+        emitted_before = list(self.emitted)
+        other = QLineEdit(self.w)
+        other.show()
+        other.setFocus()
+        QApplication.processEvents()
+        # Reorder applied, same identity still selected, no extra signal/Apply.
+        self.assertEqual(self._names()[1], "Beta")
+        self.assertEqual(self._current(), "Beta")
+        self.assertEqual(self.w.panel.width_spin.value(), width_before)
+        self.assertEqual(self.emitted, emitted_before)
+        self.assertEqual(self.applied, [])
+        self.assertEqual(self._usage_count("Beta"), 1)
+        self.assertFalse(self.w.panel._preset_reorder_pending)
+
+    def test_hidden_selection_uses_placeholder_slot_and_down_reaches_first_raw(self):
+        """Real MainWindow path: filtered-out identity is not a dead-end item."""
+        # Replace this test's record set so the setUp Alpha/Beta/... presets do
+        # not also satisfy the RAW filter.
+        self.settings.replace_sensor_presets([
+            SensorPreset(name="raw1", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="raw2", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="yuv1", image_type="YUV", format_name="YUYV"),
+        ])
+        self.w._refresh_preset_combo()
+        QApplication.processEvents()
+        combo = self._combo()
+        index = combo.findData("yuv1")
+        self.assertGreaterEqual(index, 0)
+        combo.setCurrentIndex(index)
+        self.w.panel._on_preset_activated(index)
+        QApplication.processEvents()
+        self.assertEqual(self.w.panel.format_combo.currentText(), "YUYV")
+
+        self.w.panel.set_preset_category(PRESET_CATEGORY_RAW)
+        self.assertEqual(combo.currentIndex(), 0)
+        self.assertIsNone(combo.currentData())
+        self.assertEqual(combo.itemText(0), self.w.panel._PRESET_HIDDEN_SELECTION)
+        self.assertEqual(self.w.panel._preset_selected_name, "yuv1")
+        self.assertEqual(self.w.panel.format_combo.currentText(), "YUYV")
+
+        combo.setFocus()
+        QApplication.processEvents()
+        QTest.keyClick(combo, Qt.Key_Down)
+        QApplication.processEvents()
+        self.assertEqual(combo.currentData(), "raw1")
+        visited = []
+        for _ in range(3):
+            QTest.keyClick(combo, Qt.Key_Down)
+            QApplication.processEvents()
+            visited.append(combo.currentData())
+        self.assertEqual(visited[:2], ["raw2", "raw2"], "Down clamps at last row")
+        self.assertEqual(self.w.panel._preset_selected_name, "raw2")
+        # Returning to All keeps the explicit selection, not the stale yuv1.
+        self.w.panel.set_preset_category(PRESET_CATEGORY_ALL)
+        self.assertEqual(combo.currentData(), "raw2")
+
+
+def action_for(panel, category):
+    return panel._preset_filter_actions[category]
+
+
+class _PanelSafetyPresetTests(unittest.TestCase):
+    """Preset-safety coverage migrated from the pre-v0.4.7 panel tests.
+
+    These six regressions are UI/field-level guarantees (Apply gating and
+    legacy identifier round-trip), so they stay as real widget tests rather
+    than pure helper tests.
+    """
+
+    def setUp(self):
+        self.p = _panel()
+
+    def tearDown(self):
+        self.p.close()
+        self.p.deleteLater()
+        QApplication.processEvents()
 
     def test_type_format_mismatches_disable_apply_and_preserve_identifier(self):
         for image_type, format_name in (
@@ -441,8 +587,6 @@ class MainPanelPresetFilterTests(unittest.TestCase):
     def test_type_switch_or_legal_format_restores_apply(self):
         self.p.set_values(image_type="RAW", format_name="YUYV")
         self.assertFalse(self.p.apply_btn.isEnabled())
-        # The mismatched value remains selected; changing its type makes it a
-        # legitimate YUV decode format and immediately restores Apply.
         self.p.set_type("YUV")
         self.p.set_format("YUYV")
         self.assertTrue(self.p.apply_btn.isEnabled())
@@ -457,21 +601,16 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
         self.p.set_values(image_type="RAW", format_name="RAW8")
         self.assertEqual(self.p.format_combo.findText("VendorRAW"), -1)
-        # Current legacy item stays selected across selector refresh even when
-        # its preset record disappeared; it must not fall back to RAW32.
         legacy = SensorPreset(name="legacy", image_type="RAW", format_name="VendorRAW")
         self.p.set_presets([legacy])
         self.p.set_values(image_type="RAW", format_name="VendorRAW")
         self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
-        # A second inactive legacy entry is pruned on refresh, while the actual
-        # current VendorRAW must survive manager deletion.
         self.p._add_dynamic_format("VendorB")
         self.p.set_presets([])
         self.assertEqual(self.p.format_combo.currentText(), "VendorRAW")
         self.assertGreaterEqual(self.p.format_combo.findText("VendorRAW"), 0)
         self.assertEqual(self.p.format_combo.findText("VendorB"), -1)
         self.assertFalse(self.p.apply_btn.isEnabled())
-        # Explicit legal user choice removes the stale temporary entry.
         self.p.set_format("RAW8")
         self.assertEqual(self.p.format_combo.findText("VendorRAW"), -1)
         self.assertTrue(self.p.apply_btn.isEnabled())
@@ -585,7 +724,7 @@ class AdvancedVisibilityTests(unittest.TestCase):
             p.set_type("YUV")
             p.set_format("I420")
 
-        self.assertEqual(p._main_form.rowCount(), 9)
+        self.assertEqual(p._main_form.rowCount(), 8)
         for name, _label in p._COND_ROW_SPECS:
             field = getattr(p, name)
             self.assertIsNone(_label_for(p, field))
@@ -601,13 +740,13 @@ class AdvancedVisibilityTests(unittest.TestCase):
         zoom_label = p._main_form.labelForField(zoom_row)
         self.assertIsNotNone(zoom_label)
         self.assertEqual(zoom_label.text(), "Zoom")
-        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 8)
-        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 7)
-        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 6)
-        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 5)
-        self.assertEqual(p._main_form.getWidgetPosition(p.format_combo)[0], 4)
-        self.assertEqual(p._main_form.getWidgetPosition(p.type_combo)[0], 3)
-        self.assertEqual(p._main_form.rowCount(), 9)
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 6)
+        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 5)
+        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 4)
+        self.assertEqual(p._main_form.getWidgetPosition(p.format_combo)[0], 3)
+        self.assertEqual(p._main_form.getWidgetPosition(p.type_combo)[0], 2)
+        self.assertEqual(p._main_form.rowCount(), 8)
         self.assertEqual(len(p._cond_row_labels), 5)
         self.assertTrue(all(label.isHidden() for label in p._cond_row_labels.values()))
         self.assertTrue(all(getattr(p, name).isHidden() for name, _ in p._COND_ROW_SPECS))
@@ -619,13 +758,10 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.assertIsNotNone(p._main_form.labelForField(p.height_spin))
         self.assertIsNotNone(p._main_form.labelForField(p.offset_spin))
         preset_row = p.preset_combo.parentWidget()
-        self.assertIsNotNone(p._main_form.labelForField(p.preset_category_filter_combo))
-        self.assertEqual(_label_for(p, p.preset_category_filter_combo), "Preset type")
         self.assertIsNotNone(p._main_form.labelForField(preset_row))
         self.assertEqual(_label_for(p, preset_row), "Preset")
-        self.assertEqual(p._main_form.getWidgetPosition(p.preset_category_filter_combo)[0], 0)
-        self.assertEqual(p._main_form.getWidgetPosition(preset_row)[0], 1)
-        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 8)
+        self.assertEqual(p._main_form.getWidgetPosition(preset_row)[0], 0)
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
         self.assertIsNotNone(p.type_combo.nextInFocusChain())
         self.assertIsNotNone(p.format_combo.nextInFocusChain())
         # The widgets remain owned by the panel for later reinsertion, but are
@@ -638,13 +774,13 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.assertTrue(p.align_combo.isHidden())
         self.assertIsNone(_label_for(p, p.align_combo))
         p.set_format("YOnly")
-        self.assertEqual(p._main_form.rowCount(), 12)
-        self.assertEqual(p._main_form.getWidgetPosition(p.bit_depth_combo)[0], 5)
-        self.assertEqual(p._main_form.getWidgetPosition(p.align_combo)[0], 6)
-        self.assertEqual(p._main_form.getWidgetPosition(p.endian_combo)[0], 7)
-        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 8)
-        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 9)
-        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 10)
+        self.assertEqual(p._main_form.rowCount(), 11)
+        self.assertEqual(p._main_form.getWidgetPosition(p.bit_depth_combo)[0], 4)
+        self.assertEqual(p._main_form.getWidgetPosition(p.align_combo)[0], 5)
+        self.assertEqual(p._main_form.getWidgetPosition(p.endian_combo)[0], 6)
+        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 8)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 9)
         # Switch back to a plain YUV format and verify the same hidden-row
         # invariant survives reinsertion/removal once more.
         p.set_format("YUYV")
@@ -941,8 +1077,10 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
     def test_control_panel_accessible_names_match_actions(self):
         panel = _panel()
         try:
-            self.assertEqual(panel.preset_save_btn.accessibleName(), "Save sensor preset")
-            self.assertEqual(panel.preset_manage_btn.accessibleName(), "Manage sensor presets")
+            self.assertEqual(panel.preset_filter_btn.accessibleName(), "Filter presets by type")
+            self.assertIn("Preset type: ALL", panel.preset_filter_btn.toolTip())
+            self.assertEqual(panel.preset_manage_action.text(), "Manage presets…")
+            self.assertEqual(panel.preset_save_action.text(), "Save current as preset…")
             self.assertEqual(panel.zoom_slider.accessibleName(), "Zoom level")
             self.assertIn("10%", panel.zoom_slider.accessibleDescription())
             self.assertIn("1000%", panel.zoom_slider.accessibleDescription())
@@ -1395,15 +1533,24 @@ class ApplyShortcutTests(unittest.TestCase):
         self.w.apply_action.trigger()
         self.assertEqual(captured, [((), {"warn_mismatch": True, "show_error": True})])
 
-    def test_main_panel_editable_preset_combo_keeps_select_all(self):
-        search = self.w.panel.preset_combo.lineEdit()
-        search.setText("find these presets")
-        search.setFocus()
+    def test_main_panel_preset_selector_is_not_a_text_editor(self):
+        # The main preset control is selection-only; Ctrl+A there therefore
+        # behaves like any non-text focus and still routes to Apply exactly once.
+        combo = self.w.panel.preset_combo
+        self.assertFalse(combo.isEditable())
+        self.assertIsNone(combo.lineEdit())
+        combo.setFocus()
         _APP.processEvents()
-        self._ctrl_a(search)
+        self._ctrl_a(combo)
         _APP.processEvents()
-        self.assertEqual(search.selectedText(), "find these presets")
-        self.assertEqual(self.called, [])
+        self.assertEqual(self.called, ["apply"])
+
+    def test_main_panel_filter_button_keeps_native_ctrl_a_apply(self):
+        self.w.panel.preset_filter_btn.setFocus()
+        _APP.processEvents()
+        self._ctrl_a(self.w.panel.preset_filter_btn)
+        _APP.processEvents()
+        self.assertEqual(self.called, ["apply"])
 
     def test_plain_text_editor_keeps_select_all(self):
         editor = QPlainTextEdit("select this text", self.w)

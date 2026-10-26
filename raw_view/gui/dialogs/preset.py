@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import QEvent, Qt, QSize
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +44,7 @@ from raw_view.models import (
     filter_sensor_presets_by_category,
     normalize_preset_format_name,
     normalize_preset_image_type,
+    preset_name_sort_key,
     search_sensor_presets,
 )
 
@@ -63,6 +65,7 @@ class PresetManagerDialog(QDialog):
         self._current_index: int = -1
         self._visible_indices: list[int] = []  # list row -> canonical _presets index
         self._loading: bool = False  # guards against edit-callback recursion
+        self._pending_usage_renames: list[tuple[str, str]] = []
 
         self.setWindowTitle("Sensor Presets")
         self.resize(680, 460)
@@ -79,10 +82,16 @@ class PresetManagerDialog(QDialog):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search presets…")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setToolTip(
-            "Search names across all preset types. Use <type:raw + format:raw10 packed>name "
-            "for official structured search."
+        self._search_hint = (
+            "Search presets by name, or use official bracketed conditions:\n"
+            "  <t:yuv f:yuyv>\n"
+            "  <type:raw format:raw10 packed>name\n"
+            "Space-separated conditions are official; '+' also works.\n"
+            "Keys: type/t, format/f. Case-insensitive; raw10packed equals raw10 packed."
         )
+        self.search_edit.setToolTip(self._search_hint)
+        self.search_edit.setAccessibleDescription(self._search_hint)
+        self.search_edit.setAccessibleName("Search sensor presets")
         self.category_filter_combo = QComboBox()
         self.category_filter_combo.addItems(PRESET_CATEGORY_CHOICES)
         self.category_filter_combo.setToolTip(
@@ -92,6 +101,8 @@ class PresetManagerDialog(QDialog):
         self.category_filter_combo.setAccessibleName("Preset type")
         self.search_edit.textChanged.connect(self._apply_filter)
         self.category_filter_combo.currentTextChanged.connect(self._apply_filter)
+        self.search_edit.installEventFilter(self)
+        self._search_hint_shown = False
 
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
@@ -247,7 +258,7 @@ class PresetManagerDialog(QDialog):
         self._apply_filter(select_index=select_index)
 
     def _apply_filter(self, *_signal_args, select_index: int = -1) -> None:
-        """Search all types when typing; otherwise browse one simplified category."""
+        """Filter by search/category, then sort A-Z with pinyin for Chinese."""
         previous_index = self._current_index if select_index < 0 else select_index
         query = self.search_edit.text()
         filtered = (
@@ -258,11 +269,16 @@ class PresetManagerDialog(QDialog):
                 self.category_filter_combo.currentText() or PRESET_CATEGORY_ALL,
             )
         )
-        # Names are unique by model contract; retain each source index so rows
-        # can safely map back after filtering, import, editing, or deletion.
-        visible_indices = [
-            index for index, preset in enumerate(self._presets) if preset in filtered
+        # Keep canonical source indices attached to the sorted rows so editing
+        # or deleting writes back to the right record rather than list position.
+        filtered_ids = {id(preset) for preset in filtered}
+        matched_indices = [
+            index for index, preset in enumerate(self._presets) if id(preset) in filtered_ids
         ]
+        matched_indices.sort(
+            key=lambda index: preset_name_sort_key(self._presets[index].name)
+        )
+        visible_indices = matched_indices
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         self._visible_indices = visible_indices
@@ -285,6 +301,22 @@ class PresetManagerDialog(QDialog):
         else:
             self._current_index = -1
             self._set_form_enabled(False)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 — Qt override
+        # Show the syntax hint once on the first focus/click.  Hover tooltips
+        # remain available afterwards, and the hint never blocks the input.
+        if (
+            watched is self.search_edit
+            and not self._search_hint_shown
+            and event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress)
+        ):
+            self._search_hint_shown = True
+            QToolTip.showText(
+                self.search_edit.mapToGlobal(self.search_edit.rect().bottomLeft()),
+                self._search_hint,
+                self.search_edit,
+            )
+        return super().eventFilter(watched, event)
 
     def _current_source_index(self, row: int) -> int:
         """Map the visible QListWidget row to the canonical preset list index."""
@@ -431,6 +463,8 @@ class PresetManagerDialog(QDialog):
             QMessageBox.warning(self, "Rename", f"Preset '{name}' already exists.")
             return
         self._presets[self._current_index].name = name
+        # Defer usage migration until Save so Cancel leaves settings untouched.
+        self._pending_usage_renames.append((old, name))
         self._refresh_list(select_index=self._current_index)
 
     def _on_delete(self) -> None:
@@ -597,5 +631,11 @@ class PresetManagerDialog(QDialog):
     # ── Save ────────────────────────────────────────────────────────────
 
     def _on_save_clicked(self) -> None:
+        # Apply accumulated rename history before pruning; replace_sensor_presets
+        # then drops usage for truly deleted names.
+        rename_usage = getattr(self._settings, "rename_preset_usage", None)
+        if callable(rename_usage):
+            for old, new in self._pending_usage_renames:
+                rename_usage(old, new)
         self._settings.replace_sensor_presets(self._presets)
         self.accept()

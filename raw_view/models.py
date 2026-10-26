@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -158,14 +160,26 @@ def _normalized_preset_search_value(value: object) -> str:
     return "".join(str(value or "").casefold().split())
 
 
-def _parse_preset_search_query(query: object) -> tuple[str, dict[str, str] | None]:
-    """Parse the official ``<type:... + format:...>name`` search grammar.
+_PRESET_SEARCH_KEY_RE = re.compile(
+    r"^(type|t|format|f)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL,
+)
+_PRESET_SEARCH_TYPE_ALIASES = {
+    "raw": "raw",
+    "yuv": "yuv",
+    "standard image": "standard image",
+}
 
-    The returned pair is ``(outside_name_term, requirements)``.  ``None`` for
-    *requirements* means malformed control syntax, while an empty mapping means
-    a normal name-only search.  Requirements are intentionally recognized only
-    inside exactly one leading angle-bracket block, so bare ``type:yuv`` remains
-    a literal name search rather than an undocumented filter syntax.
+
+def _parse_preset_search_query(query: object) -> tuple[str, dict[str, str] | None]:
+    """Parse the official ``<type:... format:...>name`` search grammar.
+
+    Inside one leading ``<...>`` block, requirements may be separated by spaces
+    (official) or ``+`` (legacy-compatible).  The returned pair is
+    ``(outside_name_term, requirements)``.  ``None`` for *requirements* means
+    malformed control syntax, while an empty mapping means a normal name-only
+    search.  Requirements are intentionally recognized only inside exactly one
+    leading angle-bracket block, so bare ``type:yuv`` remains a literal name
+    search rather than an undocumented filter syntax.
     """
     text = str(query or "").strip()
     if not text:
@@ -181,22 +195,38 @@ def _parse_preset_search_query(query: object) -> tuple[str, dict[str, str] | Non
     if "<" in text[1:close_at] or "<" in text[close_at + 1:] or ">" in text[close_at + 1:]:
         return "", None
 
-    requirements: dict[str, str] = {}
-    aliases = {"type": "type", "t": "type", "format": "format", "f": "format"}
-    controls = text[1:close_at]
-    parts = controls.split("+")
-    if not controls.strip() or not parts:
+    controls = text[1:close_at].strip()
+    if not controls:
         return "", None
-    for part in parts:
-        if part.count(":") != 1:
+    # A leading/trailing/repeated '+' has no requirement after it and was
+    # malformed under the previous grammar; keep failing closed instead of
+    # silently treating it as whitespace.
+    if controls.startswith("+") or controls.endswith("+") or "++" in controls:
+        return "", None
+    # Legacy-compatible '+' tokens are equivalent to whitespace separators, and
+    # whitespace around ':' is insignificant (`type : raw` == `type:raw`).
+    normalized_controls = re.sub(r"\s*:\s*", ":", controls).replace("+", " ")
+    tokens = normalized_controls.split()
+    if not tokens:
+        return "", None
+
+    requirements: dict[str, str] = {}
+    index = 0
+    while index < len(tokens):
+        match = _PRESET_SEARCH_KEY_RE.match(tokens[index])
+        if match is None:
             return "", None
-        raw_key, raw_value = part.split(":", 1)
-        key = raw_key.strip().casefold()
-        value = raw_value.strip()
-        canonical_key = aliases.get(key)
-        if canonical_key is None or not value or canonical_key in requirements:
+        key = match.group(1).casefold()
+        key = "type" if key in {"type", "t"} else "format"
+        raw_value = [match.group(2)]
+        index += 1
+        while index < len(tokens) and _PRESET_SEARCH_KEY_RE.match(tokens[index]) is None:
+            raw_value.append(tokens[index])
+            index += 1
+        value = " ".join(raw_value).strip()
+        if not value or key in requirements:
             return "", None
-        requirements[canonical_key] = value
+        requirements[key] = value
     return text[close_at + 1:].strip(), requirements
 
 
@@ -205,13 +235,14 @@ def search_sensor_presets(
 ) -> list["SensorPreset"]:
     """Search presets by official bracketed requirements and/or name.
 
-    Supported control syntax is exactly ``<type:VALUE + format:VALUE>NAME``;
-    aliases ``t`` and ``f`` are accepted, spacing is optional, and every
-    requirement ANDs with the optional case-insensitive outside name term.
-    Invalid syntax, unknown keys, repeated keys, and unknown type values fail
-    closed to an empty result.  Bare text (including bare ``type:yuv``) is only
-    a name search.  Format comparisons ignore case and whitespace, but stored
-    names and identifiers remain untouched.
+    Supported control syntax is ``<type:VALUE format:VALUE>NAME``; requirements
+    may also keep the legacy ``+`` separator.  Aliases ``t`` and ``f`` are
+    accepted, spacing is optional, and every requirement ANDs with the optional
+    case-insensitive outside name term.  Invalid syntax, unknown keys, repeated
+    keys, and unknown type values fail closed to an empty result.  Bare text
+    (including bare ``type:yuv``) is only a name search.  Format comparisons
+    ignore case and whitespace, but stored names and identifiers remain
+    untouched.
     """
     name_term, requirements = _parse_preset_search_query(query)
     if requirements is None:
@@ -220,12 +251,7 @@ def search_sensor_presets(
     normalized_type = ""
     if "type" in requirements:
         type_value = requirements["type"].strip().casefold()
-        type_aliases = {
-            "raw": "raw",
-            "yuv": "yuv",
-            "standard image": "standard image",
-        }
-        normalized_type = type_aliases.get(type_value, "")
+        normalized_type = _PRESET_SEARCH_TYPE_ALIASES.get(type_value, "")
         if not normalized_type:
             return []
 
@@ -253,6 +279,62 @@ def search_sensor_presets(
             == normalized_format
         )
     ]
+
+
+def preset_name_sort_key(name: object) -> tuple[str, str, str]:
+    """Stable alphabet/pinyin sort key for preset names.
+
+    Latin text is case-insensitive A-Z; Chinese characters are converted to
+    pinyin syllables so they sort predictably instead of by code point.  The
+    original casefolded name and raw name are tie-breakers, keeping equal
+    pinyin readings deterministic.  Numbers/symbols simply participate in the
+    normalized string at their natural position.
+    """
+    text = str(name or "")
+    try:
+        from pypinyin import lazy_pinyin
+
+        normalized = "".join(lazy_pinyin(text)).casefold()
+    except Exception:
+        # The dependency is declared; this fallback keeps a broken/partial
+        # install from preventing the preset manager from opening.
+        normalized = text.casefold()
+    return normalized, text.casefold(), text
+
+
+def sort_presets_by_name(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...],
+) -> list["SensorPreset"]:
+    """Return presets sorted A-Z with pinyin ordering for Chinese names."""
+    return sorted(presets, key=lambda p: preset_name_sort_key(getattr(p, "name", "")))
+
+
+def sort_presets_for_browse(
+    presets: list["SensorPreset"] | tuple["SensorPreset", ...],
+    usage: dict[str, dict] | None = None,
+) -> list["SensorPreset"]:
+    """Sort the main-selector list: recently used first, then unused by name.
+
+    Usage records are advisory.  Unknown/malformed timestamps are ignored so a
+    corrupted settings value can never prevent the selector from rendering.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    used: list[tuple[float, str, "SensorPreset"]] = []
+    unused: list["SensorPreset"] = []
+    for preset in presets:
+        record = usage.get(getattr(preset, "name", ""))
+        last_used = 0.0
+        if isinstance(record, dict):
+            try:
+                last_used = float(record.get("last_used", 0) or 0)
+            except (TypeError, ValueError):
+                last_used = 0.0
+        if last_used > 0:
+            used.append((last_used, getattr(preset, "name", ""), preset))
+        else:
+            unused.append(preset)
+    used.sort(key=lambda item: (-item[0], preset_name_sort_key(item[1])))
+    return [preset for _ts, _name, preset in used] + sort_presets_by_name(unused)
 
 
 def filter_sensor_presets(
@@ -295,7 +377,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -669,6 +751,7 @@ class AppSettings:
         if len(new_items) == len(items):
             return False
         self._save_presets_raw(new_items)
+        self.prune_preset_usage()
         return True
 
     def export_sensor_presets(self, path: str) -> int:
@@ -759,6 +842,116 @@ class AppSettings:
             seen.add(name)
             out.append(SensorPreset.from_dict({**p.to_dict(), "name": name}).to_dict())
         self._save_presets_raw(out)
+        self.prune_preset_usage(seen)
+
+    # ── Sensor preset usage (main-selector ordering) ───────────────────
+
+    @property
+    def preset_category(self) -> str:
+        """Persisted main-selector browse category (invalid data -> All)."""
+        value = str(self._store.value("presets/browse_category", PRESET_CATEGORY_ALL) or "")
+        return value if value in PRESET_CATEGORY_CHOICES else PRESET_CATEGORY_ALL
+
+    @preset_category.setter
+    def preset_category(self, value: str) -> None:
+        category = str(value or "")
+        if category not in PRESET_CATEGORY_CHOICES:
+            category = PRESET_CATEGORY_ALL
+        self._store.setValue("presets/browse_category", category)
+
+    def _load_preset_usage_raw(self) -> dict[str, dict]:
+        """Return a safe ``{name: {"last_used", "count"}}`` mapping.
+
+        Anything malformed (non-JSON, non-dict, invalid timestamps/counters) is
+        silently ignored rather than preventing startup or the selector.
+        """
+        raw = self._store.value("presets/usage", "")
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        cleaned: dict[str, dict] = {}
+        for name, record in data.items():
+            if not isinstance(name, str) or not name or not isinstance(record, dict):
+                continue
+            try:
+                last_used = float(record.get("last_used", 0) or 0)
+                count = int(record.get("count", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if last_used < 0 or count < 0:
+                continue
+            cleaned[name] = {"last_used": last_used, "count": count}
+        return cleaned
+
+    @property
+    def preset_usage(self) -> dict[str, dict]:
+        """Read-only snapshot of persisted preset usage records."""
+        return self._load_preset_usage_raw()
+
+    def record_preset_use(self, name: str, timestamp: float | None = None) -> None:
+        """Record one real user selection of *name* for recent-first ordering."""
+        target = (name or "").strip()
+        if not target:
+            return
+        usage = self._load_preset_usage_raw()
+        record = usage.get(target, {"last_used": 0.0, "count": 0})
+        try:
+            stamp = float(time.time() if timestamp is None else timestamp)
+        except (TypeError, ValueError):
+            return
+        usage[target] = {
+            "last_used": stamp,
+            "count": max(0, int(record.get("count", 0))) + 1,
+        }
+        self._save_preset_usage_raw(usage)
+
+    def _save_preset_usage_raw(self, usage: dict[str, dict]) -> None:
+        self._store.setValue("presets/usage", json.dumps(usage, ensure_ascii=False))
+
+    def prune_preset_usage(self, valid_names: object | None = None) -> None:
+        """Drop usage records whose preset no longer exists (deletions)."""
+        if valid_names is None:
+            valid = {p.name for p in self.sensor_presets}
+        else:
+            valid = {str(n) for n in valid_names if str(n or "").strip()}
+        usage = self._load_preset_usage_raw()
+        if not usage:
+            return
+        cleaned = {name: record for name, record in usage.items() if name in valid}
+        if cleaned != usage:
+            self._save_preset_usage_raw(cleaned)
+
+    def rename_preset_usage(self, old_name: str, new_name: str) -> None:
+        """Preserve usage across a manager rename; conflicting target wins max."""
+        old = (old_name or "").strip()
+        new = (new_name or "").strip()
+        if not old or not new or old == new:
+            return
+        usage = self._load_preset_usage_raw()
+        record = usage.pop(old, None)
+        if record is None:
+            return
+        existing = usage.get(new)
+        if existing is not None:
+            usage[new] = {
+                "last_used": max(
+                    float(existing.get("last_used", 0) or 0),
+                    float(record.get("last_used", 0) or 0),
+                ),
+                "count": int(existing.get("count", 0) or 0) + int(record.get("count", 0) or 0),
+            }
+        else:
+            usage[new] = record
+        self._save_preset_usage_raw(usage)
+
+    def clear_preset_usage(self) -> None:
+        """Remove all usage records (diagnostics/tests use injected stores)."""
+        self._store.remove("presets/usage")
 
     # ── FourCC custom formats ──────────────────────────────────────────
     #

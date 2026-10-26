@@ -53,7 +53,7 @@ if exist ".release-staging" rmdir /s /q ".release-staging"
 if exist "dist" rmdir /s /q "dist"
 mkdir ".release-staging"
 
-set "COMMON_ARGS=--noconfirm --clean --windowed --name raw-view --paths "%CD%" --hidden-import=cv2 --hidden-import=PIL --collect-all=cv2 --collect-all=PyQt5 --collect-all=qt_material --collect-all=qtawesome --icon assets\raw-view.ico --add-data "assets;assets""
+set "COMMON_ARGS=--noconfirm --clean --windowed --name raw-view --paths "%CD%" --hidden-import=cv2 --hidden-import=PIL --collect-all=cv2 --collect-all=PyQt5 --collect-all=qt_material --collect-all=qtawesome --collect-all=pypinyin --icon assets\raw-view.ico --add-data "assets;assets""
 set "QT_TRANSLATIONS=.venv\Lib\site-packages\PyQt5\Qt5\translations"
 
 if exist "%QT_TRANSLATIONS%" (

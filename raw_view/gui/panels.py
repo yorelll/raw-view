@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import QEvent, QSignalBlocker, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAction,
+    QActionGroup,
     QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -36,7 +39,7 @@ from raw_view.models import (
     is_supported_preset_format_for_type,
     normalize_preset_format_name,
     normalize_preset_image_type,
-    search_sensor_presets,
+    sort_presets_for_browse,
 )
 
 
@@ -53,39 +56,29 @@ def _qta_icon(name: str):
 
 
 class PresetComboBox(QComboBox):
-    """Editable preset selector that announces native-arrow popup requests."""
+    """Selection combo that reports when it is safe to re-order its model.
 
-    popupRequested = pyqtSignal()
+    Rebuilding the item model while the user navigates with the keyboard makes
+    the highlighted rows swap under the cursor (Alpha/Beta ping-pong).  The
+    panel therefore never re-orders in the selection call stack; it waits until
+    the popup closes or focus leaves this control.
+    """
 
-    def showPopup(self) -> None:  # noqa: N802 — Qt virtual override
-        self.popupRequested.emit()
-        super().showPopup()
+    popupClosed = pyqtSignal()
+    focusLost = pyqtSignal()
 
+    @property
+    def popup_open(self) -> bool:
+        view = self.view()
+        return view is not None and view.isVisible()
 
-class _PresetQueryLineEdit(QLineEdit):
-    """Line edit that asks the panel to detach a settled preset before editing."""
+    def hidePopup(self) -> None:  # noqa: N802 — Qt virtual override
+        super().hidePopup()
+        self.popupClosed.emit()
 
-    editingStarted = pyqtSignal()
-
-    @staticmethod
-    def _is_editing_key(event) -> bool:
-        key = event.key()
-        if key in (Qt.Key_Backspace, Qt.Key_Delete):
-            return True
-        if event.matches(QKeySequence.Paste) or event.matches(QKeySequence.Cut):
-            return True
-        # Keep Ctrl+A as native Select All (not an edit transition); Ctrl+V is
-        # handled above.  AltGr printable input still carries text and is valid.
-        return bool(event.text()) and not (event.modifiers() & Qt.ControlModifier)
-
-    def keyPressEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
-        if self._is_editing_key(event):
-            self.editingStarted.emit()
-        super().keyPressEvent(event)
-
-    def insertFromMimeData(self, source) -> None:  # noqa: N802 — Qt virtual override
-        self.editingStarted.emit()
-        super().insertFromMimeData(source)
+    def focusOutEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().focusOutEvent(event)
+        self.focusLost.emit()
 
 
 class ControlPanel(QWidget):
@@ -108,12 +101,15 @@ class ControlPanel(QWidget):
     rawPreviewChanged = pyqtSignal(str)
     zoomChanged = pyqtSignal(int)
     presetSelected = pyqtSignal(str)        # emitted when user picks a saved preset
-    savePresetRequested = pyqtSignal()      # user clicked the "Save as..." button
-    managePresetsRequested = pyqtSignal()   # user clicked the "Manage..." button
+    presetCategoryChanged = pyqtSignal(str)  # user picked a filter-menu preset type
+    savePresetRequested = pyqtSignal()      # context menu: save current values
+    managePresetsRequested = pyqtSignal()   # context menu: open preset manager
     valuesChanged = pyqtSignal()            # a decode parameter was edited
 
     # Sentinel item shown at index 0 of the preset combo.
     _PRESET_PLACEHOLDER = "(Select a preset)"
+    # Stand-in displayed when the active selection is hidden by the filter.
+    _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
 
     RAW_FORMATS = [
         "RAW8",
@@ -161,92 +157,74 @@ class ControlPanel(QWidget):
         content.setObjectName("controlPanelContent")
 
         # ── Sensor preset controls (shown at the very top) ──────────────
-        # One editable combo unifies selection and name search.  Typed text is
-        # strictly query state: only an item carrying a preset-name userData can
-        # emit presetSelected, so arbitrary text can never be loaded/saved as a
-        # preset.  Clicking the native arrow intentionally clears a query and
-        # switches to category-filtered dropdown mode.
+        # The main panel is selection-only: a non-editable combo filtered by the
+        # funnel button.  Name/structured search lives exclusively in the preset
+        # manager so an accidental keystroke can never fabricate a query here.
         self._preset_records: list[SensorPreset] = []
-        self._preset_names_only = False  # compatibility path for set_preset_names()
-        # Identity, query, and what the line edit happens to display are separate
-        # states.  In particular, Qt must not turn a selected item's display text
-        # into the next typed search query.
         self._preset_selected_name: str | None = None
-        self._preset_query = ""
-        self._preset_search_mode = False
-        self._preset_edit_transitioning = False
+        self._preset_usage: dict[str, dict] = {}
+        self._preset_category = PRESET_CATEGORY_ALL
+        # A recent-use re-order is deferred out of the selection call stack; it
+        # runs only after the combo popup is closed or focus leaves the combo.
+        self._preset_reorder_pending = False
         self.preset_combo = PresetComboBox()
-        self.preset_combo.setEditable(True)
+        self.preset_combo.setObjectName("presetSelector")
+        self.preset_combo.setEditable(False)
         self.preset_combo.setInsertPolicy(QComboBox.NoInsert)
         self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
         self.preset_combo.setToolTip(
-            "Type to search all saved presets, or use the arrow to browse the selected preset type. "
-            "Structured search: <type:raw + format:raw10 packed>name."
+            "Select a saved sensor preset. Use the filter button to restrict the list by type."
         )
-        self.preset_combo.setAccessibleName("Search or select sensor preset")
+        self.preset_combo.setAccessibleName("Sensor preset")
         self.preset_combo.setAccessibleDescription(
-            "Type a preset name or official <type:... + format:...> search across all saved presets; "
-            "use the arrow to browse by preset type."
+            "Choose a saved sensor preset; selecting one fills the decode fields without applying."
         )
         self.preset_combo.setMinimumWidth(96)
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self._preset_line_edit = _PresetQueryLineEdit(self.preset_combo)
-        self.preset_combo.setLineEdit(self._preset_line_edit)
-        # QComboBox otherwise installs an inline QCompleter that appends a
-        # matching item suffix to the visible editor.  Candidates are already
-        # provided by our filtered popup; autocomplete must stay off so visible
-        # editor text is always the exact user query.
-        self.preset_combo.setCompleter(None)
-        self._preset_line_edit.setCompleter(None)
-        self._preset_line_edit.setPlaceholderText("Search or select preset…")
-        self._preset_line_edit.setClearButtonEnabled(True)
+        self.preset_combo.activated.connect(self._on_preset_activated)
+        self.preset_combo.popupClosed.connect(self._maybe_apply_preset_reorder)
+        self.preset_combo.focusLost.connect(self._maybe_apply_preset_reorder)
 
-        self.preset_category_filter_combo = QComboBox()
-        self.preset_category_filter_combo.setObjectName("presetCategoryFilter")
-        self.preset_category_filter_combo.addItems(PRESET_CATEGORY_CHOICES)
-        self.preset_category_filter_combo.setToolTip(
-            "Browse All, RAW (including Packed), YUV (including YOnly), or Standard images. "
-            "Typed search always covers every type."
+        self.preset_filter_btn = QToolButton()
+        self.preset_filter_btn.setObjectName("presetFilterButton")
+        self.preset_filter_btn.setPopupMode(QToolButton.InstantPopup)
+        self.preset_filter_btn.setAutoRaise(True)
+        self.preset_filter_btn.setIcon(_qta_icon("fa5s.filter"))
+        self.preset_filter_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.preset_filter_btn.setFixedSize(30, 30)
+        self._preset_filter_menu = QMenu(self.preset_filter_btn)
+        self._preset_filter_menu.setObjectName("presetFilterMenu")
+        self._preset_filter_group = QActionGroup(self._preset_filter_menu)
+        self._preset_filter_group.setExclusive(True)
+        self._preset_filter_actions: dict[str, object] = {}
+        for category in PRESET_CATEGORY_CHOICES:
+            action = self._preset_filter_menu.addAction(category)
+            action.setCheckable(True)
+            action.setData(category)
+            self._preset_filter_group.addAction(action)
+            self._preset_filter_actions[category] = action
+        self.preset_filter_btn.setMenu(self._preset_filter_menu)
+        self._preset_filter_group.triggered.connect(self._on_preset_filter_action)
+        self._update_preset_filter_button()
+        # Main-panel preset actions no longer occupy buttons; they are exposed
+        # from this panel's context menu (see contextMenuEvent).
+        self.preset_save_action = self._make_preset_action(
+            "fa5s.save", "Save current as preset…",
+            "Save the current panel values as a named sensor preset.",
+            self.savePresetRequested.emit,
         )
-        self.preset_category_filter_combo.setAccessibleName("Preset type")
-        self.preset_category_filter_combo.setAccessibleDescription(
-            "Choose All, RAW, YUV, or Standard images for dropdown browsing."
+        self.preset_manage_action = self._make_preset_action(
+            "fa5s.cog", "Manage presets…",
+            "Open sensor preset management to rename, delete, import, or export presets.",
+            self.managePresetsRequested.emit,
         )
 
-        # Compact icon buttons keep the preset row readable on the narrow
-        # panel (text buttons got truncated to "MANAC" etc.).
-        self.preset_save_btn = QPushButton()
-        self.preset_save_btn.setObjectName("iconButton")
-        self.preset_save_btn.setAccessibleName("Save sensor preset")
-        self.preset_save_btn.setAccessibleDescription(
-            "Save the current panel values as a named sensor preset."
-        )
-        self.preset_save_btn.setIcon(_qta_icon("fa5s.save"))
-        self.preset_save_btn.setToolTip(
-            "Save the current panel values as a named sensor preset for reuse."
-        )
-        self.preset_manage_btn = QPushButton()
-        self.preset_manage_btn.setObjectName("iconButton")
-        self.preset_manage_btn.setAccessibleName("Manage sensor presets")
-        self.preset_manage_btn.setAccessibleDescription(
-            "Open sensor preset management to rename, delete, import, or export presets."
-        )
-        self.preset_manage_btn.setIcon(_qta_icon("fa5s.cog"))
-        self.preset_manage_btn.setToolTip("Manage presets: rename, delete, import/export.")
-        for btn in (self.preset_save_btn, self.preset_manage_btn):
-            btn.setFixedSize(32, 30)
-
-        # Preset type and Preset are individual main-form rows so their labels
-        # and fields use precisely the same alignment and sizing rules as Type,
-        # Format, and Bit depth.  The action buttons remain attached only to the
-        # Preset field.
         preset_select_row = QWidget()
         preset_select_layout = QHBoxLayout(preset_select_row)
         preset_select_layout.setContentsMargins(0, 0, 0, 0)
         preset_select_layout.setSpacing(4)
         preset_select_layout.addWidget(self.preset_combo, 1)
-        preset_select_layout.addWidget(self.preset_save_btn, 0)
-        preset_select_layout.addWidget(self.preset_manage_btn, 0)
+        preset_select_layout.addWidget(self.preset_filter_btn, 0)
 
         # ── Format parameters ──
         self.type_combo = QComboBox()
@@ -320,7 +298,6 @@ class ControlPanel(QWidget):
         # 彻底移出表单（仅 setVisible 时本机 PyQt5 的 QFormLayout 仍保留行几何，
         # 会在 Format 与 Width 之间留出大段空白，0.4.1 修复）。
         self._main_form = form
-        form.addRow("Preset type", self.preset_category_filter_combo)
         form.addRow("Preset", preset_select_row)
 
         # Separator: the Preset rows are "preset management"; everything below
@@ -387,16 +364,10 @@ class ControlPanel(QWidget):
         self.raw_preview_combo.currentTextChanged.connect(self._on_raw_preview_changed)
         self.zoom_slider.valueChanged.connect(self._on_slider_zoom)
         self.zoom_spin.valueChanged.connect(self._on_spin_zoom)
-        self.preset_combo.activated.connect(self._on_preset_activated)
-        self.preset_combo.popupRequested.connect(self._show_preset_popup)
-        # The custom line edit clears settled display text before an edit is
-        # applied.  textEdited then owns all query updates, including the native
-        # clear button's empty string.
-        self._preset_line_edit.editingStarted.connect(self._begin_preset_edit)
-        self._preset_line_edit.textEdited.connect(self._on_preset_query_edited)
-        self.preset_category_filter_combo.currentTextChanged.connect(self._on_preset_category_changed)
-        self.preset_save_btn.clicked.connect(self.savePresetRequested)
-        self.preset_manage_btn.clicked.connect(self.managePresetsRequested)
+        # Right-click on panel background / non-text controls offers the two
+        # preset actions; child text controls keep their native menus.
+        for widget in (content,):
+            widget.setContextMenuPolicy(Qt.DefaultContextMenu)
 
         # Emit valuesChanged whenever a decode parameter is edited, so the
         # window can flag "unapplied changes" until Apply is pressed. Zoom is
@@ -409,8 +380,6 @@ class ControlPanel(QWidget):
             combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
         # 切换格式时联动条件显隐（YOnly → 位深+对齐+端序；RAW →高级参数）
         self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
-        self.format_combo.currentTextChanged.connect(lambda _f: self._refresh_preset_combo())
-        self.bit_depth_combo.currentTextChanged.connect(lambda _b: self._refresh_preset_combo())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
             spin.valueChanged.connect(lambda _v: self.valuesChanged.emit())
         # UI-9：宽高/格式/位深/对齐变化时刷新 Apply 门禁（Estimated frame 提示
@@ -504,8 +473,6 @@ class ControlPanel(QWidget):
             )
         self._sync_type_enabled()
         self._refresh_frame_size_hint()
-        if hasattr(self, "preset_category_filter_combo"):
-            self._refresh_preset_combo()
         self.typeChanged.emit(image_type)
 
     def _remove_stale_dynamic_formats(
@@ -635,9 +602,7 @@ class ControlPanel(QWidget):
         self._panel_enabled = bool(enabled)
         for widget in [
             self.preset_combo,
-            self.preset_category_filter_combo,
-            self.preset_save_btn,
-            self.preset_manage_btn,
+            self.preset_filter_btn,
             self.type_combo,
             self.format_combo,
             self.align_combo,
@@ -727,137 +692,188 @@ class ControlPanel(QWidget):
             _set_apply(True)
 
     def _preset_candidates(self) -> list[SensorPreset]:
-        """Return candidates for the separate query/selection state machine.
-
-        Any nonempty query uses the shared official bracket-search parser and
-        therefore ignores the browse category.  Empty query means browse mode.
-        Unknown legacy records remain in All and explicit/name search results,
-        but never create a misleading type category.
-        """
-        if self._preset_query:
-            return search_sensor_presets(self._preset_records, self._preset_query)
-        return filter_sensor_presets_by_category(
-            self._preset_records,
-            self.preset_category_filter_combo.currentText() or PRESET_CATEGORY_ALL,
+        """Return category-filtered presets in recent-use, then name order."""
+        visible = filter_sensor_presets_by_category(
+            self._preset_records, self._preset_category,
         )
+        return sort_presets_for_browse(visible, self._preset_usage)
 
     def set_presets(
         self, presets: list[SensorPreset], current: str | None = None,
+        usage: dict[str, dict] | None = None, *, reorder: bool = False,
     ) -> None:
-        """Set complete records without overwriting an active typed query."""
+        """Set complete records and optional usage history, then refresh if needed.
+
+        ``reorder`` defaults to **False** on purpose: a call made from inside a
+        ``presetSelected`` handler must never rebuild the visible rows, or a
+        held Down/Up key ping-pongs between two presets (P1-1).  The rows are
+        rebuilt only when the records themselves changed, or when a caller that
+        is known to be outside selection dispatch asks for it explicitly
+        (startup/programmatic refresh, filter change, save/delete/manager).
+        Storing ``usage`` alone therefore just keeps the existing row selected
+        by identity until :meth:`schedule_preset_reorder` applies the new order.
+        """
+        previous_names = [preset.name for preset in self._preset_records]
         self._preset_records = list(presets)
-        self._preset_names_only = False
+        self._preset_usage = dict(usage) if isinstance(usage, dict) else {}
         # Selector refresh is not a user format choice: retain an active legacy
         # decoder value while pruning inactive temporary format entries.
         self._remove_stale_dynamic_formats()
         names = {preset.name for preset in self._preset_records}
         if self._preset_selected_name not in names:
             self._preset_selected_name = None
-        # ``current`` intentionally selects a newly saved record only if there
-        # is no active query.  A save/manager refresh must not replace user text.
-        if current and not self._preset_query and current in names:
+        if current and current in names:
             self._preset_selected_name = current
+        structural_change = previous_names != [preset.name for preset in self._preset_records]
+        if structural_change or reorder:
+            self._refresh_preset_combo()
+        else:
+            # Keep the current row selected by identity, not index.
+            with QSignalBlocker(self.preset_combo):
+                index = self.preset_combo.findData(self._preset_selected_name)
+                if index >= 0:
+                    self.preset_combo.setCurrentIndex(index)
+
+    def schedule_preset_reorder(self) -> None:
+        """Mark that recent-use order changed; apply it after interaction ends.
+
+        The selection call stack must never rebuild the model: doing so makes
+        held Down/Up keys ping-pong between two rows.  Popup close and focus-out
+        are the two reliable "navigation finished" boundaries for keyboard and
+        mouse interaction alike.
+        """
+        self._preset_reorder_pending = True
+        self._maybe_apply_preset_reorder()
+
+    def _maybe_apply_preset_reorder(self) -> None:
+        """Apply a pending re-order once the combo is no longer in use."""
+        if not self._preset_reorder_pending:
+            return
+        if self.preset_combo.popup_open or self.preset_combo.hasFocus():
+            # Still navigating (focus can remain on a non-editable combo while
+            # Down/Up repeatedly activates rows).  popupClosed/focusLost will
+            # call this again when interaction really ends.
+            return
+        # If the user arrowed back to the placeholder, a late re-order must not
+        # suddenly highlight an old preset; internal identity is still kept.
+        show_placeholder = self.preset_combo.currentData() is None
+        self._preset_reorder_pending = False
         self._refresh_preset_combo()
+        if show_placeholder:
+            with QSignalBlocker(self.preset_combo):
+                self.preset_combo.setCurrentIndex(0)
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
         """Backward-compatible names-only population for older callers/tests."""
         self._preset_records = [SensorPreset(name=name, format_name="") for name in names if name]
-        self._preset_names_only = True
         self._remove_stale_dynamic_formats()
         available = {preset.name for preset in self._preset_records}
         if self._preset_selected_name not in available:
             self._preset_selected_name = None
-        if current and not self._preset_query and current in available:
+        if current and current in available:
             self._preset_selected_name = current
         self._refresh_preset_combo()
 
-    def _set_preset_combo_text(self, text: str) -> None:
-        """Set line-edit text without allowing Qt to reinterpret selection/query."""
-        with QSignalBlocker(self._preset_line_edit):
-            self._preset_line_edit.setText(text)
-
-    def _begin_preset_edit(self) -> None:
-        """Detach settled selected text before the first real edit is applied."""
-        if self._preset_edit_transitioning or self._preset_search_mode:
-            return
-        self._preset_edit_transitioning = True
-        try:
-            self._preset_search_mode = True
-            self._preset_query = ""
-            # The identity may remain internally for bookkeeping, but its text
-            # must never be prepended to the user input or restored on clear.
-            self._set_preset_combo_text("")
-            with QSignalBlocker(self.preset_combo):
-                self.preset_combo.setCurrentIndex(-1)
-        finally:
-            self._preset_edit_transitioning = False
-
     def _refresh_preset_combo(self, *_signal_args) -> None:
-        """Refresh items while preserving query verbatim and selection identity."""
-        query = self._preset_query
+        """Rebuild the filtered selector; never auto-load or auto-select data."""
         visible = self._preset_candidates()
         visible_names = {preset.name for preset in visible}
         selected_name = self._preset_selected_name
         if selected_name not in {preset.name for preset in self._preset_records}:
             selected_name = None
             self._preset_selected_name = None
-        with QSignalBlocker(self.preset_combo), QSignalBlocker(self._preset_line_edit):
+        hidden_selection = bool(selected_name) and selected_name not in visible_names
+        with QSignalBlocker(self.preset_combo):
             self.preset_combo.clear()
+            # Keep an explicit placeholder (no userData) so an empty/filtered
+            # selector never looks like it has silently selected a real preset.
+            # When a real selection is filtered out, the placeholder text says
+            # so while still sitting at index 0: keyboard Down then starts from
+            # the first available preset instead of being trapped at the end.
+            self.preset_combo.addItem(
+                self._PRESET_HIDDEN_SELECTION if hidden_selection else self._PRESET_PLACEHOLDER,
+                None,
+            )
             for preset in visible:
                 self.preset_combo.addItem(preset.name, preset.name)
-            if query and not visible:
-                self.preset_combo.addItem("(No matching presets)", None)
-                item = getattr(self.preset_combo.model(), "item", lambda _i: None)(
-                    self.preset_combo.count() - 1
-                )
-                if item is not None:
-                    item.setEnabled(False)
-            if (
-                not query
-                and not self._preset_search_mode
-                and selected_name in visible_names
-            ):
+            if selected_name in visible_names:
+                # Keep the current identity visible/selected after a filter or
+                # recent-use reorder, without emitting activated/presetSelected.
                 self.preset_combo.setCurrentIndex(self.preset_combo.findData(selected_name))
             else:
-                self.preset_combo.setCurrentIndex(-1)
-            # Query always wins over selected display.  Once the query is empty,
-            # selected text is shown only when it represents an explicit settled
-            # selection rather than a cleared/deleted search state.
-            if query:
-                self._preset_line_edit.setText(query)
-            elif not self._preset_search_mode and selected_name:
-                self._preset_line_edit.setText(selected_name)
-            else:
-                self._preset_line_edit.clear()
+                self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
 
-    def _on_preset_query_edited(self, text: str) -> None:
-        """Store user text as a query; it never implicitly selects/loads data."""
-        if not self._preset_search_mode:
-            self._begin_preset_edit()
-        self._preset_query = text
-        self._preset_search_mode = True
+    def _update_preset_filter_button(self) -> None:
+        """Expose the active browse category through tooltip/accessibility text."""
+        pretty = self._preset_category.upper()
+        self.preset_filter_btn.setToolTip(
+            f"Preset type: {pretty}. Click to choose All, RAW, YUV, or Standard images."
+        )
+        self.preset_filter_btn.setAccessibleName("Filter presets by type")
+        self.preset_filter_btn.setAccessibleDescription(
+            f"Current preset type: {self._preset_category}. Choose All, RAW, YUV, or Standard images."
+        )
+        action = self._preset_filter_actions.get(self._preset_category)
+        if action is not None:
+            action.setChecked(True)
+
+    def _on_preset_filter_action(self, action) -> None:
+        category = action.data() if action is not None else PRESET_CATEGORY_ALL
+        self.presetCategoryChanged.emit(str(category))
+        self.set_preset_category(category)
+
+    def set_preset_category(self, category: str) -> None:
+        """Switch the browse category and immediately rebuild the selector."""
+        self._preset_category = (
+            category if category in PRESET_CATEGORY_CHOICES else PRESET_CATEGORY_ALL
+        )
+        self._update_preset_filter_button()
         self._refresh_preset_combo()
 
-    def _on_preset_category_changed(self, _category: str) -> None:
-        # While a query is active category changes deliberately do not disturb
-        # all-type search results.  Empty browse mode refreshes immediately.
-        if not self._preset_query:
-            self._refresh_preset_combo()
+    def _make_preset_action(self, icon_name: str, text: str, description: str, slot):
+        action = QAction(_qta_icon(icon_name), text, self)
+        action.setToolTip(description)
+        action.setStatusTip(description)
+        # QAction has no accessibleName API in PyQt5; descriptive text + tooltip
+        # are announced by the menu and remain keyboard navigable.
+        action.triggered.connect(slot)
+        return action
 
-    def _show_preset_popup(self) -> None:
-        """Arrow browsing clears the query and never loads a preset by itself."""
-        self._preset_query = ""
-        self._preset_search_mode = True
-        self._refresh_preset_combo()
+    def _preset_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setObjectName("presetPanelMenu")
+        menu.addAction(self.preset_manage_action)
+        menu.addAction(self.preset_save_action)
+        return menu
+
+    def _context_menu_blocked(self, widget) -> bool:
+        """Whether *widget* owns a native context menu we must not hijack."""
+        blocked_types = (QLineEdit, QComboBox, QSpinBox, QSlider)
+        current = widget
+        while current is not None and current is not self:
+            if isinstance(current, blocked_types):
+                return True
+            current = current.parentWidget()
+        return False
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        if self._context_menu_blocked(self.childAt(event.pos())):
+            event.ignore()
+            return
+        menu = self._preset_context_menu()
+        try:
+            menu.exec_(event.globalPos())
+        finally:
+            menu.deleteLater()
+        event.accept()
 
     def reset_preset_selection(self) -> None:
-        """Clear query and identity without emitting preset or Apply signals."""
+        """Clear selection identity without emitting preset or Apply signals."""
         self._preset_selected_name = None
-        self._preset_query = ""
-        self._preset_search_mode = True
-        with QSignalBlocker(self.preset_combo), QSignalBlocker(self._preset_line_edit):
-            self.preset_combo.setCurrentIndex(-1)
-            self._preset_line_edit.clear()
+        with QSignalBlocker(self.preset_combo):
+            self.preset_combo.setCurrentIndex(0)
+            self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and spin box without emitting zoomChanged."""
@@ -1006,19 +1022,21 @@ class ControlPanel(QWidget):
     # ── internal slots ───────────────────────────────────────────────
 
     def _on_preset_activated(self, index: int) -> None:
-        """Load only a real item; Enter on arbitrary query text is inert."""
+        """Load only a real item carrying preset identity; placeholders are inert.
+
+        The model is intentionally not rebuilt here: Qt resolves keyboard
+        navigation through repeated ``activated`` calls, so clearing/reordering
+        inside this stack makes Down/Up bounce between two rows.  The current
+        index already identifies the selected row; MainWindow defers any
+        recent-use re-order until popup close / focus-out.
+        """
         if index < 0:
             return
         name = self.preset_combo.itemData(index)
         if not name:
             return
         selected = str(name)
-        # The popup/item itself is the sole selection authority.  Query text
-        # cannot become a preset identity, so keyboard Enter remains safe.
         self._preset_selected_name = selected
-        self._preset_query = ""
-        self._preset_search_mode = False
-        self._refresh_preset_combo()
         self.presetSelected.emit(selected)
 
     def _on_slider_zoom(self, value: int) -> None:
