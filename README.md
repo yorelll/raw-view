@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.4.7** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.5.0** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -250,10 +250,31 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 
 - **Preset 下拉框**：只用于选择，不能输入搜索。选择后会把所有字段写入面板；请再点击 **Apply** 才会渲染当前文件。列表按**最近使用优先**排序，未使用过的名称按 A→Z / 拼音排序。
 - **筛选按钮（漏斗图标）**：点击后在 `All`、`RAW`、`YUV`、`Standard images` 四类间切换浏览范围；tooltip 显示当前类型。若当前已选 preset 不在新范围内，下拉框显示 `(Current preset hidden by filter)`，面板已填字段保持不变，也不会静默加载其它 preset。
-- **右键菜单**：在左侧控制面板空白/非文本控件上右键，可选择 **Save current as preset…** 或 **Manage presets…**；文本框、数值框与下拉框保留各自的原生右键菜单。
+- **右键菜单**：在左侧控制面板空白/非文本控件上右键，可选择 **Save current as preset…**、**Manage presets…**、**Pin parameters**、**Apply these parameters to all items**、**Forget remembered parameters for this file**；文本框、数值框与下拉框保留各自的原生右键菜单。
 - **管理对话框**：独立保留 **Preset type** 行与搜索框；列表按名称 A→Z（中文按拼音）排序。名称可直接输入搜索，也支持仅尖括号内的结构化条件：`<type:VALUE format:VALUE>名称`。`type`/`t`、`format`/`f` 是唯一支持的键，条件之间用**空格**分隔（旧写法 `+` 仍兼容），条件与尖括号外的名称 AND。例如 `<t:yuv f:yuyv>`、`<type:raw format:raw10 packed>name`、`< t : yuv   f : raw10packed > NAME`。大小写不敏感，格式比较忽略空白；裸 `type:yuv` 只是普通名称搜索。语法错误、未知键或未知 type 显示无结果，避免意外扩大范围。
 
 未打开文件时也可以通过 **Settings → Manage sensor presets** 进入相同的管理对话框。
+
+## 按文件名记忆参数（0.5.0）
+
+- **记录时机**：只有**用户显式 Apply** 且该次解码成功才会记录。仅修改面板、选择 preset、翻帧、打开文件时的自动/静默解码、恢复记忆后的自动解码都不会写入。**Apply these parameters to all items** 属于显式批量 Apply：每个成功项按各自文件名记录（失败项不记录）。关闭标签或退出程序时，会把已成功 Apply 的快照再同步一次（幂等）。
+- **记录键**：只取**文件名**（basename，不含路径），按 Windows 语义做大小写不敏感归一（`os.path.normcase`）。同一文件名在不同目录打开时共用记录。
+- **上限**：最多 **100** 条，超出时丢弃 `last_used` 最旧的条目（LRU）；更新已有记录会刷新时间戳并移到最新。
+- **读取时机**：`_open_item`（打开对话框 / 拖放 / CLI / 最近文件）命中记录时，直接把 item 初始参数设为该记录并**自动解码一次**；沿用首次自动解码的静默错误策略。状态栏分别显示：
+  - 成功：`Restored remembered parameters (文件名)`
+  - 失败：`Restored remembered parameters, but decoding failed`（不弹窗，用户改参数再 Apply 即可）
+- 未命中时维持默认 2560×1440。
+- **忘记单条**：左侧参数面板右键 → *Forget remembered parameters for this file*（仅当当前文件有记录时可用）。
+- 损坏/缺失/非法 JSON 均安全退化，不影响启动。
+
+## 参数钉（Pin parameters，0.5.0）
+
+- **两套参数**：每个 item 有自己的本体参数；另有一个全局“参数钉参数”。钉住后切换标签时，面板显示钉参数，**item 本体不被修改**。
+- 点 **Apply** 才把面板（钉）参数写入当前 item 的本体并解码；解码成功后钉参数随之更新为刚应用的参数（“钉子跟随最新成功 Apply”）。
+- **取消钉住**：面板立即恢复显示当前 item 的本体参数。
+- **入口**：Preset 行右侧图钉按钮，或快捷键 **Ctrl+N**（文本输入框内不劫持）。钉住时图钉高亮为琥珀色，状态栏提示“Parameters pinned”。
+- **持久化**：钉住状态与钉参数值写入 Settings（`params/pinned`），重启后保留；无打开文件时钉参数仍在，打开第一个文件即按钉语义显示。
+- **应用全部**：右键 → *Apply these parameters to all items*，会把当前面板参数写入所有打开的 item 并**串行逐个解码**（单 worker 排队）；失败项不弹窗、不打断其它项，最终状态栏汇总“Applied to N item(s), M failed”。首次执行有确认框，可勾选 “Apply and don't ask again” 记住本次会话。
 
 ### 存储位置
 
@@ -346,7 +367,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.4.7` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.5.0` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

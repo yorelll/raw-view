@@ -373,11 +373,13 @@ COMMON_SIZES = [
     (320, 240),
 ]
 MAX_RECENT_FILES = 10
+#: 每文件参数记忆的上限（LRU：超出时丢弃 last_used 最旧的条目）。
+FILE_PARAM_HISTORY_LIMIT = 100
 UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.4.7"
+APP_VERSION = "0.5.0"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -482,6 +484,68 @@ class DecodeOptions:
     bayer_pattern: str = "RGGB"        # one of BAYER_PATTERNS (RAW only)
 
 
+def decode_options_from_mapping(value: object) -> DecodeOptions | None:
+    """Coerce *value* into a :class:`DecodeOptions`, or ``None`` if unusable.
+
+    Accepts a ``DecodeOptions``, a ``SensorPreset``, or a mapping produced by
+    ``to_dict()``.  Numeric fields are coerced defensively and string fields
+    normalized; ``file_path`` is intentionally never persisted (history is
+    keyed by basename and the file path belongs to the opened item).
+    """
+    if isinstance(value, DecodeOptions):
+        data = asdict(value)
+    elif isinstance(value, SensorPreset) or hasattr(value, "to_dict"):
+        try:
+            data = value.to_dict()
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, dict):
+        data = dict(value)
+    else:
+        return None
+    if not isinstance(data, dict):
+        return None
+    defaults = DecodeOptions()
+    merged = {}
+    for name in defaults.__dataclass_fields__:
+        if name == "file_path":
+            merged[name] = ""
+            continue
+        fallback = getattr(defaults, name)
+        raw = data.get(name, fallback)
+        if isinstance(fallback, int):
+            try:
+                merged[name] = int(raw)
+            except (TypeError, ValueError):
+                return None
+        else:
+            text = normalize_preset_image_type(raw) if name == "image_type" else str(raw or "").strip()
+            merged[name] = text or fallback
+    # Enum-like fields are whitelisted (invalid values fall back to the default)
+    # instead of silently persisting e.g. alignment="GARBAGE", matching the
+    # defensive level of SensorPreset.from_dict (0.5.0 L-2).
+    merged["alignment"] = (
+        merged["alignment"] if merged["alignment"] in ("lsb", "msb") else defaults.alignment
+    )
+    merged["endianness"] = (
+        merged["endianness"] if merged["endianness"] in ("little", "big")
+        else defaults.endianness
+    )
+    merged["preview_mode"] = (
+        merged["preview_mode"] if merged["preview_mode"] in ("Bayer Color", "Grayscale")
+        else defaults.preview_mode
+    )
+    merged["bayer_pattern"] = (
+        merged["bayer_pattern"] if merged["bayer_pattern"] in BAYER_PATTERNS
+        else defaults.bayer_pattern
+    )
+    # Width/height/offset must stay positive/sane; a corrupt record must not
+    # resurrect a zero-sized frame that can never decode.
+    if merged["width"] <= 0 or merged["height"] <= 0 or merged["offset"] < 0:
+        return None
+    return DecodeOptions(**merged)
+
+
 @dataclass
 class SensorPreset:
     """A named sensor configuration that can be one-click applied.
@@ -543,7 +607,15 @@ class ImportResult:
 
 @dataclass
 class ViewerItem:
-    """State container for one opened file tab and its decode/view configuration."""
+    """State container for one opened file tab and its decode/view configuration.
+
+    ``options`` is the item's **own** decode parameter set.  ``applied_options``
+    is a snapshot of the parameters of the last successful decode for this item
+    (``None`` until an Apply/decode actually succeeded).  It is the only signal
+    used by the per-file parameter memory, so merely editing the panel or
+    picking a preset (which only copies values into ``options``) can never be
+    mistaken for "the user applied these parameters".
+    """
 
     options: DecodeOptions = field(default_factory=DecodeOptions)
     current_display: object | None = None
@@ -552,6 +624,11 @@ class ViewerItem:
     zoom_percent: int = 100
     current_frame: int = 0
     total_frames: int = 0
+    applied_options: DecodeOptions | None = None
+    # Set when the initial options came from the per-file parameter memory, so
+    # the automatic decode result can report "restored ..." in the status bar.
+    remembered_params_pending: bool = False
+    remembered_params_failed: bool = False
 
 
 # ── Settings ─────────────────────────────────────────────────────────────
@@ -952,6 +1029,158 @@ class AppSettings:
     def clear_preset_usage(self) -> None:
         """Remove all usage records (diagnostics/tests use injected stores)."""
         self._store.remove("presets/usage")
+
+    # ── Per-file parameter memory ──────────────────────────────────────
+    #
+    # Keyed by *basename only* (never the full path) so the same capture name
+    # opened from a different folder reuses its parameters.  Keys are
+    # ``os.path.normcase``-normalized to match Windows' case-insensitive file
+    # system semantics; the originally typed case is irrelevant because every
+    # lookup/write goes through the same normalization.
+    #
+    # Stored as one JSON object under "file_params/history":
+    #   {"<normcase(basename)>": {<full decode parameters>, "last_used": float}}
+    # Capped at FILE_PARAM_HISTORY_LIMIT entries (LRU by ``last_used``).
+
+    @staticmethod
+    def _decode_options_dict(params: DecodeOptions) -> dict:
+        """Serialise decode parameters (``DecodeOptions`` has no ``to_dict``)."""
+        return asdict(params)
+
+    @staticmethod
+    def normalize_file_key(name: object) -> str:
+        """Return the canonical history key for *name* (basename, normcase)."""
+        text = str(name or "").strip()
+        if not text:
+            return ""
+        # Accept either a bare name or a full path; only the basename is keyed.
+        base = os.path.basename(text.replace("\\", os.sep).replace("/", os.sep))
+        return os.path.normcase(base) if base and base not in (".", "..") else ""
+
+    def _load_file_params_raw(self) -> dict[str, dict]:
+        """Return a defensively-parsed ``{key: {"params": {...}, "last_used"}}``.
+
+        Any malformed JSON, non-mapping entries, or invalid parameter values are
+        dropped individually so one corrupt record can never break startup.
+        """
+        raw = self._store.value("file_params/history", "")
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        cleaned: dict[str, dict] = {}
+        for key, record in data.items():
+            if not isinstance(key, str) or not key or not isinstance(record, dict):
+                continue
+            params = decode_options_from_mapping(record)
+            if params is None:
+                continue
+            try:
+                last_used = float(record.get("last_used", 0) or 0)
+            except (TypeError, ValueError):
+                last_used = 0.0
+            cleaned[key] = {"params": params, "last_used": max(0.0, last_used)}
+        return cleaned
+
+    def _save_file_params_raw(self, history: dict[str, dict]) -> None:
+        payload = {
+            key: {
+                **self._decode_options_dict(record["params"]),
+                "last_used": float(record["last_used"]),
+            }
+            for key, record in history.items()
+        }
+        self._store.setValue("file_params/history", json.dumps(payload, ensure_ascii=False))
+
+    @property
+    def file_param_history(self) -> dict[str, DecodeOptions]:
+        """Public read-only snapshot: ``{normalized basename: DecodeOptions}``."""
+        return {
+            key: record["params"] for key, record in self._load_file_params_raw().items()
+        }
+
+    def get_file_params(self, name: object) -> DecodeOptions | None:
+        """Return remembered parameters for *name* (basename), or ``None``."""
+        key = self.normalize_file_key(name)
+        if not key:
+            return None
+        record = self._load_file_params_raw().get(key)
+        if record is None:
+            return None
+        # Copy so callers can mutate item.options without touching the store.
+        return DecodeOptions(**asdict(record["params"]))
+
+    def remember_file_params(
+        self, name: object, options: object, timestamp: float | None = None,
+    ) -> bool:
+        """Persist *options* for *name*, refreshing LRU position.
+
+        Returns ``False`` for an empty/invalid name or an invalid parameter set
+        (nothing written).  Existing keys are refreshed and moved to newest; the
+        history is trimmed to :data:`FILE_PARAM_HISTORY_LIMIT` by oldest
+        ``last_used`` first.
+        """
+        key = self.normalize_file_key(name)
+        params = decode_options_from_mapping(options)
+        if not key or params is None:
+            return False
+        try:
+            stamp = float(time.time() if timestamp is None else timestamp)
+        except (TypeError, ValueError):
+            return False
+        history = self._load_file_params_raw()
+        history[key] = {"params": params, "last_used": stamp}
+        if len(history) > FILE_PARAM_HISTORY_LIMIT:
+            ordered = sorted(
+                history.items(), key=lambda item: item[1]["last_used"], reverse=True,
+            )
+            history = dict(ordered[:FILE_PARAM_HISTORY_LIMIT])
+        self._save_file_params_raw(history)
+        return True
+
+    def forget_file_params(self, name: object) -> bool:
+        """Drop the remembered record for *name*; ``True`` if one existed."""
+        key = self.normalize_file_key(name)
+        if not key:
+            return False
+        history = self._load_file_params_raw()
+        if key not in history:
+            return False
+        del history[key]
+        self._save_file_params_raw(history)
+        return True
+
+    def clear_file_param_history(self) -> None:
+        """Remove every remembered per-file parameter record."""
+        self._store.remove("file_params/history")
+
+    # ── Pinned parameters ──────────────────────────────────────────────
+
+    @property
+    def pinned_params(self) -> DecodeOptions | None:
+        """Globally pinned parameter set, or ``None`` when the pin is off."""
+        raw = self._store.value("params/pinned", "")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return None
+        return decode_options_from_mapping(data)
+
+    @pinned_params.setter
+    def pinned_params(self, value: object | None) -> None:
+        params = decode_options_from_mapping(value) if value is not None else None
+        if params is None:
+            self._store.remove("params/pinned")
+            return
+        self._store.setValue(
+            "params/pinned", json.dumps(asdict(params), ensure_ascii=False)
+        )
 
     # ── FourCC custom formats ──────────────────────────────────────────
     #

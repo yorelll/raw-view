@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QEvent, QSignalBlocker, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSignalBlocker, QSize, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAction,
     QActionGroup,
@@ -43,12 +43,12 @@ from raw_view.models import (
 )
 
 
-def _qta_icon(name: str):
+def _qta_icon(name: str, color: str = ACTION_ICON_COLOR):
     """Build a qtawesome icon, tolerant of failures/headless envs."""
     try:
         import qtawesome as qta
 
-        return qta.icon(name, color=ACTION_ICON_COLOR)
+        return qta.icon(name, color=color)
     except Exception:
         from PyQt5.QtGui import QIcon
 
@@ -56,12 +56,16 @@ def _qta_icon(name: str):
 
 
 class PresetComboBox(QComboBox):
-    """Selection combo that reports when it is safe to re-order its model.
+    """Selection-only preset combo with a painted empty-state hint.
 
-    Rebuilding the item model while the user navigates with the keyboard makes
-    the highlighted rows swap under the cursor (Alpha/Beta ping-pong).  The
-    panel therefore never re-orders in the selection call stack; it waits until
-    the popup closes or focus leaves this control.
+    Qt does not paint ``placeholderText`` for a non-editable ``QComboBox`` (the
+    placeholder API only applies to the internal line edit), so the hint is
+    drawn here.  The colour is derived from the *current* palette at paint time,
+    which makes it follow Light/Dark theme switches without any extra wiring.
+
+    The model contains only real presets: the empty state is ``currentIndex()==-1``
+    with the hint painted in the box, so the popup never shows a duplicate
+    "Select a preset" pseudo row.
     """
 
     popupClosed = pyqtSignal()
@@ -71,6 +75,48 @@ class PresetComboBox(QComboBox):
     def popup_open(self) -> bool:
         view = self.view()
         return view is not None and view.isVisible()
+
+    #: Share of the body text colour kept in the hint (rest blends to the input
+    #: background).  0.85 keeps >=3:1 contrast against the field background in
+    #: both themes while remaining visibly lighter than real item text.
+    HINT_TEXT_WEIGHT = 0.85
+
+    def hint_color(self):
+        """Softer-than-body colour for the empty-state hint (theme aware)."""
+        from PyQt5.QtGui import QColor
+
+        palette = self.palette()
+        text = palette.color(palette.Text)
+        base = palette.color(palette.Base)
+        keep, blend = self.HINT_TEXT_WEIGHT, 1.0 - self.HINT_TEXT_WEIGHT
+        return QColor(
+            int(text.red() * keep + base.red() * blend),
+            int(text.green() * keep + base.green() * blend),
+            int(text.blue() * keep + base.blue() * blend),
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().paintEvent(event)
+        if self.currentIndex() >= 0:
+            return
+        hint = self.placeholderText()
+        if not hint:
+            return
+        from PyQt5.QtCore import Qt as _Qt
+        from PyQt5.QtGui import QFontMetrics, QPainter
+
+        painter = QPainter(self)
+        try:
+            painter.setPen(self.hint_color())
+            rect = self.rect().adjusted(8, 0, -24, 0)
+            metrics = QFontMetrics(self.font())
+            painter.drawText(
+                rect,
+                _Qt.AlignVCenter | _Qt.AlignLeft,
+                metrics.elidedText(hint, _Qt.ElideRight, max(0, rect.width())),
+            )
+        finally:
+            painter.end()
 
     def hidePopup(self) -> None:  # noqa: N802 — Qt virtual override
         super().hidePopup()
@@ -104,12 +150,18 @@ class ControlPanel(QWidget):
     presetCategoryChanged = pyqtSignal(str)  # user picked a filter-menu preset type
     savePresetRequested = pyqtSignal()      # context menu: save current values
     managePresetsRequested = pyqtSignal()   # context menu: open preset manager
+    pinToggled = pyqtSignal(bool)           # pin button: True = pinned now
+    applyToAllRequested = pyqtSignal()      # context menu: apply panel to all items
+    forgetRememberedRequested = pyqtSignal()  # context menu: forget this file's params
     valuesChanged = pyqtSignal()            # a decode parameter was edited
 
-    # Sentinel item shown at index 0 of the preset combo.
-    _PRESET_PLACEHOLDER = "(Select a preset)"
-    # Stand-in displayed when the active selection is hidden by the filter.
+    # Empty-state hint painted inside the combo frame (there is no placeholder
+    # row in the model: the popup lists real presets only).
+    _PRESET_PLACEHOLDER = "Select a preset"
+    # Hint shown instead when the active selection is hidden by the filter.
     _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
+    # Highlight colour for the active pin (theme accent, visible in both themes).
+    _PIN_ACTIVE_COLOR = "#F59E0B"
 
     RAW_FORMATS = [
         "RAW8",
@@ -218,12 +270,45 @@ class ControlPanel(QWidget):
             "Open sensor preset management to rename, delete, import, or export presets.",
             self.managePresetsRequested.emit,
         )
+        self.apply_to_all_action = self._make_preset_action(
+            "fa5s.clone", "Apply these parameters to all items",
+            "Apply the current panel parameters to every open item and decode each.",
+            self.applyToAllRequested.emit,
+        )
+        self.forget_remembered_action = self._make_preset_action(
+            "fa5s.eraser", "Forget remembered parameters for this file",
+            "Delete the parameters remembered for the current file name.",
+            self.forgetRememberedRequested.emit,
+        )
+        # Only meaningful when the current file actually has a remembered record;
+        # MainWindow keeps the enable-state in sync.
+        self.forget_remembered_action.setEnabled(False)
+        self.pin_toggle_action = self._make_preset_action(
+            "fa5s.thumbtack", "Pin parameters (Ctrl+N)",
+            "Pin the current panel parameters so other files show them until Apply.",
+            self.toggle_pin,
+        )
+
+        # Pin button: when active the panel always shows the global pinned
+        # parameter set and the item's own options are left untouched until the
+        # user presses Apply.  Same iconButton styling as the other icon actions.
+        self.pin_btn = QToolButton()
+        self.pin_btn.setObjectName("pinButton")
+        self.pin_btn.setCheckable(True)
+        self.pin_btn.setAutoRaise(True)
+        self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack"))
+        self.pin_btn.setIconSize(QSize(14, 14))
+        self.pin_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.pin_btn.setFixedSize(30, 30)
+        self.pin_btn.toggled.connect(self._on_pin_toggled)
+        self._set_pin_visuals(False)
 
         preset_select_row = QWidget()
         preset_select_layout = QHBoxLayout(preset_select_row)
         preset_select_layout.setContentsMargins(0, 0, 0, 0)
         preset_select_layout.setSpacing(4)
         preset_select_layout.addWidget(self.preset_combo, 1)
+        preset_select_layout.addWidget(self.pin_btn, 0)
         preset_select_layout.addWidget(self.preset_filter_btn, 0)
 
         # ── Format parameters ──
@@ -754,14 +839,15 @@ class ControlPanel(QWidget):
             # Down/Up repeatedly activates rows).  popupClosed/focusLost will
             # call this again when interaction really ends.
             return
-        # If the user arrowed back to the placeholder, a late re-order must not
+        # If the user arrowed back to the empty state, a late re-order must not
         # suddenly highlight an old preset; internal identity is still kept.
         show_placeholder = self.preset_combo.currentData() is None
         self._preset_reorder_pending = False
         self._refresh_preset_combo()
         if show_placeholder:
             with QSignalBlocker(self.preset_combo):
-                self.preset_combo.setCurrentIndex(0)
+                self.preset_combo.setCurrentIndex(-1)
+            self.preset_combo.update()
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
         """Backward-compatible names-only population for older callers/tests."""
@@ -775,7 +861,14 @@ class ControlPanel(QWidget):
         self._refresh_preset_combo()
 
     def _refresh_preset_combo(self, *_signal_args) -> None:
-        """Rebuild the filtered selector; never auto-load or auto-select data."""
+        """Rebuild the filtered selector; never auto-load or auto-select data.
+
+        The model holds only real presets: the empty state is index ``-1`` with a
+        painted hint, so the popup never has a duplicate placeholder row and
+        ``Key_Down`` starts on the first real preset.  A filtered-out selection
+        is surfaced through the hint text (identity/fields are preserved) while
+        the index also stays ``-1``, so Down cannot be trapped at the end.
+        """
         visible = self._preset_candidates()
         visible_names = {preset.name for preset in visible}
         selected_name = self._preset_selected_name
@@ -783,17 +876,11 @@ class ControlPanel(QWidget):
             selected_name = None
             self._preset_selected_name = None
         hidden_selection = bool(selected_name) and selected_name not in visible_names
+        preset_hint = (
+            self._PRESET_HIDDEN_SELECTION if hidden_selection else self._PRESET_PLACEHOLDER
+        )
         with QSignalBlocker(self.preset_combo):
             self.preset_combo.clear()
-            # Keep an explicit placeholder (no userData) so an empty/filtered
-            # selector never looks like it has silently selected a real preset.
-            # When a real selection is filtered out, the placeholder text says
-            # so while still sitting at index 0: keyboard Down then starts from
-            # the first available preset instead of being trapped at the end.
-            self.preset_combo.addItem(
-                self._PRESET_HIDDEN_SELECTION if hidden_selection else self._PRESET_PLACEHOLDER,
-                None,
-            )
             for preset in visible:
                 self.preset_combo.addItem(preset.name, preset.name)
             if selected_name in visible_names:
@@ -801,8 +888,9 @@ class ControlPanel(QWidget):
                 # recent-use reorder, without emitting activated/presetSelected.
                 self.preset_combo.setCurrentIndex(self.preset_combo.findData(selected_name))
             else:
-                self.preset_combo.setCurrentIndex(0)
-        self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
+                self.preset_combo.setCurrentIndex(-1)
+        self.preset_combo.setPlaceholderText(preset_hint)
+        self.preset_combo.update()
 
     def _update_preset_filter_button(self) -> None:
         """Expose the active browse category through tooltip/accessibility text."""
@@ -845,7 +933,57 @@ class ControlPanel(QWidget):
         menu.setObjectName("presetPanelMenu")
         menu.addAction(self.preset_manage_action)
         menu.addAction(self.preset_save_action)
+        menu.addSeparator()
+        menu.addAction(self.pin_toggle_action)
+        menu.addAction(self.apply_to_all_action)
+        menu.addAction(self.forget_remembered_action)
         return menu
+
+    # ── Pin (pinned parameters) ──────────────────────────────────────
+
+    def _set_pin_visuals(self, pinned: bool) -> None:
+        """Highlight the pin button and keep tooltip/accessibility in sync."""
+        color = self._PIN_ACTIVE_COLOR if pinned else ACTION_ICON_COLOR
+        icon = _qta_icon("fa5s.thumbtack", color)
+        self.pin_btn.setIcon(icon)
+        self.pin_btn.setToolTip(
+            "Parameters pinned — the panel shows the pinned set; Apply writes it "
+            "to the current file. (Ctrl+N to unpin)"
+            if pinned else
+            "Pin the current parameters to apply to other files (Ctrl+N)."
+        )
+        self.pin_btn.setAccessibleName(
+            "Unpin parameters" if pinned else "Pin parameters"
+        )
+        self.pin_btn.setAccessibleDescription(
+            "Parameters are pinned: switching files keeps showing the pinned "
+            "parameter set until Apply writes it into the file."
+            if pinned else
+            "Pin the current panel parameters so every file shows them until Apply."
+        )
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        self._set_pin_visuals(bool(checked))
+        self.pinToggled.emit(bool(checked))
+
+    def set_pinned(self, pinned: bool) -> None:
+        """Set pin state without emitting: used for startup restore."""
+        with QSignalBlocker(self.pin_btn):
+            self.pin_btn.setChecked(bool(pinned))
+        self._set_pin_visuals(bool(pinned))
+
+    def is_pinned(self) -> bool:
+        return bool(self.pin_btn.isChecked())
+
+    def toggle_pin(self) -> None:
+        """Toggle the pin as if the user clicked the button (emits pinToggled)."""
+        self.pin_btn.setChecked(not self.pin_btn.isChecked())
+
+    def set_forget_remembered_available(self, available: bool) -> None:
+        """Enable the "forget remembered parameters" context entry."""
+        action = getattr(self, "forget_remembered_action", None)
+        if action is not None:
+            action.setEnabled(bool(available))
 
     def _context_menu_blocked(self, widget) -> bool:
         """Whether *widget* owns a native context menu we must not hijack."""
@@ -872,8 +1010,9 @@ class ControlPanel(QWidget):
         """Clear selection identity without emitting preset or Apply signals."""
         self._preset_selected_name = None
         with QSignalBlocker(self.preset_combo):
-            self.preset_combo.setCurrentIndex(0)
+            self.preset_combo.setCurrentIndex(-1)
             self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
+        self.preset_combo.update()
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and spin box without emitting zoomChanged."""

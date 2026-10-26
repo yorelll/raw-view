@@ -660,10 +660,16 @@ class MainWindowPresetWorkflowTests(unittest.TestCase):
         self.assertEqual(self.w.settings.usage_writes, ["raw10test"])
         self.assertEqual(self.applied, [])
         # Usage reorder is deferred out of the selection call stack (P1-1), so
-        # the rows are untouched until the combo stops being navigated.
-        self.assertEqual(self.w.panel.preset_combo.currentData(), "raw10test")
-        self.assertEqual(self.w.panel.preset_combo.itemText(1), "raw10test")
-        self.assertEqual(self.w.panel.preset_combo.itemData(0), None)
+        # the rows are untouched until the combo stops being navigated.  The
+        # model contains real presets only (the empty state is a painted hint),
+        # so the selected preset is found by identity rather than a fixed index.
+        combo = self.w.panel.preset_combo
+        self.assertEqual(combo.currentData(), "raw10test")
+        self.assertEqual(
+            [combo.itemText(i) for i in range(combo.count())],
+            ["raw10test", "yuvpreset"],
+        )
+        self.assertEqual(combo.currentIndex(), combo.findData("raw10test"))
         # Programmatic activation with no combo focus/navigation may apply the
         # deferred reorder immediately; the identity must still be preserved.
         from PyQt5.QtWidgets import QLineEdit
@@ -906,12 +912,16 @@ class InitialDecodeErrorTests(unittest.TestCase):
             w.panel = _StubPanel({"width": 2, "height": 2})
             w._current_item = lambda: item
             captured = []
-            w._start_async_decode = lambda *args: captured.append(args)
+            w._start_async_decode = lambda *args, **kwargs: captured.append((args, kwargs))
             w.decode_current(show_error=False)
-            self.assertFalse(captured[-1][-1])
+            args, kwargs = captured[-1]
+            self.assertFalse(args[5], "show_error is forwarded positionally")
+            self.assertFalse(kwargs["user_apply"], "decode_current is not Apply")
             w._warn_size_mismatch = lambda *_args: True
             w.decode_current(warn_mismatch=True, show_error=True)
-            self.assertTrue(captured[-1][-1])
+            args, kwargs = captured[-1]
+            self.assertTrue(args[5])
+            self.assertFalse(kwargs["user_apply"], "direct call did not set Apply")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1169,12 +1179,14 @@ class OnDemandReadTests(unittest.TestCase):
         w = _new_window()
         w.panel = _StubPanel()
         w._current_item = lambda: item
-        w._start_async_decode = lambda *args: captured.append(args)
+        w._start_async_decode = lambda *args, **kwargs: captured.append((args, kwargs))
 
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, dec_item, opts, eff, cache_key, show_error = captured[0]
+        args, kwargs = captured[0]
+        data, dec_item, opts, eff, cache_key, show_error = args
+        self.assertFalse(kwargs["user_apply"], "non-Apply decode must not remember")
         # 4 bytes for one frame, not the whole 40-byte file
         self.assertEqual(data, b"\x02\x02\x02\x02")
         self.assertEqual(len(data), 4)
@@ -1200,12 +1212,13 @@ class OnDemandReadTests(unittest.TestCase):
         w = _new_window()
         w.panel = _StubPanel({"offset": 4})
         w._current_item = lambda: item
-        w._start_async_decode = lambda *args: captured.append(args)
+        w._start_async_decode = lambda *args, **kwargs: captured.append((args, kwargs))
 
         w.decode_current()
 
         self.assertEqual(len(captured), 1)
-        data, _item, _opts, eff, cache_key, show_error = captured[0]
+        args, _kwargs = captured[0]
+        data, _item, _opts, eff, cache_key, show_error = args
         self.assertEqual(eff, 8)
         self.assertEqual(data, b"\x02\x02\x02\x02")
         self.assertIsInstance(cache_key, str)
@@ -1230,7 +1243,7 @@ class OnDemandReadTests(unittest.TestCase):
         w = _new_window()
         w.panel = _StubPanel()
         w._current_item = lambda: item
-        w._start_async_decode = lambda *args: captured.append(args)
+        w._start_async_decode = lambda *args, **kwargs: captured.append((args, kwargs))
 
         # User declines → nothing decoded
         w._warn_size_mismatch = lambda *_: False
@@ -1241,7 +1254,7 @@ class OnDemandReadTests(unittest.TestCase):
         w._warn_size_mismatch = lambda *_: True
         w.decode_current(warn_mismatch=True)
         self.assertEqual(len(captured), 1)
-        self.assertEqual(len(captured[0][0]), 3)
+        self.assertEqual(len(captured[0][0][0]), 3)
 
 
 # ── H-1: generation-counter stale-result dropping ────────────────────────
@@ -1281,7 +1294,7 @@ class GenerationGuardTests(unittest.TestCase):
         w._current_item = lambda: item
 
         applied: list = []
-        w._on_decode_success = lambda *args: applied.append(args)
+        w._on_decode_success = lambda *args, **kwargs: applied.append((args, kwargs))
         fake = SimpleNamespace(
             display_array=None, qimage=None, width=12, height=34, format_name="RAW8"
         )
@@ -1322,7 +1335,7 @@ class GenerationGuardTests(unittest.TestCase):
         w._current_item = lambda: shown
 
         applied: list = []
-        w._on_decode_success = lambda *args: applied.append(args)
+        w._on_decode_success = lambda *args, **kwargs: applied.append((args, kwargs))
         fake = SimpleNamespace(
             display_array=None, qimage=None, width=1, height=1, format_name="RAW8"
         )

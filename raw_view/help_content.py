@@ -8,6 +8,7 @@ SHORTCUTS: list[tuple[str, list[tuple[str, str]]]] = [
         "Decode",
         [
             ("Ctrl+A", "apply current decode parameters"),
+            ("Ctrl+N", "pin / unpin decode parameters"),
         ],
     ),
     (
@@ -110,6 +111,28 @@ filtered out shows <code>(Current preset hidden by filter)</code> and keeps the 
 <li>Search is case-insensitive; format comparison ignores whitespace, so
 <code>raw10 packed</code> and <code>raw10packed</code> match alike. Bare <code>type:yuv</code>
 is only a name search. Invalid/unknown bracket requirements return no results.</li>
+</ul>
+<h3>Remembered parameters &amp; pinned parameters</h3>
+<ul>
+<li><b>Per-file memory</b>: only an explicit <b>Apply</b> that decodes <i>successfully</i> is
+remembered, keyed by file name (base name only, case-insensitive as on Windows). Editing fields,
+picking a preset, frame navigation, automatic/silent opens and remembered-parameter restores never
+write the memory; <b>Apply these parameters to all items</b> records each successful item (it is a
+bulk Apply). Re-opening a file with that name restores the parameters and decodes once; the status
+bar shows <code>Restored remembered parameters (name)</code>. If the file no longer matches,
+decoding fails silently with <code>Restored remembered parameters, but decoding failed</code> — no
+dialog, and the record is kept. Up to 100 files are kept (least recently used dropped first).</li>
+<li>Right-click empty panel space and choose <b>Forget remembered parameters for this file</b>
+(enabled only when a record exists) to drop that one entry.</li>
+<li><b>Pinned parameters</b> (pin button next to Preset, or <b>Ctrl+N</b>): the panel then always
+shows the pinned set when you switch files, while each file keeps its own parameters untouched.
+Press <b>Apply</b> to write the pinned set into the current file; a successful Apply also makes it
+the new pinned set. Unpinning immediately restores the current file's own parameters. The pin
+state and values are saved across restarts. Ctrl+N is ignored while a text field, spin box or combo
+has focus, so it never interrupts typing.</li>
+<li>Right-click → <b>Apply these parameters to all items</b> writes the current panel parameters
+into every open file and decodes them one at a time (failures appear only in the final summary).
+Each success is remembered per file name.</li>
 </ul>
 <h3>Productivity</h3>
 <ul>

@@ -213,8 +213,18 @@ class MainPanelPresetFilterTests(unittest.TestCase):
             ],
             "unused presets sort A-Z with pinyin tie-breaking",
         )
-        self.assertEqual(self.p.preset_combo.itemText(0), self.p._PRESET_PLACEHOLDER)
-        self.assertIsNone(self.p.preset_combo.itemData(0))
+        # The empty state is a painted hint, not a duplicate popup row.
+        self.assertEqual(self.p.preset_combo.placeholderText(), self.p._PRESET_PLACEHOLDER)
+        self.assertEqual(self.p.preset_combo.placeholderText(), "Select a preset")
+        self.assertNotIn(
+            self.p._PRESET_PLACEHOLDER,
+            [self.p.preset_combo.itemText(i) for i in range(self.p.preset_combo.count())],
+        )
+        # Index 0 is a real preset (no pseudo placeholder row); empty state is
+        # signalled only by currentIndex() == -1.
+        self.assertEqual(self.p.preset_combo.currentIndex(), -1)
+        self.assertEqual(self.p.preset_combo.itemText(0), "Alpha RAW8")
+        self.assertIsNotNone(self.p.preset_combo.itemData(0))
         self.p._on_preset_filter_action(action_for(self.p, PRESET_CATEGORY_RAW))
         self.assertEqual(self.p.preset_filter_btn.toolTip().split(".")[0], "Preset type: RAW")
         self.assertEqual(self._names(), ["Alpha RAW8", "beta RAW12", "raw10test", "raw12test"])
@@ -238,9 +248,9 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         self.p.set_values(image_type="YUV", format_name="YUYV")
         self.p.set_preset_category(PRESET_CATEGORY_RAW)
         self.assertEqual(self.p.preset_combo.currentData(), None)
-        self.assertEqual(self.p.preset_combo.itemText(0), self.p._PRESET_HIDDEN_SELECTION)
+        self.assertEqual(self.p.preset_combo.currentIndex(), -1)
         self.assertEqual(
-            self.p.preset_combo.currentText(), self.p._PRESET_HIDDEN_SELECTION,
+            self.p.preset_combo.placeholderText(), self.p._PRESET_HIDDEN_SELECTION,
         )
         self.assertEqual(self.p._preset_selected_name, "test-yuv")
         self.assertEqual(self.p.format_combo.currentText(), "YUYV")
@@ -254,8 +264,17 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         self.p.savePresetRequested.connect(lambda: saved.append("save"))
         self.p.managePresetsRequested.connect(lambda: managed.append("manage"))
         menu = self.p._preset_context_menu()
-        actions = {a.text(): a for a in menu.actions()}
-        self.assertEqual(list(actions), ["Manage presets…", "Save current as preset…"])
+        actions = {a.text(): a for a in menu.actions() if a.text()}
+        # v0.5.0 adds pin / apply-to-all / forget actions; the original two stay.
+        self.assertEqual(list(actions)[:2], ["Manage presets…", "Save current as preset…"])
+        self.assertEqual(
+            list(actions)[2:],
+            [
+                "Pin parameters (Ctrl+N)",
+                "Apply these parameters to all items",
+                "Forget remembered parameters for this file",
+            ],
+        )
         actions["Manage presets…"].trigger()
         actions["Save current as preset…"].trigger()
         self.assertEqual(saved, ["save"])
@@ -349,8 +368,12 @@ class MainPanelPresetFilterTests(unittest.TestCase):
             self.assertIsNone(self.p.childAt(blank))
             _right_click_at(blank)
         self.assertEqual(
-            seen_texts,
-            [["Manage presets…", "Save current as preset…"]],
+            [[t for t in seen_texts[0] if t]],
+            [[
+                "Manage presets…", "Save current as preset…",
+                "Pin parameters (Ctrl+N)", "Apply these parameters to all items",
+                "Forget remembered parameters for this file",
+            ]],
         )
         self.p.close()
 
@@ -448,7 +471,7 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
         self.assertEqual(visited[4:], ["Gamma"] * 4, "end is clamped")
         # Rows never reordered during navigation, and exactly one usage count
         # per key press (no duplicate re-count from a rebuild).
-        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+        self.assertEqual(self._names(), list(self.NAMES))
         self.assertTrue(self.w.panel._preset_reorder_pending)
         self.assertEqual([self._usage_count(n) for n in self.NAMES], [1, 1, 1, 1])
         self.assertEqual(self.applied, [], "navigation must never Apply")
@@ -461,9 +484,9 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
             QTest.keyClick(self._combo(), Qt.Key_Up)
             QApplication.processEvents()
             visited.append(self._current())
-        self.assertEqual(visited, ["Delta", "Beta", "Alpha", None])
+        self.assertEqual(visited, ["Delta", "Beta", "Alpha", "Alpha"])
         self.assertEqual(len({v for v in visited if v}), 3)
-        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+        self.assertEqual(self._names(), list(self.NAMES))
         self.assertEqual(self.applied, [])
 
     def test_popup_keyboard_navigation_reaches_every_row(self):
@@ -481,8 +504,8 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
             QTest.keyClick(popup, Qt.Key_Up)
             QApplication.processEvents()
             seen.append(popup.currentIndex().row())
-        self.assertEqual(len(set(seen)), 5, f"all rows reachable: {seen}")
-        self.assertEqual(self._names(), ["(Select a preset)", *self.NAMES])
+        self.assertEqual(len(set(seen)), 4, f"all real rows reachable: {seen}")
+        self.assertEqual(self._names(), list(self.NAMES))
 
     def test_reorder_after_focus_out_keeps_identity_fields_and_never_reapplies(self):
         QTest.keyClick(self._combo(), Qt.Key_Down)
@@ -497,7 +520,7 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
         other.setFocus()
         QApplication.processEvents()
         # Reorder applied, same identity still selected, no extra signal/Apply.
-        self.assertEqual(self._names()[1], "Beta")
+        self.assertEqual(self._names()[0], "Beta")
         self.assertEqual(self._current(), "Beta")
         self.assertEqual(self.w.panel.width_spin.value(), width_before)
         self.assertEqual(self.emitted, emitted_before)
@@ -525,9 +548,11 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
         self.assertEqual(self.w.panel.format_combo.currentText(), "YUYV")
 
         self.w.panel.set_preset_category(PRESET_CATEGORY_RAW)
-        self.assertEqual(combo.currentIndex(), 0)
+        self.assertEqual(combo.currentIndex(), -1)
         self.assertIsNone(combo.currentData())
-        self.assertEqual(combo.itemText(0), self.w.panel._PRESET_HIDDEN_SELECTION)
+        self.assertEqual(
+            combo.placeholderText(), self.w.panel._PRESET_HIDDEN_SELECTION,
+        )
         self.assertEqual(self.w.panel._preset_selected_name, "yuv1")
         self.assertEqual(self.w.panel.format_combo.currentText(), "YUYV")
 
@@ -1531,7 +1556,11 @@ class ApplyShortcutTests(unittest.TestCase):
         self.w._on_apply_clicked = MainWindow._on_apply_clicked.__get__(self.w, MainWindow)
         self.w.decode_current = lambda *args, **kwargs: captured.append((args, kwargs))
         self.w.apply_action.trigger()
-        self.assertEqual(captured, [((), {"warn_mismatch": True, "show_error": True})])
+        self.assertEqual(
+            captured,
+            [((), {"warn_mismatch": True, "show_error": True, "user_apply": True})],
+            "Apply must carry the explicit user-apply intent (0.5.0 H-1)",
+        )
 
     def test_main_panel_preset_selector_is_not_a_text_editor(self):
         # The main preset control is selection-only; Ctrl+A there therefore
@@ -1612,7 +1641,7 @@ class HelpShortcutSectionTests(unittest.TestCase):
             for k, _d in items:
                 keys.add(k)
         for needle in (
-            "Ctrl+A",
+            "Ctrl+A", "Ctrl+N",
             "Up / Left", "Down / Right", "Home", "End",
             "Ctrl+Left", "Ctrl+Right",
             "Ctrl+0", "Ctrl+1",

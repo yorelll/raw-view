@@ -11,6 +11,7 @@ import numpy as np
 from PyQt5.QtCore import QEvent, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QAction,
     QApplication,
     QComboBox,
@@ -366,6 +367,22 @@ class MainWindow(QMainWindow):
         # 自动解码可静默失败；后续用户 Apply 的失败必须弹框。不能用全局裸 flag，
         # 否则旧 worker 的迟到 error 会吞掉/污染新请求的意图。
         self._pending_decode_show_error: bool = True
+        # Whether the in-flight request originated from an explicit user Apply.
+        # Only such a decode may write the per-file parameter memory; frame
+        # navigation, silent initial decodes and remembered-parameter restores
+        # must never overwrite it (0.5.0 H-1).  Applied per request/generation
+        # exactly like ``_pending_decode_show_error``.
+        self._pending_user_apply: bool = False
+        # Global pinned parameter set (None = pin off).  Populated from
+        # settings during _build_ui so it survives a restart.
+        self._pinned_params: DecodeOptions | None = None
+        # Apply-to-all bookkeeping: items still waiting for their serial turn and
+        # the running success/failure counters used for the final status summary.
+        self._apply_all_queue: list[ViewerItem] = []
+        self._apply_all_ok = 0
+        self._apply_all_failed = 0
+        self._apply_all_skipped = 0
+        self._apply_all_total = 0
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -398,7 +415,15 @@ class MainWindow(QMainWindow):
         self.panel.presetCategoryChanged.connect(self._on_preset_category_changed)
         self.panel.savePresetRequested.connect(self._on_save_preset_clicked)
         self.panel.managePresetsRequested.connect(self._open_preset_manager_dialog)
+        self.panel.pinToggled.connect(self._on_pin_toggled)
+        self.panel.applyToAllRequested.connect(self._on_apply_to_all_requested)
+        self.panel.forgetRememberedRequested.connect(self._on_forget_remembered_clicked)
         self.panel.valuesChanged.connect(self._on_panel_values_changed)
+        # Restore the persisted pin state before the first item is opened: the
+        # pinned parameter set survives a restart, and the first opened file
+        # follows the same pin semantics as any later tab switch.
+        self._pinned_params = self.settings.pinned_params
+        self.panel.set_pinned(self._pinned_params is not None)
         self._refresh_preset_combo()
 
         # Tab widget
@@ -563,6 +588,17 @@ class MainWindow(QMainWindow):
         self.addAction(self.apply_action)
         decode_menu.addAction(self.apply_action)
 
+        # Ctrl+N (nail) toggles the global parameter pin.  Ctrl+N is not used by
+        # any existing action; the guard below keeps it out of text editors where
+        # Ctrl+N could otherwise be a native cursor/command binding.
+        self.pin_action = QAction("Pin Parameters", self)
+        self.pin_action.setShortcut("Ctrl+N")
+        self.pin_action.setShortcutContext(Qt.WindowShortcut)
+        self.pin_action.setToolTip("Pin/unpin decode parameters (Ctrl+N)")
+        self.pin_action.triggered.connect(self._trigger_pin_shortcut)
+        self.addAction(self.pin_action)
+        decode_menu.addAction(self.pin_action)
+
         # ── Navigate ──
         nav_menu = menu.addMenu("Navigate")
         next_tab = QAction("Next Tab", self)
@@ -723,9 +759,40 @@ class MainWindow(QMainWindow):
         editable_classes = (QLineEdit, QTextEdit, QPlainTextEdit)
         for widget in self.findChildren(editable_classes):
             widget.installEventFilter(self)
+        # Spin boxes report focus as the QSpinBox itself (not its internal line
+        # edit), so filter both; same for editable combos, where Qt reports the
+        # combo as the focus widget.  This matters for Ctrl+A (Select All) and
+        # for Ctrl+N, which must stay inert inside text entry (0.5.0 H-2).
+        for spin in self.findChildren(QAbstractSpinBox):
+            spin.installEventFilter(self)
+            editor = spin.lineEdit()
+            if editor is not None:
+                editor.installEventFilter(self)
         for combo in self.findChildren(QComboBox):
+            combo.installEventFilter(self)
             if combo.isEditable() and combo.lineEdit() is not None:
                 combo.lineEdit().installEventFilter(self)
+
+    @staticmethod
+    def _is_text_entry_widget(widget) -> bool:
+        """Whether *widget* (or an ancestor) is a text-entry control.
+
+        A ``QSpinBox``/``QComboBox`` reports itself (not its internal line edit)
+        as the focus widget, so the direct ``isinstance`` check alone misses
+        those cases; walking up the parent chain also covers nested editors.
+        """
+        if widget is None:
+            return False
+        text_types = (QLineEdit, QTextEdit, QPlainTextEdit)
+        current = widget
+        while current is not None:
+            if isinstance(current, text_types + (QAbstractSpinBox, QComboBox)):
+                return True
+            parent = current.parentWidget()
+            if parent is current:
+                break
+            current = parent
+        return False
 
     @staticmethod
     def _is_ctrl_a_event(event) -> bool:
@@ -746,7 +813,36 @@ class MainWindow(QMainWindow):
             watched.selectAll()
             event.accept()
             return True
+        if self._is_ctrl_n_event(event) and self._is_text_entry_widget(watched):
+            # Ctrl+N must stay inert inside text entry: consume it here so the
+            # window-level Pin QAction never fires while the user is typing or
+            # editing a numeric field (0.5.0 H-2).
+            event.accept()
+            return True
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _is_ctrl_n_event(event) -> bool:
+        return (
+            event.type() == QEvent.KeyPress
+            and event.key() == Qt.Key_N
+            and event.modifiers() == Qt.ControlModifier
+        )
+
+    def _trigger_pin_shortcut(self) -> None:
+        """Ctrl+N: toggle the pin, except while a text-entry control has focus.
+
+        The field-level guard already consumes Ctrl+N inside text entry; this
+        second check (using the focus widget's ancestor chain, which catches
+        QSpinBox/QComboBox reporting themselves rather than their editor) keeps
+        the action inert even if the event filter was bypassed (0.5.0 H-2).
+        """
+        if self._is_text_entry_widget(QApplication.focusWidget()):
+            return
+        modal = QApplication.activeModalWidget()
+        if modal is not None and modal is not self:
+            return
+        self.panel.toggle_pin()
 
     def _trigger_apply_shortcut(self) -> None:
         """Run the exact Apply handler only when the viewer is actionable."""
@@ -1114,6 +1210,19 @@ class MainWindow(QMainWindow):
         item.options.width = 2560
         item.options.height = 1440
 
+        # Per-file parameter memory (keyed by basename only).  A hit replaces the
+        # freshly defaulted options before the first decode, so opening the same
+        # capture again reuses the parameters the user last applied to it.
+        remembered = None
+        if not self.__dict__.get("_pinned_params"):
+            remembered = self.settings.get_file_params(path)
+        if remembered is not None:
+            remembered.file_path = path
+            item.options = remembered
+            item.remembered_params_pending = True
+        else:
+            item.remembered_params_pending = False
+
         self.settings.add_recent_file(path)
         self._refresh_recent_files_menu()
 
@@ -1185,7 +1294,11 @@ class MainWindow(QMainWindow):
         # 否则标签被拖动/关闭后，旧 `_active_item_index` 会指向邻居 item，
         # 把未 Apply 参数写错对象（0.2.1 review M-1 / 0.2.0-M-3）。
         prev = self._active_item() if self._active_item_index >= 0 else None
-        if prev is not None:
+        # While pinned, the panel shows the *global* pinned set rather than the
+        # previous item's own values.  Copying the panel back here would silently
+        # overwrite that item's parameters (and it would look like an unapplied
+        # edit); the pin contract says item options change only on Apply.
+        if prev is not None and not self.__dict__.get("_pinned_params"):
             self._save_panel_to_item(prev)
         self._active_item_index = index
         self._active_item_ref = self.items[index] if 0 <= index < len(self.items) else None
@@ -1223,6 +1336,10 @@ class MainWindow(QMainWindow):
         # 也会把面板误写进不相关的 item。未 Apply 编辑的丢弃已在关闭前由标签 ●
         # 标记提示（UI-4），此处不做静默写回（0.2.2-M-1）。
         closing = self.items[index]
+        # Close fallback: persist the last *successfully applied* parameters for
+        # this file name (never unapplied panel edits).  Idempotent with the
+        # immediate write in _on_decode_success.
+        self._sync_applied_params_for(closing)
         # 用户明确关闭 item 后，即使外部覆盖同路径文件再重开，也必须从磁盘重读。
         # 清除该路径的所有帧/参数缓存（文件签名键是第二道保险）。
         cache = self.__dict__.get("decode_cache")
@@ -1361,7 +1478,11 @@ class MainWindow(QMainWindow):
         # Leaving a stale preset name selected is what made the combo appear
         # inconsistent with the actual decode parameters.
         self.panel.reset_preset_selection()
-        opts = item.options
+        # Pinned: the panel always shows the global pinned set, never this
+        # item's own options.  The item itself is untouched until the user hits
+        # Apply, which is what keeps per-item parameters from being polluted.
+        pinned = self.__dict__.get("_pinned_params")
+        opts = pinned if pinned is not None else item.options
         self.panel.set_values(
             image_type=opts.image_type,
             format_name=opts.format_name,
@@ -1377,6 +1498,234 @@ class MainWindow(QMainWindow):
         self._update_frame_display(item)
         self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
         self._loading_item = False
+        # The "forget remembered parameters" entry is per-file state and must be
+        # recomputed on every tab switch, otherwise it keeps the previous file's
+        # availability (0.5.0 M-1).
+        self._refresh_forget_action()
+
+    # ── Pinned parameters ────────────────────────────────────────────
+
+    def _panel_decode_options(self) -> DecodeOptions:
+        """Snapshot the panel's current values as a ``DecodeOptions``."""
+        vals = self.panel.get_values()
+        return DecodeOptions(
+            image_type=vals["image_type"],
+            format_name=vals["format_name"],
+            width=int(vals["width"]),
+            height=int(vals["height"]),
+            alignment=vals["alignment"],
+            endianness=vals["endianness"],
+            offset=int(vals["offset"]),
+            preview_mode=vals["preview_mode"],
+            bayer_pattern=vals["bayer_pattern"],
+        )
+
+    def _on_pin_toggled(self, pinned: bool) -> None:
+        """Pin/unpin the panel's current parameters.
+
+        Pinning snapshots the currently displayed values.  Unpinning restores
+        the current item's own parameters immediately (they were never touched).
+        """
+        item = self._current_item()
+        if pinned:
+            # When already pinned the panel already shows the pinned values, so
+            # re-pinning is a no-op snapshot of those same values.
+            self._pinned_params = self._panel_decode_options()
+            self.settings.pinned_params = self._pinned_params
+            self._set_state("Parameters pinned — Apply writes them to the current file", "busy")
+        else:
+            self._pinned_params = None
+            self.settings.pinned_params = None
+            if item is not None:
+                self._load_item_to_panel(item)
+            self._set_state("Parameters unpinned", "idle")
+        self._refresh_forget_action()
+
+    # ── Apply panel parameters to every item ─────────────────────────
+
+    def _on_apply_to_all_requested(self) -> None:
+        """Apply the panel's parameters to every open item, decoding serially.
+
+        There is a single worker/thread pipeline, so items are queued and decoded
+        one at a time; each result advances the queue.  Failures are silent (the
+        same policy as the first automatic decode) so one incompatible file can
+        never block the rest; a final status line summarises the outcome.
+        """
+        if not self.items:
+            self._set_state("No items to apply to", "idle")
+            return
+        params = self._panel_decode_options()
+        # Confirmation is cheap protection for a multi-file mutation, and the
+        # answer can be remembered to keep repeated bulk operations quiet.
+        if not self.__dict__.get("_apply_all_confirmed_forever", False):
+            ask = self._ask_apply_all_confirmation(len(self.items))
+            if not ask:
+                return
+        self._apply_all_queue = list(self.items)
+        self._apply_all_total = len(self.items)
+        self._apply_all_ok = 0
+        self._apply_all_failed = 0
+        self._apply_all_skipped = 0
+        for item in self.items:
+            self._assign_options(item, params)
+        self._set_state(f"Applying to {self._apply_all_total} items...", "busy")
+        self._decode_next_queued_item()
+
+    def _ask_apply_all_confirmation(self, count: int) -> bool:
+        """Ask before bulk-applying; supports "do not ask again this session"."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Apply to all items")
+        box.setText(
+            f"Apply the current panel parameters to all {count} open items?\n"
+            "Each item will be decoded with these parameters."
+        )
+        apply_btn = box.addButton("Apply to All", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        remember = box.addButton("Apply and don't ask again", QMessageBox.AcceptRole)
+        box.setDefaultButton(apply_btn)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return False
+        if clicked is remember:
+            self._apply_all_confirmed_forever = True
+        return clicked in (apply_btn, remember)
+
+    @staticmethod
+    def _assign_options(item: ViewerItem, params: DecodeOptions) -> None:
+        """Copy *params* into *item.options*, keeping the item's own file path."""
+        item.options.image_type = params.image_type
+        item.options.format_name = params.format_name
+        item.options.width = params.width
+        item.options.height = params.height
+        item.options.alignment = params.alignment
+        item.options.endianness = params.endianness
+        item.options.offset = params.offset
+        item.options.preview_mode = params.preview_mode
+        item.options.bayer_pattern = params.bayer_pattern
+
+    def _decode_next_queued_item(self) -> None:
+        """Decode the next queued item, or finish and summarise."""
+        if not self._apply_all_queue:
+            # Account for every queued item: applied + failed + skipped must
+            # equal the total, so closing a queued tab mid-batch is visible
+            # instead of silently shrinking the reported count (0.5.0 M-2).
+            summary = (
+                f"Applied to {self._apply_all_ok} item(s), "
+                f"{self._apply_all_failed} failed"
+            )
+            if self._apply_all_skipped:
+                summary += f", {self._apply_all_skipped} skipped (closed)"
+            self._set_state(
+                summary,
+                "error" if (self._apply_all_failed or self._apply_all_skipped) else "ok",
+            )
+            return
+        item = self._apply_all_queue.pop(0)
+        if item not in self.items:
+            # Closed while the batch was running: count it as skipped so the
+            # final summary stays consistent with the initial total.
+            self._apply_all_skipped += 1
+            self._decode_next_queued_item()
+            return
+        index = self.items.index(item)
+        self._loading_item = True
+        self.item_tabs.setCurrentIndex(index)
+        self._loading_item = False
+        self._active_item_index = index
+        self._active_item_ref = item
+        self._set_tab_dirty(item, True)
+        self._apply_all_current = item
+        # Silent errors: a single incompatible file must not pop a modal in the
+        # middle of a batch (matches the initial automatic decode policy).
+        # The batch is itself a user-initiated bulk Apply, so successful items
+        # write their per-file memory (unlike frame navigation/silent opens).
+        self.decode_current(
+            warn_mismatch=False, show_error=False, user_apply=True,
+        )
+
+    def _advance_apply_all(self, item: ViewerItem, succeeded: bool) -> None:
+        """Record one queued result and start the next item."""
+        if getattr(self, "_apply_all_current", None) is not item:
+            return
+        self._apply_all_current = None
+        if succeeded:
+            self._apply_all_ok += 1
+        else:
+            self._apply_all_failed += 1
+        self._decode_next_queued_item()
+
+    # ── Per-file parameter memory ────────────────────────────────────
+
+    @staticmethod
+    def _snapshot_options(options: DecodeOptions) -> DecodeOptions:
+        """Return an independent copy of *options* (path preserved)."""
+        return DecodeOptions(
+            file_path=options.file_path,
+            image_type=options.image_type,
+            format_name=options.format_name,
+            width=options.width,
+            height=options.height,
+            alignment=options.alignment,
+            endianness=options.endianness,
+            offset=options.offset,
+            preview_mode=options.preview_mode,
+            bayer_pattern=options.bayer_pattern,
+        )
+
+    def _record_applied_params(self, item: ViewerItem) -> None:
+        """Snapshot a successful decode and write the per-file memory.
+
+        Idempotent: the same applied options are written again on close/exit as
+        a fallback, producing identical data (the LRU timestamp advances, which
+        is correct because the file was used most recently).
+        """
+        if item is None or not item.options.file_path:
+            return
+        item.remembered_params_pending = False
+        item.remembered_params_failed = False
+        item.applied_options = self._snapshot_options(item.options)
+        settings = self.__dict__.get("settings")
+        if settings is None:
+            # MainWindow.__new__ test stubs have no settings store; the applied
+            # snapshot is still recorded, only persistence is skipped.
+            return
+        settings.remember_file_params(item.options.file_path, item.applied_options)
+
+    def _sync_applied_params_for(self, item: ViewerItem) -> None:
+        """Close/exit fallback: persist any applied snapshot not yet stored."""
+        applied = getattr(item, "applied_options", None)
+        if applied is None or not item.options.file_path:
+            return
+        settings = self.__dict__.get("settings")
+        if settings is not None:
+            settings.remember_file_params(item.options.file_path, applied)
+
+    def _on_forget_remembered_clicked(self) -> None:
+        item = self._current_item()
+        settings = self.__dict__.get("settings")
+        if item is None or settings is None:
+            return
+        name = os.path.basename(item.options.file_path)
+        if settings.forget_file_params(name):
+            item.remembered_params_pending = False
+            self._set_state(f"Forgot remembered parameters for '{name}'", "ok")
+        self._refresh_forget_action()
+
+    def _refresh_forget_action(self) -> None:
+        """Enable the context action only when this file has a remembered record."""
+        settings = self.__dict__.get("settings")
+        panel = self.__dict__.get("panel")
+        if settings is None or panel is None:
+            # MainWindow.__new__ test stubs have no settings/panel store.
+            return
+        item = self._current_item()
+        available = bool(
+            item is not None
+            and settings.get_file_params(item.options.file_path) is not None
+        )
+        panel.set_forget_remembered_available(available)
 
     def _sync_status_from_item(self, item: ViewerItem) -> None:
         path = item.options.file_path
@@ -1487,8 +1836,12 @@ class MainWindow(QMainWindow):
         parameters. Opening/dropping a file (or picking a preset) never warns,
         since the default parameters won't match arbitrary inputs until the
         user has actually configured them and pressed Apply.
+
+        This is also the only single-item path that sets ``user_apply=True``,
+        which authorizes writing the per-file parameter memory on success
+        (0.5.0 H-1).  A failed Apply never records anything.
         """
-        self.decode_current(warn_mismatch=True, show_error=True)
+        self.decode_current(warn_mismatch=True, show_error=True, user_apply=True)
 
     @staticmethod
     def _remaining_bytes(path: str, offset: int) -> int | None:
@@ -1543,6 +1896,7 @@ class MainWindow(QMainWindow):
 
     def decode_current(
         self, warn_mismatch: bool = False, show_error: bool = True,
+        user_apply: bool = False,
     ) -> None:
         """Decode the current item.
 
@@ -1551,6 +1905,12 @@ class MainWindow(QMainWindow):
         updates the state/log, while Apply/frame navigation pass ``True`` and
         retain the normal modal error feedback.  Async requests bind this value
         to their generation/item in :meth:`_start_async_decode`.
+
+        ``user_apply`` is likewise an explicit intent: only an Apply click or
+        the apply-to-all batch (a user-initiated bulk Apply) sets it, and only
+        then is the per-file parameter memory written on success.  Frame
+        navigation, silent initial decodes and remembered-parameter restores
+        leave it ``False`` so they can never pollute the memory (0.5.0 H-1).
 
         A valid request first invalidates any in-flight decode *before* preflight
         checks.  Thus an old worker may still emit for lifecycle cleanup, but it
@@ -1579,6 +1939,7 @@ class MainWindow(QMainWindow):
             logger.warning("Decode rejected: %s", message)
             self._show_decode_error_if_requested(show_error, "Decode Failed", message)
             self._set_state("Decode failed: unsupported format", "error")
+            self._finish_batch_step_on_preflight_failure()
             return
 
         logger.debug(
@@ -1602,7 +1963,9 @@ class MainWindow(QMainWindow):
         # Standard Image — decode synchronously; load_bgr_image() reads and
         # decodes the file itself, so we never read the raw bytes here.
         if opts.image_type == "Standard Image":
-            self._decode_standard_image(item, opts, show_error=show_error)
+            self._decode_standard_image(
+                item, opts, show_error=show_error, user_apply=user_apply,
+            )
             return
 
         # RAW / YUV: validate remaining bytes against one frame, then seek-read
@@ -1613,6 +1976,7 @@ class MainWindow(QMainWindow):
                 show_error, "Read Error", f"Failed to read file size: {path}"
             )
             self._set_state("Decode failed", "error")
+            self._finish_batch_step_on_preflight_failure()
             return
 
         # 单帧内存上限（512MB）——GUI 与 CLI/batch 统一保护，防超大宽高 OOM
@@ -1627,6 +1991,7 @@ class MainWindow(QMainWindow):
                     f"{exc}\n\n请降低宽度/高度，或换用更低位深/非 32-bit 格式。",
                 )
                 self._set_state("Decode rejected: frame too large", "error")
+                self._finish_batch_step_on_preflight_failure()
                 return
 
         # Only an explicit Apply pops the size-mismatch dialog; open/drop and
@@ -1666,7 +2031,10 @@ class MainWindow(QMainWindow):
             # decode_current already invalidated any preceding request before
             # preflight.  No second cancellation/generation bump is needed here;
             # cached pixels can now be applied without a late worker competing.
-            self._on_decode_success(item, cached.qimage, cached.width, cached.height, cached.format_name)
+            self._on_decode_success(
+                item, cached.qimage, cached.width, cached.height, cached.format_name,
+                user_apply=user_apply,
+            )
             self._set_state("Decoded (cached)", "ok")
             return
 
@@ -1679,12 +2047,14 @@ class MainWindow(QMainWindow):
                 f"Failed to read {read_len} bytes at offset {effective_offset}: {path}",
             )
             self._set_state("Decode failed", "error")
+            self._finish_batch_step_on_preflight_failure()
             return
 
         # RAW/YUV — async. The exact key representing these bytes is passed to
         # the starter; it is saved only after any old worker is disconnected.
         self._start_async_decode(
             data, item, opts, effective_offset, cache_key, show_error,
+            user_apply=user_apply,
         )
 
     def _show_decode_error_if_requested(self, show_error: bool, title: str, message: str) -> None:
@@ -1692,8 +2062,20 @@ class MainWindow(QMainWindow):
         if show_error:
             QMessageBox.critical(self, title, message)
 
+    def _finish_batch_step_on_preflight_failure(self) -> None:
+        """Advance an apply-to-all batch when a preflight check failed.
+
+        Preflight failures (unsupported format, unreadable size, frame too
+        large) never reach the async error slot, so the serial queue has to be
+        advanced here; otherwise one bad item would stall the whole batch.
+        """
+        current = self.__dict__.get("_apply_all_current")
+        if current is not None:
+            self._advance_apply_all(current, False)
+
     def _decode_standard_image(
         self, item: ViewerItem, opts: DecodeOptions, show_error: bool = True,
+        user_apply: bool = False,
     ) -> None:
         try:
             bgr = load_bgr_image(opts.file_path)
@@ -1706,11 +2088,14 @@ class MainWindow(QMainWindow):
             item.total_frames = 1
             item.current_frame = 0
             logger.debug("Standard image decoded: %s (%dx%d)", opts.file_path, w, h)
-            self._on_decode_success(item, qimg, w, h, "Standard Image")
+            self._on_decode_success(
+                item, qimg, w, h, "Standard Image", user_apply=user_apply,
+            )
         except Exception as exc:
             logger.exception("Failed to decode standard image: %s", opts.file_path)
             self._show_decode_error_if_requested(show_error, "Decode Failed", str(exc))
             self._set_state("Decode failed", "error")
+            self._finish_batch_step_on_preflight_failure()
         finally:
             # A standard-image decode is synchronous and takes over the
             # display; an in-flight async result must not clobber it later.
@@ -1724,6 +2109,7 @@ class MainWindow(QMainWindow):
         effective_offset: int,
         cache_key: str | None = None,
         show_error: bool = True,
+        user_apply: bool = False,
     ) -> None:
         # decode_current already invalidated older work before preflight.  Keep
         # this direct-call guard too: callers/tests using _start_async_decode
@@ -1737,6 +2123,10 @@ class MainWindow(QMainWindow):
         # the worker.  _on_decode_error only reads it after _should_apply_decode
         # accepts, so a stale silent error cannot suppress a newer explicit one.
         self._pending_decode_show_error = bool(show_error)
+        # Bind the "explicit user Apply" intent to this generation/item exactly
+        # like the error intent above, so a late result from an older silent
+        # decode can never be recorded as if the user had applied it (H-1).
+        self._pending_user_apply = bool(user_apply)
 
         # Preview/bayer come from the item's own saved options — not whatever
         # the shared panel currently shows — so tab switches can't leak values
@@ -1830,6 +2220,7 @@ class MainWindow(QMainWindow):
         self._pending_decode_item = None
         self._pending_cache_key = None
         self._pending_decode_show_error = True
+        self._pending_user_apply = False
 
     def _disconnect_decode(self) -> None:
         """彻底断开主窗口与在途解码 worker/thread 的连接。
@@ -1881,6 +2272,12 @@ class MainWindow(QMainWindow):
            线程长时间等待），线程/worker 生命周期仍由 finished/error →
            quit()/deleteLater 连接保证继续收尾。
         """
+        # Exit fallback: flush every applied-but-not-yet-stored file memory.
+        for it in list(self.__dict__.get("items") or []):
+            try:
+                self._sync_applied_params_for(it)
+            except Exception:
+                logger.exception("Failed to persist remembered parameters on exit")
         thread = self.__dict__.get("_thread")
         self._disconnect_decode()
         if thread is not None:
@@ -1919,6 +2316,10 @@ class MainWindow(QMainWindow):
             )
             return
         self._pending_decode_item = None
+        # Consume the per-request intent together with the pending refs: only
+        # this request's own flag may authorize the memory write (H-1).
+        user_apply = self.__dict__.get("_pending_user_apply", False)
+        self._pending_user_apply = False
         item.current_display = result.display_array
         item.options.width = result.width
         item.options.height = result.height
@@ -1930,9 +2331,34 @@ class MainWindow(QMainWindow):
         self._pending_cache_key = None
         if cache is not None and cache_key is not None:
             cache.store(cache_key, result)
-        self._on_decode_success(item, result.qimage, result.width, result.height, result.format_name)
+        self._on_decode_success(
+            item, result.qimage, result.width, result.height, result.format_name,
+            user_apply=user_apply,
+        )
 
-    def _on_decode_success(self, item: ViewerItem, qimg: QImage, width: int, height: int, format_name: str) -> None:
+    def _on_decode_success(
+        self, item: ViewerItem, qimg: QImage, width: int, height: int,
+        format_name: str, user_apply: bool = False,
+    ) -> None:
+        # Capture the "restored from memory" flag *before* recording the applied
+        # snapshot (that helper clears it), so the status message can be chosen.
+        restored_msg = (
+            f"Restored remembered parameters ({os.path.basename(item.options.file_path)})"
+            if getattr(item, "remembered_params_pending", False) else None
+        )
+        # Only a *successful explicit user Apply* proves the parameters fit this
+        # file.  Frame navigation, automatic/silent decodes and remembered-
+        # parameter restores must never write the memory (0.5.0 H-1): they pass
+        # ``user_apply=False`` and only clear the restored-pending markers.
+        if user_apply:
+            self._record_applied_params(item)
+        else:
+            item.remembered_params_pending = False
+        # While pinned, a successful user Apply makes the freshly applied
+        # parameters the new pinned set ("the pin follows the latest Apply").
+        if user_apply and self.__dict__.get("_pinned_params") is not None:
+            self._pinned_params = self._snapshot_options(item.options)
+            self.settings.pinned_params = self._pinned_params
         # UI-4：解码真正成功后，用户看到的即当前参数 → 清除标签未保存标记 ●
         # （缓存命中与后台线程结果都汇聚到这里；不能放在 _save_panel_to_item，
         #   那会被 tab 切换/预设选择误触发）。
@@ -1953,8 +2379,15 @@ class MainWindow(QMainWindow):
             )
         else:
             self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
-        self._set_state("Decoded", "ok")
+        if restored_msg is not None:
+            self._set_state(restored_msg, "ok")
+        else:
+            self._set_state("Decoded", "ok")
         self._update_frame_display(item)
+        self._refresh_forget_action()
+        current = self.__dict__.get("_apply_all_current")
+        if current is not None:
+            self._advance_apply_all(current, True)
 
     def _on_decode_error(self, generation: int, message: str) -> None:
         item = self._current_item()
@@ -1967,8 +2400,24 @@ class MainWindow(QMainWindow):
         show_error = self.__dict__.get("_pending_decode_show_error", True)
         self._pending_decode_item = None
         self._pending_decode_show_error = True
+        # A failed request never authorizes a memory write; drop its intent so
+        # a later unrelated decode cannot inherit it.
+        self._pending_user_apply = False
         self._show_decode_error_if_requested(show_error, "Decode Failed", message)
-        self._set_state("Decode failed", "error")
+        if item is not None and getattr(item, "remembered_params_pending", False):
+            # A remembered parameter set that no longer fits this file: keep the
+            # record (the user may have opened a different capture under the same
+            # name) but say so explicitly; never pop a modal for this.
+            item.remembered_params_pending = False
+            item.remembered_params_failed = True
+            self._set_state(
+                "Restored remembered parameters, but decoding failed", "error",
+            )
+        else:
+            self._set_state("Decode failed", "error")
+        current = self.__dict__.get("_apply_all_current")
+        if current is not None:
+            self._advance_apply_all(current, False)
 
     # ── Save ─────────────────────────────────────────────────────────
 
