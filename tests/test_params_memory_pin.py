@@ -123,17 +123,78 @@ class FileParamHistorySettingsTests(unittest.TestCase):
         self.assertEqual(self.s.get_file_params("CAPTURE.RAW").width, 640)
         self.assertIsNone(self.s.get_file_params("missing.raw"))
 
-    def test_basename_and_windows_case_normalization(self):
-        self.assertEqual(
-            self.s.normalize_file_key(r"D:\data\Shot.RAW"),
-            self.s.normalize_file_key("shot.raw"),
+    def test_key_normalization_is_platform_independent(self):
+        """Case folding must not depend on os.path.normcase (identity on POSIX).
+
+        This is the CI regression: on Linux ``normcase`` left ``Shot.RAW`` and
+        ``shot.raw`` distinct, so lookups by a differently-cased name missed.
+        """
+        key = self.s.normalize_file_key
+        self.assertEqual(key("Shot.RAW"), key("shot.raw"))
+        self.assertEqual(key("SHOT.RAW"), key("Shot.Raw"))
+        # Windows and POSIX separators, and multi-level directories, collapse to
+        # the same basename key.
+        for variant in (
+            r"D:\data\Shot.RAW",
+            "D:/data/Shot.RAW",
+            "/data/sub/shot.raw",
+            r"\server\share\deep\dir\SHOT.RAW",
+            "shot.raw",
+        ):
+            with self.subTest(variant=variant):
+                self.assertEqual(key(variant), "shot.raw")
+        # Empty / dot pseudo-names have no usable key.
+        for empty in ("", "   ", ".", "..", r"C:\data\.", "/a/b/.."):
+            with self.subTest(empty=empty):
+                self.assertEqual(key(empty), "")
+
+    def test_documented_casefold_semantics(self):
+        """Pins the *chosen* key semantics: Unicode casefold on every platform.
+
+        ``str.casefold()`` performs expanding folds (``ß`` -> ``ss``, ``µ`` ->
+        ``μ``, ``ς`` -> ``σ``, ``ﬁ`` -> ``fi``, U+212A -> ``k``), which differs
+        from ``ntpath.normcase`` for a small number of characters.  That is a
+        deliberate trade-off (platform-independent keys, CI-verifiable) and this
+        test locks it in so a future refactor cannot silently switch to
+        ``lower()``/``normcase`` and change the stored key space.
+        """
+        key = self.s.normalize_file_key
+        # Expanding folds are intentional.
+        self.assertEqual(key("Straße.raw"), key("strasse.raw"))
+        self.assertEqual(key("Straße.raw"), "strasse.raw")
+        self.assertEqual(key("µ.raw"), key("μ.raw"))
+        self.assertEqual(key("ς.raw"), key("σ.raw"))
+        self.assertEqual(key("ﬁle.raw"), key("file.raw"))
+        # Regular ASCII and Chinese names behave exactly like Windows' rules.
+        self.assertEqual(key("Capture.RAW"), key("capture.raw"))
+        self.assertEqual(key("测试.RAW"), key("测试.raw"))
+        self.assertEqual(key(r"C:\dir\测试.RAW"), "测试.raw")
+
+    def test_documented_casefold_semantics_share_one_record(self):
+        """`straße.raw` and `strasse.raw` intentionally hit the same entry."""
+        self.s.remember_file_params("straße.raw", self._opts(width=1280))
+        hit = self.s.get_file_params("strasse.raw")
+        self.assertIsNotNone(
+            hit, "expanding fold means these names intentionally share a record",
         )
-        self.assertEqual(self.s.normalize_file_key("/data/sub/shot.raw"),
-                         self.s.normalize_file_key("SHOT.RAW"))
-        self.assertEqual(self.s.normalize_file_key(""), "")
-        self.s.remember_file_params("/one/dir/shot.raw", self._opts())
-        # Same basename from another folder reuses the record.
-        self.assertIsNotNone(self.s.get_file_params(r"E:\other\shot.raw"))
+        self.assertEqual(hit.width, 1280)
+        # Updating through the ASCII spelling reuses the same key (no duplicate).
+        self.s.remember_file_params("strasse.raw", self._opts(width=640))
+        self.assertEqual(list(self.s.file_param_history), ["strasse.raw"])
+        self.assertEqual(self.s.get_file_params("straße.raw").width, 640)
+
+    def test_lookup_forget_and_lru_share_one_case_insensitive_key(self):
+        self.s.remember_file_params(r"C:\one\Capture.raw", self._opts())
+        # Lookup with different case / separators hits the same record.
+        self.assertIsNotNone(self.s.get_file_params("capture.RAW"))
+        self.assertIsNotNone(self.s.get_file_params("/two/other/CAPTURE.raw"))
+        # Updating through a case variant must not create a second key.
+        self.s.remember_file_params("/three/CAPTURE.RAW", self._opts(640, 480))
+        self.assertEqual(list(self.s.file_param_history), ["capture.raw"])
+        self.assertEqual(self.s.get_file_params("capture.raw").width, 640)
+        # Forget through yet another variant removes it.
+        self.assertTrue(self.s.forget_file_params("CaPtUrE.RaW"))
+        self.assertEqual(self.s.file_param_history, {})
 
     def test_lru_cap_drops_oldest_and_refresh_moves_to_newest(self):
         for i in range(FILE_PARAM_HISTORY_LIMIT):

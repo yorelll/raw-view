@@ -1034,12 +1034,14 @@ class AppSettings:
     #
     # Keyed by *basename only* (never the full path) so the same capture name
     # opened from a different folder reuses its parameters.  Keys are
-    # ``os.path.normcase``-normalized to match Windows' case-insensitive file
-    # system semantics; the originally typed case is irrelevant because every
-    # lookup/write goes through the same normalization.
+    # casefold-normalized to match Windows' case-insensitive file system
+    # semantics on every platform; the originally typed case is irrelevant
+    # because every lookup/write goes through the same normalization.
     #
     # Stored as one JSON object under "file_params/history":
-    #   {"<normcase(basename)>": {<full decode parameters>, "last_used": float}}
+    #   {"<casefold(basename)>": {<full decode parameters>, "last_used": float}}
+    # The key is normalized by ``normalize_file_key`` (platform-independent
+    # casefold, so Windows/Linux behave identically).
     # Capped at FILE_PARAM_HISTORY_LIMIT entries (LRU by ``last_used``).
 
     @staticmethod
@@ -1049,13 +1051,25 @@ class AppSettings:
 
     @staticmethod
     def normalize_file_key(name: object) -> str:
-        """Return the canonical history key for *name* (basename, normcase)."""
+        """Return the canonical history key for *name* (basename, casefolded).
+
+        Case folding is applied **explicitly** (``str.casefold()``) rather than
+        via ``os.path.normcase``: the latter is an identity function on POSIX,
+        which made ``Shot.RAW`` and ``shot.raw`` different keys on Linux (and
+        broke CI), while Windows users expect them to be the same file.  Using
+        casefold keeps the key platform-independent and still matches Windows'
+        case-insensitive file system semantics.
+        """
         text = str(name or "").strip()
         if not text:
             return ""
         # Accept either a bare name or a full path; only the basename is keyed.
+        # Both separators are normalised first so a Windows-style path given on
+        # any platform resolves to the same basename.
         base = os.path.basename(text.replace("\\", os.sep).replace("/", os.sep))
-        return os.path.normcase(base) if base and base not in (".", "..") else ""
+        if not base or base in (".", ".."):
+            return ""
+        return base.casefold()
 
     def _load_file_params_raw(self) -> dict[str, dict]:
         """Return a defensively-parsed ``{key: {"params": {...}, "last_used"}}``.

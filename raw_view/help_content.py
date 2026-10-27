@@ -115,7 +115,10 @@ is only a name search. Invalid/unknown bracket requirements return no results.</
 <h3>Remembered parameters &amp; pinned parameters</h3>
 <ul>
 <li><b>Per-file memory</b>: only an explicit <b>Apply</b> that decodes <i>successfully</i> is
-remembered, keyed by file name (base name only, case-insensitive as on Windows). Editing fields,
+remembered, keyed by file name (base name only, case-insensitive via Unicode
+<code>casefold()</code> on every platform — normal ASCII/Chinese names match Windows' rules;
+a few non-ASCII characters differ, including expanding folds such as <code>ß</code>/<code>ﬁ</code>
+and simple folds such as <code>µ</code>/<code>ς</code>). Editing fields,
 picking a preset, frame navigation, automatic/silent opens and remembered-parameter restores never
 write the memory; <b>Apply these parameters to all items</b> records each successful item (it is a
 bulk Apply). Re-opening a file with that name restores the parameters and decodes once; the status

@@ -199,7 +199,7 @@ jobs:
 
             Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
 
-            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**441 passed**）。
+            > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**444 passed**）。
 
             ### 🐛 修复（0.5.0）
 
@@ -214,12 +214,13 @@ jobs:
             - **Apply to all 汇总数量不闭合**：中途关闭排队项时成功/失败数量与总数不一致。**修复**：新增
               skipped 计数并在汇总中显示。
             - 新增解码参数枚举白名单回退（非法 alignment/endianness/preview/bayer 回退默认）；
-              全量测试 **441 passed, 102 subtests**。
+              全量测试 **444 passed, 113 subtests**。
 
             ### 🆕 新功能 / 增强（0.5.0）
             - **按文件名记忆解码参数**：以文件名（不含路径）为键记录上次 Apply 成功的参数，最多 100 条
               LRU；下次打开同名文件自动套用并解码。同名文件内容变化导致解码失败时**不弹窗**，状态栏提示
-              「已恢复上次参数，但解码失败」。右侧右键菜单可忘记单个文件的记忆。
+              「已恢复上次参数，但解码失败」。右侧右键菜单可忘记单个文件的记忆。记忆键使用
+              `str.casefold()` 做平台无关的大小写归一（常规 ASCII / 中文名与 Windows 规则一致）。
             - **参数钉（Pin parameters）**：每个 item 有自己的本体参数，另有一个全局钉参数。钉住后切换标签
               时面板显示钉参数而**不修改 item 本体**；点 Apply 才写入本体并解锁解码；成功 Apply 后钉参数
               跟随更新；取消钉住立即恢复当前 item 的本体参数。入口为 Preset 行的图钉按钮或 **Ctrl+N**，
