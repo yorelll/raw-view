@@ -88,6 +88,17 @@ class _IsolatedWindowTest(unittest.TestCase):
             self.w._on_apply_clicked()
             _pump(lambda: self.w._pending_decode_item is None)
 
+    def _make_png(self, name: str, width: int, height: int) -> str:
+        """Write a real, non-square PNG so the decoder reports the true size."""
+        import cv2
+        import numpy as np
+
+        path = os.path.join(self.tmp, name)
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        pixels[:, :, 1] = 200
+        self.assertTrue(cv2.imwrite(path, pixels), "failed to write test PNG")
+        return path
+
 
 class FileParamHistorySettingsTests(unittest.TestCase):
     """Storage schema, normalization, LRU cap and corruption tolerance."""
@@ -932,17 +943,6 @@ class PinThreeStateTests(_IsolatedWindowTest):
         self.assertEqual(self.w.panel.width_spin.value(), 16)
         self.assertEqual(self.w.panel.height_spin.value(), 16)
 
-    def _make_png(self, name: str, width: int, height: int) -> str:
-        """Write a real, non-square PNG so the decoder reports the true size."""
-        import cv2
-        import numpy as np
-
-        path = os.path.join(self.tmp, name)
-        pixels = np.zeros((height, width, 3), dtype=np.uint8)
-        pixels[:, :, 1] = 200
-        self.assertTrue(cv2.imwrite(path, pixels), "failed to write test PNG")
-        return path
-
     def test_close_all_items_resets_pin_state_from_match(self):
         path = self._path("close-all.raw", 8 * 8)
         self.w._open_item(path, decode=False)
@@ -997,6 +997,32 @@ class PinThreeStateTests(_IsolatedWindowTest):
             f"mirror-back must not flag the tab dirty: {dirty.call_args_list}",
         )
         self.assertFalse(self.w.item_tabs.tabText(0).startswith("●"))
+
+    def test_standard_image_panel_mirror_back_is_silent(self):
+        """The mirror-back must not look like a user edit.
+
+        ``QSignalBlocker`` + the ``_loading_item`` guard keep the two
+        ``setValue`` calls from emitting ``valuesChanged``.  Without them a
+        successful Apply would immediately re-flag the tab as having unapplied
+        changes (the ● marker) the user never made.
+        """
+        path = self._make_png("silent-6x4.png", 6, 4)
+        self.w._open_item(path, decode=True)
+        _pump(lambda: self.w._pending_decode_item is None)
+        item = self.w.items[0]
+        self.assertEqual((item.options.width, item.options.height), (6, 4))
+        self.assertEqual(self.w.panel.width_spin.value(), 2560)
+
+        emissions: list[int] = []
+        self.w.panel.valuesChanged.connect(lambda: emissions.append(1))
+        self._apply_and_wait()
+        _APP.processEvents()
+
+        self.assertEqual(self.w.panel.width_spin.value(), 6)
+        self.assertEqual(self.w.panel.height_spin.value(), 4)
+        self.assertEqual(emissions, [], "mirror-back must not emit valuesChanged")
+        self.assertFalse(self.w.item_tabs.tabText(0).startswith("●"))
+        self.assertNotIn("Unapplied changes", self.w.state_status.text())
 
     def test_pinned_open_apply_failure_keeps_memory_values(self):
         a = self._path("fail-a.raw", 8 * 8)
@@ -1090,6 +1116,70 @@ class ApplyToAllTests(_IsolatedWindowTest):
         with mock.patch.object(self.w, "_set_state") as set_state:
             self.w._on_apply_to_all_requested()
         self.assertIn("No items", set_state.call_args[0][0])
+
+    def test_apply_to_all_batch_does_not_rewrite_panel_from_standard_image(self):
+        """A running batch must never mirror a decoded PNG size into the panel.
+
+        ``_sync_standard_image_size_to_panel`` exists so a single Apply can make
+        the panel agree with the item (making the blue pin reachable).  During
+        apply-to-all that would be actively harmful: the queue re-reads the
+        panel for *every* remaining item, so rewriting 32x32 to the first PNG's
+        real 6x4 would silently feed 6x4 (and then 11x9) to the files behind it.
+        The ``_apply_all_current is not None`` guard prevents exactly that, and
+        this test is its regression cover.
+        """
+        small = self._make_png("batch-small.png", 6, 4)
+        large = self._make_png("batch-large.png", 11, 9)
+        raw = self._path("batch-raw.raw", 32 * 32)
+        for path in (small, large, raw):
+            self.w._open_item(path, decode=False)
+        self.assertEqual(len(self.w.items), 3)
+
+        # One fixed panel parameter set for the whole batch.
+        self.w.panel.set_values(
+            image_type="Standard Image", format_name="N/A", width=32, height=32,
+        )
+        _APP.processEvents()
+        panel_snapshots: list[tuple[int, int]] = []
+
+        original = self.w._sync_standard_image_size_to_panel
+
+        def spy(item):
+            # Record what the panel shows at the moment the mirror-back is
+            # attempted; with the guard in place the call bails out immediately.
+            panel_snapshots.append(
+                (self.w.panel.width_spin.value(), self.w.panel.height_spin.value())
+            )
+            return original(item)
+
+        with mock.patch.object(
+            self.w, "_sync_standard_image_size_to_panel", side_effect=spy,
+        ), mock.patch("raw_view.gui.app.QMessageBox.critical"):
+            self.w._on_apply_to_all_requested()
+            self._wait_batch()
+
+            self.assertTrue(panel_snapshots, "standard images must attempt the mirror-back")
+            self.assertEqual(
+                set(panel_snapshots), {(32, 32)},
+                f"batch must not rewrite the panel: {panel_snapshots}",
+            )
+            self.assertEqual(self.w.panel.width_spin.value(), 32)
+            self.assertEqual(self.w.panel.height_spin.value(), 32)
+
+        # The panel parameters reached every item before decoding: the RAW file
+        # cannot decode as a standard image, so it keeps the assigned 32x32.
+        raw_item = next(i for i in self.w.items if i.options.file_path == raw)
+        self.assertEqual((raw_item.options.width, raw_item.options.height), (32, 32))
+        self.assertEqual(raw_item.options.image_type, "Standard Image")
+        # The standard images decode for real and commit their own sizes.
+        small_item = next(i for i in self.w.items if i.options.file_path == small)
+        large_item = next(i for i in self.w.items if i.options.file_path == large)
+        self.assertEqual((small_item.options.width, small_item.options.height), (6, 4))
+        self.assertEqual((large_item.options.width, large_item.options.height), (11, 9))
+        # Nothing was lost: the two PNGs decoded, the RAW one failed silently.
+        self.assertEqual((self.w._apply_all_ok, self.w._apply_all_failed), (2, 1))
+        self.assertEqual(self.w.panel.width_spin.value(), 32)
+        self.assertEqual(self.w.panel.height_spin.value(), 32)
 
 
 class PresetPlaceholderTests(_IsolatedWindowTest):

@@ -71,14 +71,24 @@ docs/review/
   - 不要再用 `curl https://api.github.com/...` 手拼 JSON（已踩过解析/限流/编码坑）；如需解析 JSON，让 gh 输出经 Python `json.load` 或写临时文件后读。
   - 说明：本机 `gh` 因 PATH 代理（rtk）有时解析不到，务必用全路径调用。
 
-## 3. 常用命令（本地）
+## 3. 测试执行分工（必守）
+
+- **实现 agent（Agent A 等）**：交付前**必须**跑全量测试（`python -m pytest tests/ -q`，必要时加 `python -m unittest discover -s tests -q`）并确认全绿，附真实数字。未通过不得交付。
+- **review agent（Agent B/E 等）**：**默认无需跑全量测试**——实现 agent 已保证全绿，重复全量只浪费时间（当前全量约 55–76 分钟）。
+  - review 只做**只读审查**；"只读"的定义是 **review 结束后代码区域与 review 前保持一致**，而不是过程中不能改。
+  - 为了更有效地审查，review 允许在过程中**临时修改代码/测试**来验证假设（例如 mutation testing、反向注入、临时探针），但**必须还原**，并在报告中说明改了什么、如何还原、还原后是否逐字节一致。
+  - review 可以只跑**定向**测试（`-k` 选择相关用例）或写独立脚本做功能验证；不跑全量。
+  - 若 review 期间发现实现 agent 的改动让某些测试失败，只需报告失败项，不必自己跑完整矩阵。
+- 例外：review 若怀疑实现 agent 的测试结果不可信（例如怀疑测试被改弱），可**定向重跑**相关模块，但不需要全量。
+
+## 4. 常用命令（本地）
 
 ```bash
-# 全量测试（优先以 pytest 跑全量，Claude Code 下也支持 unittest）
+# 全量测试（实现 agent 必跑；review agent 默认不跑）
 python -m pytest tests/ -q
 python -m unittest discover -s tests -q
 
-# CLI 冒烟
+# CLI 冒烟（两者都可跑，成本极低）
 python -m raw_view --batch-help
 
 # 打包（离线调试用；发布走 CI）
@@ -88,7 +98,7 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view \
   --add-data "assets;assets" raw_view/__main__.py
 ```
 
-## 4. 仓库要点
+## 5. 仓库要点
 
 - **技术栈**：Python 3.12 + PyQt5 5.15 + numpy + opencv-python + qt-material/qtawesome，PyInstaller 打包。
 - **入口**：`python -m raw_view`（GUI）/ `view` / `convert` / `batch`（CLI）。
