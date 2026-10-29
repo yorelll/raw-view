@@ -133,6 +133,16 @@ Press <b>Apply</b> to write the pinned set into the current file; a successful A
 the new pinned set. Unpinning immediately restores the current file's own parameters. The pin
 state and values are saved across restarts. Ctrl+N is ignored while a text field, spin box or combo
 has focus, so it never interrupts typing.</li>
+<li><b>Pin colours</b> show three states (theme aware, always legible): neutral body colour when
+unpinned, blue when pinned and the current file already matches, orange when pinned but the file
+still needs Apply (or the panel has unapplied edits). The status bar never reports pin state — it
+only reflects the current file's decode state. A cancelled or rejected Apply (declining the size
+mismatch prompt, unsupported format, frame too large, read failure, worker error) leaves the file's
+own parameters and frame number untouched; opening a file while pinned only changes what the panel
+shows, never the new file's own parameters (a remembered parameter set for that file name still
+initialises the file itself). Closing all tabs resets the icon instead of leaving a stale match, and
+for standard images a successful Apply writes the real decoded size back into the width/height boxes
+so the blue "already applied" state is reachable there too.</li>
 <li>Right-click → <b>Apply these parameters to all items</b> writes the current panel parameters
 into every open file and decodes them one at a time (failures appear only in the final summary).
 Each success is remembered per file name.</li>

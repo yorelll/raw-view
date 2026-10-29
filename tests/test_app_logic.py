@@ -1299,11 +1299,13 @@ class GenerationGuardTests(unittest.TestCase):
             display_array=None, qimage=None, width=12, height=34, format_name="RAW8"
         )
 
-        # Latest generation + same item → applied
+        # Latest generation + same item → applied.  The width/height are now
+        # committed by _on_decode_success (stubbed here), so assert that the
+        # result is forwarded instead of the item being mutated eagerly.
         w._on_decode_finished(1, fake)
         self.assertEqual(len(applied), 1)
-        self.assertEqual(item.options.width, 12)
-        self.assertEqual(item.options.height, 34)
+        args, kwargs = applied[0]
+        self.assertEqual(args[2:4], (12, 34))
 
         # A newer decode started (generation bumped); the old worker's late
         # result carrying gen=1 must be silently discarded.

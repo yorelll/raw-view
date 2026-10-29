@@ -160,8 +160,12 @@ class ControlPanel(QWidget):
     _PRESET_PLACEHOLDER = "Select a preset"
     # Hint shown instead when the active selection is hidden by the filter.
     _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
-    # Highlight colour for the active pin (theme accent, visible in both themes).
-    _PIN_ACTIVE_COLOR = "#F59E0B"
+    # Three-state pin colours.  Light/dark variants are chosen per theme so every
+    # state keeps >=3:1 contrast against the panel background.
+    _PIN_MATCH_LIGHT = "#1976D2"
+    _PIN_MATCH_DARK = "#4A90D9"
+    _PIN_PENDING_LIGHT = "#B45309"
+    _PIN_PENDING_DARK = "#FBBF24"
 
     RAW_FORMATS = [
         "RAW8",
@@ -300,8 +304,17 @@ class ControlPanel(QWidget):
         self.pin_btn.setIconSize(QSize(14, 14))
         self.pin_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.pin_btn.setFixedSize(30, 30)
+        # A subtle hover/pressed surface guarantees the icon separates from the
+        # panel background in both themes (qt-material supplies the base look).
+        self.pin_btn.setStyleSheet(
+            "QToolButton#pinButton { border: 1px solid transparent; border-radius: 6px; }"
+            "QToolButton#pinButton:hover { background: rgba(74,144,217,0.18);"
+            " border: 1px solid rgba(74,144,217,0.55); }"
+            "QToolButton#pinButton:pressed { background: rgba(74,144,217,0.30); }"
+        )
+        self._pin_matches_current = False
         self.pin_btn.toggled.connect(self._on_pin_toggled)
-        self._set_pin_visuals(False)
+        self.refresh_pin_theme()
 
         preset_select_row = QWidget()
         preset_select_layout = QHBoxLayout(preset_select_row)
@@ -941,36 +954,87 @@ class ControlPanel(QWidget):
 
     # ── Pin (pinned parameters) ──────────────────────────────────────
 
-    def _set_pin_visuals(self, pinned: bool) -> None:
-        """Highlight the pin button and keep tooltip/accessibility in sync."""
-        color = self._PIN_ACTIVE_COLOR if pinned else ACTION_ICON_COLOR
-        icon = _qta_icon("fa5s.thumbtack", color)
-        self.pin_btn.setIcon(icon)
-        self.pin_btn.setToolTip(
-            "Parameters pinned — the panel shows the pinned set; Apply writes it "
-            "to the current file. (Ctrl+N to unpin)"
-            if pinned else
-            "Pin the current parameters to apply to other files (Ctrl+N)."
-        )
-        self.pin_btn.setAccessibleName(
-            "Unpin parameters" if pinned else "Pin parameters"
-        )
-        self.pin_btn.setAccessibleDescription(
-            "Parameters are pinned: switching files keeps showing the pinned "
-            "parameter set until Apply writes it into the file."
-            if pinned else
-            "Pin the current panel parameters so every file shows them until Apply."
-        )
+    @staticmethod
+    def _is_dark_palette(palette) -> bool:
+        """Whether *palette* belongs to a dark theme (drives icon brightness)."""
+        from PyQt5.QtGui import QColor
+
+        return QColor(palette.color(palette.Base)).lightnessF() < 0.5
+
+    def pin_state(self) -> str:
+        """Current three-state pin: ``"off"``, ``"match"`` or ``"pending"``."""
+        if not self.pin_btn.isChecked():
+            return "off"
+        return "match" if self._pin_matches_current else "pending"
+
+    def _pin_icon_color(self) -> str:
+        """Theme-aware icon colour for the current three-state pin."""
+        palette = self.palette()
+        dark = self._is_dark_palette(palette)
+        state = self.pin_state()
+        if state == "off":
+            # Body text colour: bright grey on dark themes, dark grey on light.
+            return palette.color(palette.Text).name()
+        if state == "match":
+            return self._PIN_MATCH_DARK if dark else self._PIN_MATCH_LIGHT
+        return self._PIN_PENDING_DARK if dark else self._PIN_PENDING_LIGHT
+
+    def refresh_pin_theme(self) -> None:
+        """Re-derive the pin icon colour from the current palette.
+
+        Called explicitly by ``MainWindow._apply_theme`` after a theme switch.
+        Deliberately NOT wired to ``changeEvent``/``PaletteChange``: that event
+        is also delivered while the widget is still being constructed, which
+        makes the refresh prone to touching half-initialised state.
+        """
+        state = self.pin_state()
+        self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack", self._pin_icon_color()))
+        if state == "off":
+            self.pin_btn.setToolTip(
+                "Pin the current parameters to apply to other files (Ctrl+N)."
+            )
+            self.pin_btn.setAccessibleName("Pin parameters")
+            self.pin_btn.setAccessibleDescription(
+                "Pin the current panel parameters so every file shows them until Apply."
+            )
+        elif state == "match":
+            self.pin_btn.setToolTip(
+                "Parameters pinned and already applied to this file (blue). "
+                "Ctrl+N to unpin."
+            )
+            self.pin_btn.setAccessibleName("Unpin parameters (applied to this file)")
+            self.pin_btn.setAccessibleDescription(
+                "Pinned parameters are already applied to the current file; the "
+                "pin icon is blue."
+            )
+        else:
+            self.pin_btn.setToolTip(
+                "Parameters pinned but not yet applied to this file (orange). "
+                "Press Apply. Ctrl+N to unpin."
+            )
+            self.pin_btn.setAccessibleName("Unpin parameters (pending for this file)")
+            self.pin_btn.setAccessibleDescription(
+                "Pinned parameters are not yet applied to the current file; the "
+                "pin icon is orange until Apply."
+            )
+
+    def set_pin_state(self, pinned: bool, matches_current: bool) -> None:
+        """Programmatic three-state update (silent: never emits ``pinToggled``)."""
+        self._pin_matches_current = bool(pinned and matches_current)
+        with QSignalBlocker(self.pin_btn):
+            self.pin_btn.setChecked(bool(pinned))
+        self.refresh_pin_theme()
 
     def _on_pin_toggled(self, checked: bool) -> None:
-        self._set_pin_visuals(bool(checked))
+        # The owner recomputes the actual three-state right after this signal;
+        # until then a fresh toggle is conservatively "pending".
+        self._pin_matches_current = False
+        self.refresh_pin_theme()
         self.pinToggled.emit(bool(checked))
 
     def set_pinned(self, pinned: bool) -> None:
-        """Set pin state without emitting: used for startup restore."""
-        with QSignalBlocker(self.pin_btn):
-            self.pin_btn.setChecked(bool(pinned))
-        self._set_pin_visuals(bool(pinned))
+        """Backward-compatible silent setter (startup restore)."""
+        self.set_pin_state(bool(pinned), False)
 
     def is_pinned(self) -> bool:
         return bool(self.pin_btn.isChecked())

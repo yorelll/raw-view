@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QEvent, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSignalBlocker, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         # pinned parameter set survives a restart, and the first opened file
         # follows the same pin semantics as any later tab switch.
         self._pinned_params = self.settings.pinned_params
-        self.panel.set_pinned(self._pinned_params is not None)
+        self._refresh_pin_state()
         self._refresh_preset_combo()
 
         # Tab widget
@@ -893,6 +893,16 @@ class MainWindow(QMainWindow):
         self._apply_titlebar_theme()
 
     def _apply_theme(self) -> None:
+        self._apply_theme_impl()
+        # Explicit refresh hook: the panel must NOT listen to PaletteChange
+        # itself (that event also fires during construction).
+        panel = self.__dict__.get("panel")
+        refresh = getattr(panel, "refresh_pin_theme", None)
+        if refresh is not None:
+            self._refresh_pin_state()
+            refresh()
+
+    def _apply_theme_impl(self) -> None:
         font_size = self.settings.ui_font_size
         selected_theme = self.settings.ui_theme
         app = QApplication.instance()
@@ -1003,6 +1013,19 @@ class MainWindow(QMainWindow):
             item.total_frames = 1
             return
         item.total_frames = max(1, file_size // frame_size)
+
+    def _frame_count_for(self, opts: DecodeOptions) -> int:
+        """How many frames *opts* would yield for its file (no item mutation)."""
+        frame_size = self._get_frame_size(opts)
+        if frame_size <= 0:
+            return 1
+        try:
+            file_size = os.path.getsize(opts.file_path) - opts.offset
+        except OSError:
+            return 1
+        if file_size <= 0:
+            return 1
+        return max(1, file_size // frame_size)
 
     def _update_frame_display(self, item: ViewerItem) -> None:
         """Update frame nav bar and status bar from item state."""
@@ -1213,9 +1236,13 @@ class MainWindow(QMainWindow):
         # Per-file parameter memory (keyed by basename only).  A hit replaces the
         # freshly defaulted options before the first decode, so opening the same
         # capture again reuses the parameters the user last applied to it.
-        remembered = None
-        if not self.__dict__.get("_pinned_params"):
-            remembered = self.settings.get_file_params(path)
+        #
+        # The memory is consulted **unconditionally**, including while pinned:
+        # the pin only changes what the *panel* shows (`_load_item_to_panel`
+        # prefers `_pinned_params`), never how a newly opened item is
+        # initialized.  A pinned host must still open a remembered capture with
+        # the parameters the user last applied to that capture.
+        remembered = self.settings.get_file_params(path)
         if remembered is not None:
             remembered.file_path = path
             item.options = remembered
@@ -1313,6 +1340,7 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.panel._sync_type_enabled()
             self.panel._refresh_frame_size_hint()
+        self._refresh_pin_state()
 
     def _active_item(self) -> ViewerItem | None:
         """当前活动引用的 item（对象身份），结构变更后仍能定位真实对象。"""
@@ -1364,6 +1392,10 @@ class MainWindow(QMainWindow):
             self.frame_status.setText("Frame: -")
             self._set_state("No item", "idle")
             self.panel.set_enabled(False)
+            # No current item means nothing can match the pin: recompute so the
+            # icon falls back to off/pending instead of keeping the previous
+            # item's blue "already applied to this file" tooltip (0.5.1 L-2).
+            self._refresh_pin_state()
         else:
             self._active_item_ref = None
             self._on_tab_changed(self.item_tabs.currentIndex())
@@ -1502,6 +1534,7 @@ class MainWindow(QMainWindow):
         # recomputed on every tab switch, otherwise it keeps the previous file's
         # availability (0.5.0 M-1).
         self._refresh_forget_action()
+        self._refresh_pin_state()
 
     # ── Pinned parameters ────────────────────────────────────────────
 
@@ -1520,11 +1553,57 @@ class MainWindow(QMainWindow):
             bayer_pattern=vals["bayer_pattern"],
         )
 
+    @staticmethod
+    def _params_equal(a: DecodeOptions | None, b: DecodeOptions | None) -> bool:
+        """Compare every decode-relevant field (``file_path`` is identity)."""
+        if a is None or b is None:
+            return False
+        fields = (
+            "image_type", "format_name", "width", "height", "alignment",
+            "endianness", "offset", "preview_mode", "bayer_pattern",
+        )
+        return all(getattr(a, name, None) == getattr(b, name, None) for name in fields)
+
+    def _pin_matches_current(self) -> bool:
+        """True only when the pin is on and nothing is pending for this file.
+
+        "Nothing pending" means: the item already carries the pinned parameters
+        AND the panel still shows them.  With no current item the pin is
+        "off"/"pending" (never a match), which keeps the icon honest.
+        """
+        pinned = self.__dict__.get("_pinned_params")
+        if pinned is None or self.__dict__.get("item_tabs") is None:
+            return False
+        item = self._current_item()
+        if item is None:
+            return False
+        if not self._params_equal(pinned, item.options):
+            return False
+        panel = self.__dict__.get("panel")
+        if panel is None:
+            return True
+        return self._params_equal(pinned, self._panel_decode_options())
+
+    def _refresh_pin_state(self) -> None:
+        """Recompute the icon's three-state (off / match / pending).
+
+        The status bar is deliberately untouched: it only reports the current
+        item's decode state (Decoded / Decode failed / Unapplied changes ...).
+        """
+        panel = self.__dict__.get("panel")
+        set_pin_state = getattr(panel, "set_pin_state", None)
+        if set_pin_state is None:
+            return  # MainWindow.__new__ test stubs use a minimal panel
+        pinned = self.__dict__.get("_pinned_params")
+        set_pin_state(pinned is not None, self._pin_matches_current())
+
     def _on_pin_toggled(self, pinned: bool) -> None:
         """Pin/unpin the panel's current parameters.
 
         Pinning snapshots the currently displayed values.  Unpinning restores
         the current item's own parameters immediately (they were never touched).
+        Neither action writes to the status bar: the icon colour/tooltip carry
+        the pin state.
         """
         item = self._current_item()
         if pinned:
@@ -1532,13 +1611,12 @@ class MainWindow(QMainWindow):
             # re-pinning is a no-op snapshot of those same values.
             self._pinned_params = self._panel_decode_options()
             self.settings.pinned_params = self._pinned_params
-            self._set_state("Parameters pinned — Apply writes them to the current file", "busy")
         else:
             self._pinned_params = None
             self.settings.pinned_params = None
             if item is not None:
                 self._load_item_to_panel(item)
-            self._set_state("Parameters unpinned", "idle")
+        self._refresh_pin_state()
         self._refresh_forget_action()
 
     # ── Apply panel parameters to every item ─────────────────────────
@@ -1674,6 +1752,47 @@ class MainWindow(QMainWindow):
             bayer_pattern=options.bayer_pattern,
         )
 
+    def _sync_standard_image_size_to_panel(self, item: ViewerItem) -> None:
+        """Mirror a Standard Image's real decoded size back into the panel.
+
+        A standard image is decoded by ``load_bgr_image`` and commits the size
+        it actually found (e.g. 7x5) into ``item.options``.  The width/height
+        fields are meaningless input for that type, so leaving the user's typed
+        values there makes the panel disagree with the item — and since the
+        three-state pin requires pin == item == panel, the "match" (blue) state
+        became unreachable for every standard image.
+
+        Guarded by ``_loading_item``: the two ``QSpinBox.setValue`` calls must
+        not emit ``valuesChanged``, otherwise the tab would be flagged dirty
+        immediately after a successful Apply.  RAW/YUV are untouched (their
+        width/height are genuine user input that the decoder must obey).
+        """
+        panel = self.__dict__.get("panel")
+        if panel is None or self.__dict__.get("_loading_item", False):
+            return
+        # An apply-to-all batch re-reads the panel for *every* queued item, so
+        # rewriting the size mid-batch would silently change the parameters the
+        # remaining files receive.  The panel is not the user's view during a
+        # batch anyway.
+        if self.__dict__.get("_apply_all_current") is not None:
+            return
+        if item.options.image_type != "Standard Image":
+            return
+        width_spin = getattr(panel, "width_spin", None)
+        height_spin = getattr(panel, "height_spin", None)
+        if width_spin is None or height_spin is None:
+            return
+        current = self._panel_decode_options()
+        if current.image_type != "Standard Image":
+            return
+        self._loading_item = True
+        try:
+            with QSignalBlocker(width_spin), QSignalBlocker(height_spin):
+                width_spin.setValue(int(item.options.width))
+                height_spin.setValue(int(item.options.height))
+        finally:
+            self._loading_item = False
+
     def _record_applied_params(self, item: ViewerItem) -> None:
         """Snapshot a successful decode and write the per-file memory.
 
@@ -1764,6 +1883,7 @@ class MainWindow(QMainWindow):
             self._set_state("Unapplied changes — click Apply", "busy")
             # UI-4：标签显示未保存标记（"●"直到 Apply 应用）。
             self._set_tab_dirty(item, True)
+            self._refresh_pin_state()
 
     def _set_tab_dirty(self, item: ViewerItem, dirty: bool) -> None:
         """UI-4：当前项对应标签的 tooltip 显示完整路径；未 Apply 时加 ● 前缀。
@@ -1928,9 +2048,29 @@ class MainWindow(QMainWindow):
         # then rejects every late finished/error signal while lifecycle signal
         # connections still quit/delete the old worker/thread normally.
         self._invalidate_pending_decode()
-        self._save_panel_to_item(item)
+        # STRUCTURAL no-commit guarantee: build the candidate parameters on a
+        # *temporary* object.  ``item.options`` is only overwritten by
+        # ``_on_decode_success`` once a decode really succeeded, so every early
+        # return (unsupported format, unreadable size, frame-too-large, declined
+        # size-mismatch prompt, read failure, worker error) leaves the item's own
+        # parameters completely untouched -- no per-branch rollback needed.
+        if user_apply or warn_mismatch:
+            # Explicit Apply: the panel is the source of truth (this is also what
+            # the pin uses), but it is only a *candidate* until success.
+            opts = self._panel_decode_options()
+            opts.file_path = item.options.file_path
+        elif self.__dict__.get("_pinned_params") is not None:
+            # Pinned: the panel shows the global pinned set, NOT this item's own
+            # parameters.  A silent/frame decode must therefore decode the item's
+            # own options and must never copy the pinned values into it (that
+            # would silently overwrite the file's parameters on plain open).
+            opts = item.options
+        else:
+            # Frame navigation / silent decodes keep the previous semantics:
+            # the panel is mirrored into the item so the two stay in sync.
+            self._save_panel_to_item(item)
+            opts = item.options
 
-        opts = item.options
         if not is_supported_preset_format_for_type(opts.image_type, opts.format_name):
             message = (
                 f"Unsupported format '{opts.format_name}' for {opts.image_type}. "
@@ -1948,16 +2088,15 @@ class MainWindow(QMainWindow):
             opts.width, opts.height, item.current_frame,
         )
 
-        # Recompute total frames with current parameters BEFORE computing
-        # effective offset, so that the frame count is up to date when
-        # the user changes width/height/format (see #1.0).
-        self._compute_frame_info(item)
-        # Clamp current_frame — the new parameters may support fewer frames.
-        item.current_frame = max(
-            0, min(item.current_frame, max(0, item.total_frames - 1))
-        )
-
-        frame_size, effective_offset = self._compute_effective_offset(item)
+        # Recompute frame count from the *candidate* parameters and the current
+        # frame, so the count is up to date when width/height/format change.
+        # Both values are provisional: they are only committed on success.
+        candidate_frames = self._frame_count_for(opts)
+        candidate_frame = max(0, min(item.current_frame, max(0, candidate_frames - 1)))
+        frame_size = self._get_frame_size(opts)
+        effective_offset = opts.offset
+        if frame_size > 0 and candidate_frame > 0:
+            effective_offset = opts.offset + candidate_frame * frame_size
         expected = self._expected_frame_size(opts, opts.width, opts.height)
 
         # Standard Image — decode synchronously; load_bgr_image() reads and
@@ -1965,6 +2104,7 @@ class MainWindow(QMainWindow):
         if opts.image_type == "Standard Image":
             self._decode_standard_image(
                 item, opts, show_error=show_error, user_apply=user_apply,
+                candidate_frame=candidate_frame,
             )
             return
 
@@ -2010,7 +2150,7 @@ class MainWindow(QMainWindow):
         cache = self.__dict__.get("decode_cache")
         if cache is None:
             cache = self.decode_cache = DecodeCache()
-        cache_key = DecodeCache.key(opts, item.current_frame)
+        cache_key = DecodeCache.key(opts, candidate_frame)
         cached = cache.get(cache_key)
         if cached is not None:
             # 缓存命中直接复用，不存在“等待 worker 写缓存”的状态。
@@ -2022,18 +2162,15 @@ class MainWindow(QMainWindow):
             # 与 _on_decode_finished 一致：命中时也要回填当前显示数组，
             # 否则 save_display / 后续帧缓存写回会读到过期数据。
             item.current_display = cached.display_array
-            # 关键顺序：先落宽/高、再 _on_decode_success。_on_decode_success 内用
-            # _get_frame_size(item.options) 计算状态栏帧字节数，若仍读旧宽高，
-            # 缓存命中的状态栏会显示过期帧大小（0.3.0-M-3 / 0.4.0-M-1 /
-            # 0.4.1-M-1 三版沿用）；先更新 options 与 _on_decode_finished 一致。
-            item.options.width = cached.width
-            item.options.height = cached.height
             # decode_current already invalidated any preceding request before
             # preflight.  No second cancellation/generation bump is needed here;
             # cached pixels can now be applied without a late worker competing.
+            # ``_on_decode_success`` commits the candidate options (including the
+            # cached width/height) so the status bar never reads stale sizes.
             self._on_decode_success(
                 item, cached.qimage, cached.width, cached.height, cached.format_name,
-                user_apply=user_apply,
+                user_apply=user_apply, committed_options=opts,
+                committed_frame=candidate_frame,
             )
             self._set_state("Decoded (cached)", "ok")
             return
@@ -2054,7 +2191,8 @@ class MainWindow(QMainWindow):
         # the starter; it is saved only after any old worker is disconnected.
         self._start_async_decode(
             data, item, opts, effective_offset, cache_key, show_error,
-            user_apply=user_apply,
+            user_apply=user_apply, commit_options=opts,
+            commit_frame=candidate_frame, commit_frames=candidate_frames,
         )
 
     def _show_decode_error_if_requested(self, show_error: bool, title: str, message: str) -> None:
@@ -2069,13 +2207,16 @@ class MainWindow(QMainWindow):
         large) never reach the async error slot, so the serial queue has to be
         advanced here; otherwise one bad item would stall the whole batch.
         """
+        self._pending_commit_options = None
+        self._pending_commit_frame = None
+        self._pending_commit_frames = None
         current = self.__dict__.get("_apply_all_current")
         if current is not None:
             self._advance_apply_all(current, False)
 
     def _decode_standard_image(
         self, item: ViewerItem, opts: DecodeOptions, show_error: bool = True,
-        user_apply: bool = False,
+        user_apply: bool = False, candidate_frame: int | None = None,
     ) -> None:
         try:
             bgr = load_bgr_image(opts.file_path)
@@ -2083,13 +2224,15 @@ class MainWindow(QMainWindow):
             h, w = rgb.shape[:2]
             qimg = self._qimage_from_rgb(rgb)
             item.current_display = rgb
-            item.options.width = w
-            item.options.height = h
-            item.total_frames = 1
-            item.current_frame = 0
+            # A standard image is always a single frame; the actual size is only
+            # known after decoding, so commit it together with the parameters.
+            committed = self._snapshot_options(opts)
+            committed.width = w
+            committed.height = h
             logger.debug("Standard image decoded: %s (%dx%d)", opts.file_path, w, h)
             self._on_decode_success(
                 item, qimg, w, h, "Standard Image", user_apply=user_apply,
+                committed_options=committed, committed_frame=0, committed_frames=1,
             )
         except Exception as exc:
             logger.exception("Failed to decode standard image: %s", opts.file_path)
@@ -2110,6 +2253,9 @@ class MainWindow(QMainWindow):
         cache_key: str | None = None,
         show_error: bool = True,
         user_apply: bool = False,
+        commit_options: DecodeOptions | None = None,
+        commit_frame: int | None = None,
+        commit_frames: int | None = None,
     ) -> None:
         # decode_current already invalidated older work before preflight.  Keep
         # this direct-call guard too: callers/tests using _start_async_decode
@@ -2127,6 +2273,12 @@ class MainWindow(QMainWindow):
         # like the error intent above, so a late result from an older silent
         # decode can never be recorded as if the user had applied it (H-1).
         self._pending_user_apply = bool(user_apply)
+        # Parameters to commit into the item *only* if this request succeeds.
+        # Bound to the same generation/item contract as the intents above, so a
+        # stale worker can neither commit its own nor inherit a newer payload.
+        self._pending_commit_options = commit_options
+        self._pending_commit_frame = commit_frame
+        self._pending_commit_frames = commit_frames
 
         # Preview/bayer come from the item's own saved options — not whatever
         # the shared panel currently shows — so tab switches can't leak values
@@ -2221,6 +2373,9 @@ class MainWindow(QMainWindow):
         self._pending_cache_key = None
         self._pending_decode_show_error = True
         self._pending_user_apply = False
+        self._pending_commit_options = None
+        self._pending_commit_frame = None
+        self._pending_commit_frames = None
 
     def _disconnect_decode(self) -> None:
         """彻底断开主窗口与在途解码 worker/thread 的连接。
@@ -2320,9 +2475,13 @@ class MainWindow(QMainWindow):
         # this request's own flag may authorize the memory write (H-1).
         user_apply = self.__dict__.get("_pending_user_apply", False)
         self._pending_user_apply = False
+        commit_options = self.__dict__.get("_pending_commit_options")
+        commit_frame = self.__dict__.get("_pending_commit_frame")
+        commit_frames = self.__dict__.get("_pending_commit_frames")
+        self._pending_commit_options = None
+        self._pending_commit_frame = None
+        self._pending_commit_frames = None
         item.current_display = result.display_array
-        item.options.width = result.width
-        item.options.height = result.height
         # P1-1：把这份刚算好的帧写入解码缓存。必须使用 decode 启动时快照的
         # cache key，而非从当前 item.options/current_frame 重算：用户可能已经
         # 翻帧、改参数或外部覆盖同路径文件，重算会把旧字节绑定为新请求的缓存。
@@ -2333,13 +2492,29 @@ class MainWindow(QMainWindow):
             cache.store(cache_key, result)
         self._on_decode_success(
             item, result.qimage, result.width, result.height, result.format_name,
-            user_apply=user_apply,
+            user_apply=user_apply, committed_options=commit_options,
+            committed_frame=commit_frame, committed_frames=commit_frames,
         )
 
     def _on_decode_success(
         self, item: ViewerItem, qimg: QImage, width: int, height: int,
         format_name: str, user_apply: bool = False,
+        committed_options: DecodeOptions | None = None,
+        committed_frame: int | None = None,
+        committed_frames: int | None = None,
     ) -> None:
+        # Single commit point: only now (decode really succeeded) are the
+        # candidate parameters written into the item.  When no payload is given
+        # (direct callers/tests), assume the item already holds the right values.
+        if committed_options is not None:
+            for field_name, value in committed_options.__dict__.items():
+                setattr(item.options, field_name, value)
+        item.options.width = width
+        item.options.height = height
+        if committed_frames is not None:
+            item.total_frames = committed_frames
+        if committed_frame is not None:
+            item.current_frame = committed_frame
         # Capture the "restored from memory" flag *before* recording the applied
         # snapshot (that helper clears it), so the status message can be chosen.
         restored_msg = (
@@ -2354,11 +2529,22 @@ class MainWindow(QMainWindow):
             self._record_applied_params(item)
         else:
             item.remembered_params_pending = False
+        # A Standard Image reports its *real* size only after decoding, so the
+        # panel may still show what the user typed (e.g. 8x8 for a 7x5 PNG).
+        # Mirror the committed size back into the panel after a successful
+        # Apply; otherwise panel != item forever and the pin can never turn
+        # blue.  Silent/pinned decodes are excluded on purpose: while pinned
+        # the panel deliberately shows the pin, not the body.
+        if user_apply:
+            self._sync_standard_image_size_to_panel(item)
         # While pinned, a successful user Apply makes the freshly applied
         # parameters the new pinned set ("the pin follows the latest Apply").
         if user_apply and self.__dict__.get("_pinned_params") is not None:
             self._pinned_params = self._snapshot_options(item.options)
             self.settings.pinned_params = self._pinned_params
+        # Recompute the three-state pin: a successful Apply makes the current
+        # file match the pinned set (blue), a failure stays pending (orange).
+        self._refresh_pin_state()
         # UI-4：解码真正成功后，用户看到的即当前参数 → 清除标签未保存标记 ●
         # （缓存命中与后台线程结果都汇聚到这里；不能放在 _save_panel_to_item，
         #   那会被 tab 切换/预设选择误触发）。
@@ -2400,9 +2586,12 @@ class MainWindow(QMainWindow):
         show_error = self.__dict__.get("_pending_decode_show_error", True)
         self._pending_decode_item = None
         self._pending_decode_show_error = True
-        # A failed request never authorizes a memory write; drop its intent so
-        # a later unrelated decode cannot inherit it.
+        # A failed request never authorizes a memory write and never commits its
+        # candidate parameters; drop both so a later decode cannot inherit them.
         self._pending_user_apply = False
+        self._pending_commit_options = None
+        self._pending_commit_frame = None
+        self._pending_commit_frames = None
         self._show_decode_error_if_requested(show_error, "Decode Failed", message)
         if item is not None and getattr(item, "remembered_params_pending", False):
             # A remembered parameter set that no longer fits this file: keep the
@@ -2415,6 +2604,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self._set_state("Decode failed", "error")
+        self._refresh_pin_state()
         current = self.__dict__.get("_apply_all_current")
         if current is not None:
             self._advance_apply_all(current, False)

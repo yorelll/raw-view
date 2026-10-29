@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.5.0** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.5.1** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -277,7 +277,17 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 - **两套参数**：每个 item 有自己的本体参数；另有一个全局“参数钉参数”。钉住后切换标签时，面板显示钉参数，**item 本体不被修改**。
 - 点 **Apply** 才把面板（钉）参数写入当前 item 的本体并解码；解码成功后钉参数随之更新为刚应用的参数（“钉子跟随最新成功 Apply”）。
 - **取消钉住**：面板立即恢复显示当前 item 的本体参数。
-- **入口**：Preset 行右侧图钉按钮，或快捷键 **Ctrl+N**（文本输入框内不劫持）。钉住时图钉高亮为琥珀色，状态栏提示“Parameters pinned”。
+- **入口**：Preset 行右侧图钉按钮，或快捷键 **Ctrl+N**（文本输入框、数值框、下拉框获得焦点时不劫持）；按钮带 hover/pressed 背景，两种主题下都清晰可见。
+- **三态配色**（随 Light/Dark 主题刷新，均保证与背景对比度 ≥3:1）：
+  - **未钉**：主题正文色（Dark 亮灰 / Light 深灰）；
+  - **已钉且当前文件已是钉参数**：蓝色（Light `#1976D2` / Dark `#4A90D9`），无需再操作；
+  - **已钉但当前文件尚未应用**（含面板有未应用修改）：橙色（Light `#B45309` / Dark `#FBBF24`），提示按 Apply。
+  - 悬停 tooltip 与无障碍文案同步说明三态。
+- **状态栏不显示钉状态**：状态栏只反映当前 item 的解码状态（Ready / Decoded / Decode failed / Unapplied changes 等）；开关钉前后状态栏文本与颜色完全不变，钉状态只由图钉颜色与 tooltip 表达。
+- **未成功的 Apply 不改本体参数**：取消尺寸不匹配弹窗（选 No）、格式不支持、Frame Too Large、读取失败、解码 worker 报错等任何未成功的 Apply，都会让该 item 保持 Apply 之前的本体参数与帧号；解锁钉后看到的仍是该文件原有的值。只有真正解码成功才提交参数。
+- **钉住时打开新文件**：只让面板显示钉参数（图标转为橙色 pending），**不会**改写新打开文件的本体参数；点 Apply 后才会写入。若该文件名有“上次 Apply 参数”记忆，本体仍按记忆值初始化并静默解码（记忆查询与钉住无关），面板显示的才是钉参数。
+- **Standard Image 的蓝色可达**：标准图在解码后才拿到真实尺寸（例如 7×5），面板里用户输入的 8×8 只是无意义的占位。**Apply 成功后**，真实宽高会回写到面板宽度/高度框（静默回写，不会把标签标成未保存），这样“钉 = 本体 = 面板”三者在标准图上也能成立，图钉可以真正变蓝。RAW/YUV 不受影响，因为它们的宽高是用户真实输入。
+- **关闭全部标签时复位**：`Close All Items` 后没有当前 item，图钉立刻回到未钉/待应用状态，不会残留上一个文件的蓝色与“already applied to this file”提示。
 - **持久化**：钉住状态与钉参数值写入 Settings（`params/pinned`），重启后保留；无打开文件时钉参数仍在，打开第一个文件即按钉语义显示。
 - **应用全部**：右键 → *Apply these parameters to all items*，会把当前面板参数写入所有打开的 item 并**串行逐个解码**（单 worker 排队）；失败项不弹窗、不打断其它项，最终状态栏汇总“Applied to N item(s), M failed”。首次执行有确认框，可勾选 “Apply and don't ask again” 记住本次会话。
 
@@ -372,7 +382,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.5.0` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.5.1` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

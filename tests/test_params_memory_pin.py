@@ -488,15 +488,16 @@ class PinnedParameterTests(_IsolatedWindowTest):
         self.assertEqual((item_b.options.width, item_b.options.height), (2560, 1440))
 
         # 4. Apply -> B's own parameters become the pinned set and it decodes.
-        self._decode_and_wait()
+        self._apply_and_wait()
         self.assertEqual((item_b.options.width, item_b.options.height), (1280, 720))
 
-        # 5. Switch to C, Apply -> decode fails, but C's own parameters are the
-        #    pinned set (per "Apply writes the pinned params into the item").
+        # 5. Switch to C, Apply -> the decode fails.  Parameters commit only on
+        #    success (0.5.1 H-1b), so C keeps its own defaults even though the
+        #    user pressed Apply on the pinned values.
         self.w._open_item(c, decode=False)
         item_c = self.w.items[2]
-        self._decode_and_wait()
-        self.assertEqual((item_c.options.width, item_c.options.height), (1280, 720))
+        self._apply_and_wait()
+        self.assertEqual((item_c.options.width, item_c.options.height), (2560, 1440))
         self.assertIn("Decode failed", self.w.state_status.text())
 
         # 6. Change the pinned set to 1920x1080-ish values and Apply on C.
@@ -549,7 +550,7 @@ class PinnedParameterTests(_IsolatedWindowTest):
         self.assertEqual(self.w.panel.pin_btn.accessibleName(), "Pin parameters")
         self.w.panel.toggle_pin()
         self.assertIn("pinned", self.w.panel.pin_btn.toolTip().lower())
-        self.assertEqual(self.w.panel.pin_btn.accessibleName(), "Unpin parameters")
+        self.assertIn("Unpin parameters", self.w.panel.pin_btn.accessibleName())
         self.assertIn("pinned", self.w.panel.pin_btn.accessibleDescription().lower())
         self.assertIsNotNone(self.w.panel.pin_btn.icon())
 
@@ -599,6 +600,425 @@ class PinnedParameterTests(_IsolatedWindowTest):
         self.assertFalse(self.w.panel.is_pinned())
         self.assertIsNone(self.settings.pinned_params)
 
+
+class PinThreeStateTests(_IsolatedWindowTest):
+    """Three-state pin (off / match / pending), status bar and Apply rollback."""
+
+    @staticmethod
+    def _contrast(first, second):
+        def luminance(colour):
+            def channel(value):
+                v = value / 255
+                return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+            return (
+                0.2126 * channel(colour.red())
+                + 0.7152 * channel(colour.green())
+                + 0.0722 * channel(colour.blue())
+            )
+        high, low = sorted((luminance(first), luminance(second)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    def _apply(self, width, height):
+        self.w.panel.set_values(
+            image_type="RAW", format_name="RAW8", width=width, height=height,
+        )
+        self._apply_and_wait()
+
+    def test_three_states_follow_pin_and_item_parameters(self):
+        path = self._path("state.raw", 8 * 8)
+        self.w._open_item(path, decode=False)
+        self._apply(8, 8)
+        self.assertEqual(self.w.panel.pin_state(), "off")
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "match")
+        self.assertIn("already applied", self.w.panel.pin_btn.toolTip())
+        self.w.panel.width_spin.setValue(4)
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+        self.assertIn("not yet applied", self.w.panel.pin_btn.toolTip())
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "off")
+
+    def test_switching_to_another_file_makes_the_pin_pending(self):
+        first = self._path("first.raw", 8 * 8)
+        second = self._path("second.raw", 32 * 32)
+        self.w._open_item(first, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "match")
+        self.w._open_item(second, decode=False)
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+        self._apply_and_wait()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "match")
+
+    def test_no_item_never_reports_a_match(self):
+        self.w.panel.set_values(
+            image_type="RAW", format_name="RAW8", width=8, height=8,
+        )
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertIsNone(self.w._current_item())
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+
+    def test_pin_colours_are_theme_aware_and_legible(self):
+        from PyQt5.QtGui import QColor, QPalette
+
+        colours = {}
+        for theme in ("light", "dark"):
+            self.settings._store.setValue("ui/theme", theme)
+            self.w._apply_theme()
+            _APP.processEvents()
+            background = self.w.panel.pin_btn.palette().color(QPalette.Window)
+            states = {}
+            for state in ("off", "match", "pending"):
+                self.w.panel.set_pin_state(state != "off", state == "match")
+                _APP.processEvents()
+                colour = QColor(self.w.panel._pin_icon_color())
+                self.assertGreaterEqual(
+                    self._contrast(colour, background), 3.0,
+                    f"{theme}/{state} pin icon must contrast with the background",
+                )
+                states[state] = colour.name()
+            self.assertEqual(len(set(states.values())), 3, states)
+            colours[theme] = states
+        self.assertNotEqual(colours["light"]["off"], colours["dark"]["off"])
+        self.assertNotEqual(colours["light"]["pending"], colours["dark"]["pending"])
+
+    def test_theme_refresh_is_explicit_and_updates_pin_colour(self):
+        from PyQt5.QtGui import QPalette
+
+        # The panel must expose an explicit refresh hook; it must NOT define its
+        # own changeEvent (that event also fires during widget construction).
+        from raw_view.gui.panels import ControlPanel
+
+        self.assertNotIn("changeEvent", ControlPanel.__dict__)
+        self.assertTrue(callable(getattr(self.w.panel, "refresh_pin_theme", None)))
+        self.settings._store.setValue("ui/theme", "light")
+        self.w._apply_theme()
+        _APP.processEvents()
+        light_colour = self.w.panel._pin_icon_color()
+        light_background = self.w.panel.pin_btn.palette().color(QPalette.Window)
+        self.settings._store.setValue("ui/theme", "dark")
+        self.w._apply_theme()
+        _APP.processEvents()
+        self.assertNotEqual(light_colour, self.w.panel._pin_icon_color())
+        self.assertNotEqual(
+            light_background.name(),
+            self.w.panel.pin_btn.palette().color(QPalette.Window).name(),
+        )
+
+    def test_pin_toggle_leaves_status_bar_bytes_identical(self):
+        path = self._path("status.raw", 8 * 8)
+        self.w._open_item(path, decode=False)
+        self._apply(8, 8)
+        _APP.processEvents()
+        before = self.w.state_status.text()
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.state_status.text(), before)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.state_status.text(), before)
+
+    def test_cancelled_apply_keeps_item_parameters_and_unpin_shows_originals(self):
+        a = self._path("A.raw", 1280 * 720)
+        b = self._path("B.raw", 32 * 32)
+        self.w._open_item(a, decode=False)
+        self._apply(1280, 720)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.w._open_item(b, decode=False)
+        _APP.processEvents()
+        item_b = self.w.items[1]
+        self.assertEqual((item_b.options.width, item_b.options.height), (2560, 1440))
+        self.assertEqual(self.w.panel.width_spin.value(), 1280)
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+
+        with mock.patch.object(self.w, "_warn_size_mismatch", return_value=False):
+            self.w._on_apply_clicked()
+        _APP.processEvents()
+
+        self.assertEqual((item_b.options.width, item_b.options.height), (2560, 1440))
+        self.assertEqual(item_b.options.format_name, "RAW12")
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.width_spin.value(), 2560)
+        self.assertEqual(self.w.panel.height_spin.value(), 1440)
+
+    def test_corrupt_standard_image_failure_leaves_parameters_untouched(self):
+        path = os.path.join(self.tmp, "bad.png")
+        with open(path, "wb") as handle:
+            handle.write(b"not a png")
+        self.w._open_item(path, decode=False)
+        item = self.w.items[0]
+        with mock.patch("raw_view.gui.app.QMessageBox.critical"):
+            self.w.panel.set_values(
+                image_type="Standard Image", format_name="N/A", width=111, height=222,
+            )
+            self.w._on_apply_clicked()
+            _APP.processEvents()
+        # A .png item starts as Standard Image/N/A with the default size; a
+        # failed Apply must leave exactly those values in place.
+        self.assertEqual((item.options.width, item.options.height), (2560, 1440))
+        self.assertEqual(item.options.image_type, "Standard Image")
+        self.assertEqual(item.options.format_name, "N/A")
+
+    def test_worker_error_leaves_pinned_target_untouched(self):
+        path = self._path("tiny.raw", 64)
+        self.w._open_item(path, decode=False)
+        item = self.w.items[0]
+        self.w.panel.set_values(
+            image_type="RAW", format_name="RAW12", width=2560, height=1440,
+        )
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        with mock.patch.object(self.w, "_warn_size_mismatch", return_value=True), \
+                mock.patch("raw_view.gui.app.QMessageBox.critical"):
+            self.w.panel.set_values(
+                image_type="RAW", format_name="RAW8", width=1280, height=720,
+            )
+            self.w._on_apply_clicked()
+            _pump(lambda: self.w._pending_decode_item is None)
+        self.assertEqual(item.options.image_type, "RAW")
+        self.assertEqual(item.options.format_name, "RAW12")
+        self.assertEqual((item.options.width, item.options.height), (2560, 1440))
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.format_combo.currentText(), "RAW12")
+        self.assertEqual(self.w.panel.width_spin.value(), 2560)
+        self.assertEqual(self.w.panel.height_spin.value(), 1440)
+
+    def test_cancelled_apply_preserves_the_current_frame(self):
+        path = self._path("frames.raw", 6 * 4 * 4)
+        self.w._open_item(path, decode=False)
+        item = self.w.items[0]
+        self.w.panel.set_values(
+            image_type="RAW", format_name="RAW8", width=4, height=4,
+        )
+        self._apply_and_wait()
+        item.current_frame = 3
+        self.w._update_frame_display(item)
+        _APP.processEvents()
+        self.assertEqual(self.w.frame_status.text(), "Frame: 4/6")
+        self.assertEqual(item.total_frames, 6)
+
+        # Now aim at parameters that would yield *fewer* frames than the file
+        # currently has: 16x8 RAW8 = 128 bytes/frame against a 96-byte file.
+        # That also makes the frame size exceed the remaining bytes, so the
+        # Apply stops at the size-mismatch prompt.  A premature clamp during the
+        # read phase (``item.current_frame = min(...)``) would rewrite 3 -> 0
+        # and ``total_frames`` 6 -> 1 here, which this test must catch.
+        self.w.panel.set_values(width=16, height=8)
+        _APP.processEvents()
+        with mock.patch.object(self.w, "_warn_size_mismatch", return_value=False) as warn:
+            self.w._on_apply_clicked()
+        _APP.processEvents()
+
+        self.assertTrue(warn.called, "the cancel path must be exercised")
+        self.assertEqual(item.current_frame, 3, "cancelled Apply must keep the frame")
+        self.assertEqual(item.total_frames, 6)
+        self.assertEqual(self.w.frame_status.text(), "Frame: 4/6")
+        self.assertEqual((item.options.width, item.options.height), (4, 4))
+
+    def test_successful_apply_and_cache_hit_still_commit(self):
+        path = self._path("ok.raw", 8 * 8)
+        self.w._open_item(path, decode=False)
+        item = self.w.items[0]
+        self._apply(8, 8)
+        self.assertEqual((item.options.width, item.options.height), (8, 8))
+        self.w.panel.set_values(
+            image_type="RAW", format_name="RAW8", width=8, height=8,
+        )
+        with mock.patch.object(self.w, "_warn_size_mismatch", return_value=True):
+            self.w._on_apply_clicked()
+            _APP.processEvents()
+        self.assertEqual((item.options.width, item.options.height), (8, 8))
+        self.assertIsNotNone(item.applied_options)
+
+    def test_pinned_open_item_does_not_overwrite_its_parameters(self):
+        first = self._path("pinned-first.raw", 8 * 8)
+        second = self._path("pinned-second.raw", 8 * 8)
+        self.w._open_item(first, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        # Real open flow with decode=True (M-2).
+        self.w._open_item(second, decode=True)
+        _pump(lambda: self.w._pending_decode_item is None)
+        second_item = self.w.items[1]
+        self.assertEqual(
+            (second_item.options.width, second_item.options.height),
+            (2560, 1440),
+            "pinned open must not overwrite the new item's own parameters",
+        )
+        self.assertEqual(self.w.panel.width_spin.value(), 8)
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+
+    def _remember(self, path, width, height):
+        self.settings.remember_file_params(
+            path,
+            DecodeOptions(
+                image_type="RAW", format_name="RAW8", width=width, height=height,
+            ),
+        )
+
+    def test_pinned_open_with_remembered_file_uses_memory_for_body(self):
+        a = self._path("pinned-a.raw", 8 * 8)
+        b = self._path("pinned-b.raw", 16 * 16)
+        # Body memory for B says 16x16.
+        self._remember(b, 16, 16)
+        self.w._open_item(a, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()  # pinned set = 8x8
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "match")
+
+        # Real open flow with decode=True while pinned.
+        self.w._open_item(b, decode=True)
+        _pump(lambda: self.w._pending_decode_item is None)
+        item_b = self.w.items[1]
+
+        # Body uses the remembered values, not the defaults and not the pin.
+        self.assertEqual((item_b.options.width, item_b.options.height), (16, 16))
+        self.assertEqual(item_b.options.format_name, "RAW8")
+        self.assertTrue(item_b.remembered_params_pending is False)
+        # The automatic decode used the body (16x16), so the frame count matches.
+        self.assertEqual(item_b.total_frames, 1)
+
+        # Panel still shows the pinned 8x8 and the icon is pending.
+        self.assertEqual(self.w.panel.width_spin.value(), 8)
+        self.assertEqual(self.w.panel.height_spin.value(), 8)
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+        # Body != pin, so the restore did NOT silently apply the pin.
+        self.assertNotEqual(
+            (item_b.options.width, item_b.options.height),
+            (self.w._pinned_params.width, self.w._pinned_params.height),
+        )
+
+    def test_pinned_open_with_remembered_file_matching_pin_is_match(self):
+        a = self._path("same-a.raw", 8 * 8)
+        b = self._path("same-b.raw", 8 * 8)
+        self._remember(b, 8, 8)
+        self.w._open_item(a, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.w._open_item(b, decode=True)
+        _pump(lambda: self.w._pending_decode_item is None)
+        item_b = self.w.items[1]
+        self.assertEqual((item_b.options.width, item_b.options.height), (8, 8))
+        self.assertEqual(self.w.panel.width_spin.value(), 8)
+        self.assertEqual(self.w.panel.pin_state(), "match")
+
+    def test_unpin_after_pinned_memory_open_shows_memory_values(self):
+        a = self._path("unpin-a.raw", 8 * 8)
+        b = self._path("unpin-b.raw", 16 * 16)
+        self._remember(b, 16, 16)
+        self.w._open_item(a, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.w._open_item(b, decode=False)
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.width_spin.value(), 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.width_spin.value(), 16)
+        self.assertEqual(self.w.panel.height_spin.value(), 16)
+
+    def _make_png(self, name: str, width: int, height: int) -> str:
+        """Write a real, non-square PNG so the decoder reports the true size."""
+        import cv2
+        import numpy as np
+
+        path = os.path.join(self.tmp, name)
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        pixels[:, :, 1] = 200
+        self.assertTrue(cv2.imwrite(path, pixels), "failed to write test PNG")
+        return path
+
+    def test_close_all_items_resets_pin_state_from_match(self):
+        path = self._path("close-all.raw", 8 * 8)
+        self.w._open_item(path, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "match")
+        self.assertIn("already applied", self.w.panel.pin_btn.toolTip())
+
+        self.w.close_all_items()
+        _APP.processEvents()
+
+        self.assertEqual(self.w.items, [])
+        self.assertIsNone(self.w._current_item())
+        self.assertNotEqual(self.w.panel.pin_state(), "match")
+        self.assertNotIn(
+            "already applied to this file", self.w.panel.pin_btn.toolTip(),
+        )
+
+    def test_standard_image_apply_reaches_match_state(self):
+        path = self._make_png("tiny-7x5.png", 7, 5)
+        # Open with the real automatic decode: the item then carries the true
+        # 7x5 size while the panel still shows the generic 2560x1440 input.
+        self.w._open_item(path, decode=True)
+        _pump(lambda: self.w._pending_decode_item is None)
+        item = self.w.items[0]
+        self.assertEqual(item.options.image_type, "Standard Image")
+        self.assertEqual((item.options.width, item.options.height), (7, 5))
+        self.assertEqual(self.w.panel.width_spin.value(), 2560)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+
+        with mock.patch.object(
+            self.w, "_set_tab_dirty", wraps=self.w._set_tab_dirty,
+        ) as dirty:
+            self._apply_and_wait()
+        _APP.processEvents()
+
+        # The real decoded size is committed to the item and mirrored back into
+        # the panel, so pin == item == panel and the pin can finally be blue.
+        self.assertEqual((item.options.width, item.options.height), (7, 5))
+        self.assertEqual(self.w.panel.width_spin.value(), 7)
+        self.assertEqual(self.w.panel.height_spin.value(), 5)
+        self.assertEqual(self.w.panel.pin_state(), "match")
+        self.assertIn("already applied", self.w.panel.pin_btn.toolTip())
+        # The mirror-back must not mark the tab dirty a second time: the only
+        # dirty=False call may come from the decode-success path itself.
+        self.assertTrue(dirty.called)
+        self.assertTrue(
+            all(call.args[1] is False for call in dirty.call_args_list),
+            f"mirror-back must not flag the tab dirty: {dirty.call_args_list}",
+        )
+        self.assertFalse(self.w.item_tabs.tabText(0).startswith("●"))
+
+    def test_pinned_open_apply_failure_keeps_memory_values(self):
+        a = self._path("fail-a.raw", 8 * 8)
+        b = self._path("fail-b.raw", 16 * 16)
+        self._remember(b, 16, 16)
+        self.w._open_item(a, decode=False)
+        self._apply(8, 8)
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.w._open_item(b, decode=False)
+        _APP.processEvents()
+        item_b = self.w.items[1]
+        # Apply the pinned values; the size prompt is declined.
+        with mock.patch.object(self.w, "_warn_size_mismatch", return_value=False):
+            self.w._on_apply_clicked()
+        _APP.processEvents()
+        self.assertEqual((item_b.options.width, item_b.options.height), (16, 16))
+        self.assertEqual(self.w.panel.pin_state(), "pending")
+        self.w.panel.toggle_pin()
+        _APP.processEvents()
+        self.assertEqual(self.w.panel.width_spin.value(), 16)
+        self.assertEqual(self.w.panel.height_spin.value(), 16)
 
 class ApplyToAllTests(_IsolatedWindowTest):
     """Serial apply-to-all: parameters, per-item decode, failures, summary."""
