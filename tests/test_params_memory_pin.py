@@ -1444,6 +1444,71 @@ class DecodeOptionsWhitelistTests(unittest.TestCase):
         )
 
 
+class PresetRecentUseClockTieTests(unittest.TestCase):
+    """Recent-use ordering must survive a coarse wall clock.
+
+    ``time.time()`` has ~15.6 ms granularity on Windows (twelve back-to-back
+    reads returned one distinct value), so two quick preset selections used to
+    store an identical ``last_used``.  ``sort_presets_for_browse`` breaks ties
+    by name, which ranked the *later* selection below the earlier one and broke
+    the v0.4.7 recent-first feature.  ``record_preset_use`` therefore forces the
+    stored stamp to be strictly increasing.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rv-preset-clock-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.s = AppSettings(
+            QSettings(os.path.join(self.tmp, "s.ini"), QSettings.IniFormat)
+        )
+        self.presets = [
+            SensorPreset(name="Alpha", image_type="RAW", format_name="RAW8"),
+            SensorPreset(name="Beta", image_type="RAW", format_name="RAW8"),
+        ]
+
+    def _order(self) -> list[str]:
+        from raw_view.models import sort_presets_for_browse
+
+        return [p.name for p in sort_presets_for_browse(self.presets, self.s.preset_usage)]
+
+    def test_rapid_selections_within_one_clock_tick_keep_latest_first(self):
+        """Both selections land on the same tick; the later one must rank first."""
+        with mock.patch("raw_view.models.time.time", return_value=1_700_000_000.0):
+            self.s.record_preset_use("Alpha")
+            self.s.record_preset_use("Beta")
+        usage = self.s.preset_usage
+        self.assertGreater(
+            usage["Beta"]["last_used"], usage["Alpha"]["last_used"],
+            f"stored stamps must be strictly increasing: {usage}",
+        )
+        self.assertEqual(self._order()[0], "Beta", "latest selection ranks first")
+
+    def test_many_rapid_selections_keep_strict_order(self):
+        """Several same-tick selections still leave the newest first."""
+        with mock.patch("raw_view.models.time.time", return_value=1_700_000_000.0):
+            for name in ("Alpha", "Beta", "Alpha", "Beta"):
+                self.s.record_preset_use(name)
+        usage = self.s.preset_usage
+        self.assertGreater(usage["Beta"]["last_used"], usage["Alpha"]["last_used"])
+        self.assertEqual(self._order()[0], "Beta")
+
+    def test_explicit_timestamp_is_not_rewritten(self):
+        """A caller-supplied timestamp is honoured verbatim (existing contract)."""
+        self.s.record_preset_use("Alpha", timestamp=1_700_000_000.0)
+        self.s.record_preset_use("Beta", timestamp=1_700_000_000.0)
+        usage = self.s.preset_usage
+        self.assertEqual(usage["Alpha"]["last_used"], 1_700_000_000.0)
+        self.assertEqual(usage["Beta"]["last_used"], 1_700_000_000.0)
+
+    def test_explicit_older_timestamp_is_preserved(self):
+        """Explicit stamps may go backwards; only the clock path is bumped."""
+        self.s.record_preset_use("Alpha", timestamp=1_700_000_000.0)
+        self.s.record_preset_use("Beta", timestamp=1_600_000_000.0)
+        usage = self.s.preset_usage
+        self.assertLess(usage["Beta"]["last_used"], usage["Alpha"]["last_used"])
+        self.assertEqual(self._order()[0], "Alpha")
+
+
 class PanelPinUiTests(unittest.TestCase):
     """Panel-level pin/context-menu wiring without a full MainWindow."""
 

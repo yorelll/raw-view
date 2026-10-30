@@ -379,7 +379,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -625,7 +625,15 @@ class ViewerItem:
     """
 
     options: DecodeOptions = field(default_factory=DecodeOptions)
+    #: Last decoded pixels.  ``ndim == 2`` is grayscale; ``ndim == 3`` is colour
+    #: in **RGB** order unless :attr:`display_is_bgr` is set.
     current_display: object | None = None
+    #: When True, :attr:`current_display` is a 3-channel **BGR** array.
+    #: Only ``_decode_standard_image`` sets it (it hands OpenCV's BGR buffer
+    #: straight to Qt as ``Format_BGR888`` to avoid two full-frame copies);
+    #: every other decode path (worker YUV/Bayer, cache hit) resets it to False
+    #: so ``save_display`` cannot misread the channel order.
+    display_is_bgr: bool = False
     view: object | None = None
     frame_nav: object | None = None  # FrameNavBar widget
     zoom_percent: int = 100
@@ -986,7 +994,22 @@ class AppSettings:
         return self._load_preset_usage_raw()
 
     def record_preset_use(self, name: str, timestamp: float | None = None) -> None:
-        """Record one real user selection of *name* for recent-first ordering."""
+        """Record one real user selection of *name* for recent-first ordering.
+
+        When the wall clock is not supplied, the stored ``last_used`` is forced
+        to be **strictly greater** than every existing record.  ``time.time()``
+        has a coarse resolution on Windows (~15.6 ms: twelve back-to-back reads
+        returned a single distinct value), and the recent-use ordering breaks
+        ties by name — so two selections inside one clock tick used to leave the
+        *later* selection ranked below the earlier one (e.g. picking "Alpha" then
+        "Beta" kept "Alpha" first, breaking the v0.4.7 recent-first feature).
+        Comparing against the maximum already stored makes "most recent" a total
+        order regardless of clock resolution.
+
+        An explicitly supplied *timestamp* is honoured verbatim: callers use it
+        to pin an exact value (tests, imports, migrations) and it must not be
+        rewritten.
+        """
         target = (name or "").strip()
         if not target:
             return
@@ -996,6 +1019,14 @@ class AppSettings:
             stamp = float(time.time() if timestamp is None else timestamp)
         except (TypeError, ValueError):
             return
+        if timestamp is None:
+            latest = max(
+                (float(item.get("last_used", 0.0) or 0.0)
+                 for item in usage.values() if isinstance(item, dict)),
+                default=0.0,
+            )
+            if stamp <= latest:
+                stamp = latest + 1e-6
         usage[target] = {
             "last_used": stamp,
             "count": max(0, int(record.get("count", 0))) + 1,

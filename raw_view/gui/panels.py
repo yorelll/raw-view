@@ -203,6 +203,8 @@ class ControlPanel(QWidget):
         self.setMinimumWidth(340)
         self.setObjectName("controlPanel")
         # 面板整体启用态（供帧大小门禁判断是否干预 Apply）；初始启用。
+        # _apply_cond_rows 的幂等短路直接比较控件当前真实状态（是否在表单中
+        # + isEnabled），不需要额外的状态字段——见该方法的注释（0.5.1 M-1）。
         self._panel_enabled = True
 
         # Scrollable content
@@ -1117,18 +1119,19 @@ class ControlPanel(QWidget):
         """
         fmt = self.format_combo.currentText()
         image_type = self.type_combo.currentText()
+        # Derive the five visibility booleans first and hand them to one call,
+        # so _apply_cond_rows can recognise a repeated identical request and
+        # skip the takeRow/insertRow cycle entirely.
         if image_type == "RAW":
-            self._set_advanced_visible(
-                bit=False, align=True, endian=True, preview=True, bayer=(
-                    self.raw_preview_combo.currentText().startswith("Bayer")
-                ),
-            )
+            bit, align, endian, preview = False, True, True, True
+            bayer = self.raw_preview_combo.currentText().startswith("Bayer")
         elif image_type == "YUV" and fmt == "YOnly":
-            self._set_advanced_visible(
-                bit=True, align=True, endian=True, preview=False, bayer=False,
-            )
+            bit, align, endian, preview, bayer = True, True, True, False, False
         else:
-            self._set_advanced_visible(False, False, False, False, False)
+            bit = align = endian = preview = bayer = False
+        self._set_advanced_visible(
+            bit=bit, align=align, endian=endian, preview=preview, bayer=bayer,
+        )
 
     def _set_advanced_visible(self, bit, align, endian, preview, bayer) -> None:
         """统一控制条件显隐区（主 QFormLayout 直接行）各控件的显隐/可用性。
@@ -1175,6 +1178,47 @@ class ControlPanel(QWidget):
         if form is None:
             return
 
+        # Idempotent short-circuit.  A single open/close calls this up to four
+        # times with identical inputs (set_enabled -> _sync_type_enabled, then
+        # _on_tab_changed -> _sync_type_enabled again); each call otherwise pays
+        # a full takeRow/insertRow rebuild of the conditional block.
+        #
+        # The short-circuit is keyed on the state the fields **actually have
+        # right now**, not on the requested visibility.  That distinction is
+        # what 0.5.1 M-1 got wrong: ``set_enabled()`` enables every control
+        # blindly (including the hidden conditional ones), so a request that
+        # merely *looked* unchanged would have been skipped while the hidden
+        # fields were in fact enabled — and their values then leaked into
+        # ``get_values()``/``item.options``.  Reading the real form membership
+        # and ``isEnabled()`` makes "no rebuild" provably "nothing to fix".
+        panel_enabled = getattr(self, "_panel_enabled", True)
+        desired_visible = {
+            name: bool(desired.get(name, False)) for name, _label in self._COND_ROW_SPECS
+        }
+        needs_rebuild = False
+        for name, _label in self._COND_ROW_SPECS:
+            field = getattr(self, name)
+            want_visible = desired_visible[name]
+            want_enabled = want_visible and panel_enabled
+            # Row visibility is carried by form membership (takeRow/insertRow),
+            # not by isVisible(): a row can be "visible" while the whole panel
+            # is hidden.  The invariant is therefore complete for *both*
+            # branches: a wanted row must be in the form and enabled, an
+            # unwanted row must be out of the form and disabled.  Checking only
+            # ``isEnabled()`` on the hidden branch left rows in the layout after
+            # ``set_enabled(False)`` (kept disabled, so no M-1 leak, but still
+            # occupying the form's height meant for visible rows only).
+            in_form = form.getWidgetPosition(field)[0] >= 0
+            if want_visible:
+                if not in_form or field.isEnabled() != want_enabled:
+                    needs_rebuild = True
+                    break
+            elif in_form or field.isEnabled() != want_enabled:
+                needs_rebuild = True
+                break
+        if not needs_rebuild:
+            return
+
         def _row_of(widget) -> int | None:
             pos = form.getWidgetPosition(widget)
             return pos[0] if pos[0] >= 0 else None
@@ -1215,8 +1259,8 @@ class ControlPanel(QWidget):
         # type/format sync (for example while a tab is being loaded), so the
         # panel-wide state must participate in the conditional-row decision.
         # Otherwise a hidden field can become enabled and a disabled panel can
-        # leak keyboard focus to a visible conditional field.
-        panel_enabled = getattr(self, "_panel_enabled", True)
+        # leak keyboard focus to a visible conditional field.  (``panel_enabled``
+        # and the resolved-state key are computed above the short-circuit.)
         for name, label_text in self._COND_ROW_SPECS:
             field = fields[name]
             visible = bool(desired.get(name, False))

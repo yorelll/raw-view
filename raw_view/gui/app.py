@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import bisect
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -82,7 +84,7 @@ def app_icon() -> QIcon:
 
 
 from raw_view.gui.framenav import FrameNavBar
-from raw_view.gui.image_utils import qimage_from_grayscale, qimage_from_rgb
+from raw_view.gui.image_utils import qimage_from_bgr, qimage_from_grayscale, qimage_from_rgb
 from raw_view.gui.imageview import ImageView
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.dialogs import (
@@ -221,10 +223,11 @@ def _scan_directory(path: str) -> list[str]:
     try:
         for root, _dirs, files in os.walk(path):
             for fname in sorted(files):
-                if not _is_supported_file(fname):
+                suffix = _suffix_of(fname)
+                if suffix and suffix not in SUPPORTED_EXTENSIONS:
                     continue
-                full = str(Path(root) / fname)
-                if Path(fname).suffix == "" and not _looks_binary_candidate(full):
+                full = os.path.join(root, fname)
+                if not suffix and not _looks_binary_candidate(full):
                     continue
                 results.append(full)
     except OSError:
@@ -246,6 +249,39 @@ def _is_supported_file(path: str) -> bool:
     """
     suffix = Path(path).suffix.lower()
     return not suffix or suffix in SUPPORTED_EXTENSIONS
+
+
+def _suffix_of(name: str) -> str:
+    """Return the lower-cased suffix of a **bare file name** (no directory part).
+
+    Hot-path replacement for ``Path(name).suffix.lower()`` inside the directory
+    listings, where building one ``Path`` per entry dominated the scan
+    (``Path._parse_path`` + ``ntpath`` calls add up over thousands of files).
+
+    It is only ever fed names yielded by ``os.scandir``/``os.walk``, i.e. bare
+    base names without separators, and for those it is **equivalent to
+    ``Path(name).suffix.lower()``** — deliberately *not* equivalent to
+    ``Path(name).suffix``, which preserves the original case (``"A.RAW"`` gives
+    ``".RAW"`` there and ``".raw"`` here).  Lower-casing is exactly what callers
+    need, because :data:`SUPPORTED_EXTENSIONS` is lower-case; for lower-case
+    input the two forms coincide.
+
+    Boundary behaviour (verified against ``Path(...).suffix.lower()``):
+
+    * ``".raw"`` / ``".hidden"`` — a leading dot belongs to the name, not to a
+      suffix → ``""``;
+    * ``"a."`` / ``"a.."`` — an empty suffix is no suffix → ``""``;
+    * ``"a.tar.gz"`` → ``".gz"``;
+    * ``"A.RAW"`` → ``".raw"`` (case-folded).
+
+    ``_is_supported_file`` keeps using ``Path`` because it also accepts full
+    paths from explicit callers; only the listing loops use this helper.
+    """
+    index = name.rfind(".")
+    if index <= 0:
+        return ""
+    suffix = name[index:]
+    return "" if suffix == "." else suffix.lower()
 
 
 #: 显式“用户手选”打开时也拒绝的“可执行/脚本”危险后缀：绝不把这类文件按 RAW
@@ -992,6 +1028,10 @@ class MainWindow(QMainWindow):
         return qimage_from_rgb(rgb)
 
     @staticmethod
+    def _qimage_from_bgr(bgr: np.ndarray) -> QImage:
+        return qimage_from_bgr(bgr)
+
+    @staticmethod
     def _warn_size_mismatch(parent, actual: int, expected: int) -> bool:
         """Ask user whether to proceed despite size mismatch. Returns True to continue."""
         if actual == expected:
@@ -1069,27 +1109,95 @@ class MainWindow(QMainWindow):
 
     # ── UI-6：同目录文件组切换 ────────────────────────────────────────
 
+    #: 目录列表缓存的滑动有效期（秒）。命中即续期，因此连续操作期间不会
+    #: "每秒重扫一次"；它只是 mtime 不可靠的文件系统（网络盘/SMB）的兜底，
+    #: 本地 NTFS 靠 ``st_mtime_ns`` 精确失效（实测每次创建/删除条目都会变）。
+    _DIR_CACHE_TTL = 1.0
+
+    def _dir_listing_cache(self) -> dict:
+        """同目录文件列表缓存（MainWindow 实例级，绝不跨窗口共享）。"""
+        cache = self.__dict__.get("_dir_cache")
+        if cache is None:
+            cache = self._dir_cache = {}
+        return cache
+
     def _same_dir_items(self) -> list[str]:
         """当前项同目录下按名称排序的支持文件列表（排除了自身）。
 
-        ``os.listdir`` 会同时枚举出无后缀的**子目录**名——它们不能冒充文件，
-        必须 ``os.path.isfile`` 校验；无后缀文件还要经 :func:`_looks_binary_candidate`
-        内容嗅探排除纯文本（与目录扫描一致）。
+        使用 ``os.scandir`` + ``entry.is_file()``：Windows 上 ``is_file()`` 由
+        同一次 ``FindFirstFile``/``FindNextFile`` 的 ``st_file_attributes``
+        直接回答，不再对每个条目再发起一次 ``os.path.isfile`` 系统调用。旧实现
+        每次打开/关闭标签都全量重扫，300 文件目录约 21ms、1000 文件约 86ms，
+        且开销随目录大小线性增长。
+
+        结果按 ``normcase(abspath(dir)) → (mtime_ns, cached_at, sorted_names)``
+        缓存在窗口实例上。缓存的签名不变、且距上次**命中**未超过
+        :attr:`_DIR_CACHE_TTL` 时直接复用（滑动 TTL：每次命中都会续期，因此
+        连续操作不会周期性重扫）。缓存里存的是**包含自身**的完整有序列表，
+        取值时再排除自身，同一目录下的不同文件共享同一份缓存。
+
+        无后缀条目的内容嗅探（``_looks_binary_candidate`` 读头部 4KB）也只在
+        重扫时执行一次，命中缓存时零 IO。
         """
         item = self._current_item()
         path = item.options.file_path if item else ""
         directory = os.path.dirname(path)
+        if not directory:
+            return []
+        names = self._scan_dir_names(directory)
+        current = os.path.basename(path)
+        return [name for name in names if name != current]
+
+    def _scan_dir_names(self, directory: str) -> list[str]:
+        """返回 *directory* 中支持的文件名（含自身、已排序），带缓存。"""
+        cache = self._dir_listing_cache()
+        key = os.path.normcase(os.path.abspath(directory))
         try:
-            candidates = [
-                p for p in os.listdir(directory)
-                if p != os.path.basename(path)
-                and _is_supported_file(p)
-                and os.path.isfile(os.path.join(directory, p))
-                and (Path(p).suffix != "" or _looks_binary_candidate(os.path.join(directory, p)))
-            ]
+            signature = os.stat(directory).st_mtime_ns
         except OSError:
             return []
-        return sorted(candidates)
+        now = time.monotonic()
+        cached = cache.get(key)
+        if cached is not None:
+            cached_signature, cached_at, cached_names = cached
+            # Sliding TTL: a hit refreshes ``cached_at`` so an active session
+            # never pays the rescan just because a wall-clock second elapsed
+            # (0.5.1 M-3).  The TTL only matters where mtime is coarse.
+            if cached_signature == signature and (now - cached_at) < self._DIR_CACHE_TTL:
+                cache[key] = (cached_signature, now, cached_names)
+                return cached_names
+
+        names: list[str] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    name = entry.name
+                    suffix = _suffix_of(name)
+                    if suffix and suffix not in SUPPORTED_EXTENSIONS:
+                        continue
+                    try:
+                        if not entry.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    if not suffix and not _looks_binary_candidate(entry.path):
+                        continue
+                    names.append(name)
+        except OSError:
+            return []
+        names.sort()
+        cache[key] = (signature, now, names)
+        return names
+
+    def _invalidate_dir_cache(self, directory: str | None = None) -> None:
+        """丢弃目录列表缓存（拖入目录后调用，确保新文件立即可见）。"""
+        cache = self.__dict__.get("_dir_cache")
+        if not cache:
+            return
+        if directory is None:
+            cache.clear()
+            return
+        cache.pop(os.path.normcase(os.path.abspath(directory)), None)
 
     def _nav_file_by_dir(self, delta: int) -> None:
         """打开同目录文件组中的上一个/下一个支持文件（UI-6）。
@@ -1111,7 +1219,8 @@ class MainWindow(QMainWindow):
         #   delta=-1 → siblings[rank-1]（当前之前一位的兄弟）
         #   delta=+1 → siblings[rank]  （当前之后一位的兄弟，因为 rank 已扣掉自身）
         # 不能用 rank+delta 直接当下标（rank 是完整列表位置，siblings 少一个元素）。
-        rank = sum(1 for s in siblings if s < cur_name)
+        # ``siblings`` 已排序，用 bisect 求 rank（O(log n)）而不是逐项比较。
+        rank = bisect.bisect_left(siblings, cur_name)
         new_idx = rank - 1 if delta == -1 else rank
         if not (0 <= new_idx < len(siblings)):
             return
@@ -1130,9 +1239,73 @@ class MainWindow(QMainWindow):
             self.next_file_action.setEnabled(False)
             return
         siblings = self._same_dir_items()
-        rank = sum(1 for s in siblings if s < os.path.basename(item.options.file_path))
+        # Sorted list -> bisect gives the same rank as a linear '<' scan in
+        # O(log n) instead of one comparison per sibling.
+        rank = bisect.bisect_left(siblings, os.path.basename(item.options.file_path))
         self.prev_file_action.setEnabled(rank > 0)
         self.next_file_action.setEnabled(rank < len(siblings))
+
+    # ── Batch open/close coalescing (UI refresh only) ────────────────
+    #
+    # Decoding order for a multi-file open is owned by ``_open_paths`` and its
+    # event-driven queue; this section only merges the *UI refresh* that each
+    # ``_open_item`` / ``close_item`` would otherwise repeat N times (directory
+    # listing for prev/next, recent-files menu, panel reload, full repaint).
+
+    def _batch_begin(self) -> bool:
+        """Enter a batch section; ``True`` when this call owns it (outermost).
+
+        Nested sections are supported and only the outermost one performs the
+        final refresh, so helpers that themselves open/close items stay correct
+        when invoked from inside a batch.
+        """
+        depth = self.__dict__.get("_batch_depth", 0)
+        self._batch_depth = depth + 1
+        if depth:
+            return False
+        self._batch_suppress = True
+        # Defer intermediate repaints; _batch_end repaints once.  This only
+        # postpones painting, never mutates widget state.
+        try:
+            self.setUpdatesEnabled(False)
+        except (RuntimeError, AttributeError):  # pragma: no cover - test stub
+            pass
+        return True
+
+    def _batch_end(self, owner: bool) -> None:
+        """Leave a batch section; the owner performs one consolidated refresh."""
+        depth = max(0, self.__dict__.get("_batch_depth", 1) - 1)
+        self._batch_depth = depth
+        if depth:
+            return
+        self._batch_suppress = False
+        try:
+            self.setUpdatesEnabled(True)
+        except (RuntimeError, AttributeError):  # pragma: no cover - test stub
+            pass
+        if not owner:
+            return
+        # One refresh of each deferred surface.  Guard on the *widget* each one
+        # needs: ``MainWindow.__new__`` test stubs only wire a few attributes.
+        if self.__dict__.get("recent_menu") is not None:
+            self._refresh_recent_files_menu()
+        if "prev_file_action" in self.__dict__:
+            self._refresh_file_nav_actions()
+        if "center_stack" in self.__dict__:
+            self._update_center_stack()
+        tabs = self.__dict__.get("item_tabs")
+        if tabs is None:
+            return
+        items = self.__dict__.get("items") or []
+        index = tabs.currentIndex()
+        if 0 <= index < len(items):
+            self._active_item_index = index
+            self._active_item_ref = None
+            self._on_tab_changed(index)
+
+    def _batch_active(self) -> bool:
+        """Whether a batch section is currently deferring per-item UI refresh."""
+        return bool(self.__dict__.get("_batch_suppress", False))
 
     # ── Tab navigation ──────────────────────────────────────────────
 
@@ -1197,12 +1370,19 @@ class MainWindow(QMainWindow):
         the decode success/error slots, never from a timer or a sleep.  Only
         one decode runs at a time because there is a single worker/thread.
         """
-        opened: list[ViewerItem] = []
-        for path in paths:
-            before = len(self.items)
-            self._open_item(path, decode=False, source=source)
-            if len(self.items) > before:
-                opened.append(self.items[-1])
+        # UI refresh is coalesced across the whole batch; the decode queue below
+        # is untouched and still runs one file at a time (v0.5.2 contract).
+        owner = self._batch_begin() if len(paths) > 1 else None
+        try:
+            opened: list[ViewerItem] = []
+            for path in paths:
+                before = len(self.items)
+                self._open_item(path, decode=False, source=source)
+                if len(self.items) > before:
+                    opened.append(self.items[-1])
+        finally:
+            if owner is not None:
+                self._batch_end(owner)
         if not opened:
             return
         if len(opened) == 1:
@@ -1356,16 +1536,24 @@ class MainWindow(QMainWindow):
             item.remembered_params_pending = False
 
         self.settings.add_recent_file(path)
-        self._refresh_recent_files_menu()
+        # Inside a multi-file batch these per-item refreshes are deferred to
+        # _batch_end (one pass instead of N).  The tab, its tooltip and the
+        # selection are still created per item — only the shared UI surfaces
+        # (menu / prev-next / panel / stack) wait for the batch to finish.
+        batched = self._batch_active()
+        if not batched:
+            self._refresh_recent_files_menu()
 
         self.items.append(item)
         index = self.item_tabs.addTab(container, os.path.basename(path))
         # UI-4：标签 tooltip 显示完整路径（悬停即见）。
         self.item_tabs.setTabToolTip(index, path)
         self.item_tabs.setCurrentIndex(index)
-        self._refresh_file_nav_actions()
+        if not batched:
+            self._refresh_file_nav_actions()
         self.panel.set_enabled(True)
-        self._update_center_stack()
+        if not batched:
+            self._update_center_stack()
 
         if decode:
             # Direct open/navigation is an initial automatic decode.  Default
@@ -1447,11 +1635,14 @@ class MainWindow(QMainWindow):
                 else "Not decoded yet",
                 current.status_kind if current.status_text is not None else "idle",
             )
-        self.panel.set_enabled(index >= 0)
         # set_enabled(True) enables all controls blindly, so re-sync
         # type-specific control states (e.g., disable bayer for YUV) and
         # re-evaluate the frame-size gate (set_values→set_enabled 会把超大帧
         # 时被禁用的 Apply 重新启用，这里再按当前参数恢复门禁)。
+        # set_enabled() itself calls _sync_type_enabled(), and both that and
+        # _apply_cond_rows are idempotent, so the explicit call below is a free
+        # no-op unless the state actually differs.
+        self.panel.set_enabled(index >= 0)
         if index >= 0:
             self.panel._sync_type_enabled()
             self.panel._refresh_frame_size_hint()
@@ -1490,10 +1681,29 @@ class MainWindow(QMainWindow):
             removed = cache.remove_file(closing.options.file_path)
             if removed:
                 logger.debug("Dropped %d cached decode frame(s) for closed item: %s", removed, closing.options.file_path)
+        # Whether the closed tab was the visible one, captured before removal
+        # shifts the indices: closing a *background* tab leaves the panel and
+        # the status bar already correct for the unchanged current item.
+        was_current = self.item_tabs.currentIndex() == index
+        page = self.item_tabs.widget(index)
         self._loading_item = True
         self.item_tabs.removeTab(index)
         self.items.pop(index)
         self._loading_item = False
+        # QTabWidget.removeTab() only detaches the page widget; it does NOT
+        # delete it.  The per-item lambdas created in _open_item (ViewerItem
+        # <-> ImageView signal connections) form a reference cycle CPython
+        # cannot collect across the PyQt wrapper boundary, so every closed tab
+        # used to leak its whole widget subtree (plus pixmap) for the rest of
+        # the session — measured +15 widgets / +59 MB per open+close cycle, with
+        # app.setStyleSheet() (and therefore startup/theme switches) degrading
+        # from 0.5 s to 5 s after 40 leaked pages.
+        if page is not None:
+            try:
+                page.setParent(None)
+                page.deleteLater()
+            except RuntimeError:  # pragma: no cover - wrapper already deleted
+                pass
         # 0.2.2-L-1 / 0.3.1-M-1 / 0.4.1-M-2：若被关闭项正是当前在途解码目标，
         # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
         # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
@@ -1520,11 +1730,27 @@ class MainWindow(QMainWindow):
             # icon falls back to off/pending instead of keeping the previous
             # item's blue "already applied to this file" tooltip (0.5.1 L-2).
             self._refresh_pin_state()
+        elif self._batch_active():
+            # Inside close_all / close-items-to-the-right the remaining items
+            # are about to be closed too; _batch_end performs the single panel
+            # reload + nav/stack refresh for the final state.
+            self._active_item_index = self.item_tabs.currentIndex()
+            self._active_item_ref = None
+        elif not was_current:
+            # Background tab closed: the current item did not change, so its
+            # panel values and per-item status text are already correct; only
+            # the identity pointers need re-anchoring after the re-index.
+            self._active_item_index = self.item_tabs.currentIndex()
+            self._active_item_ref = self._current_item()
+            # Pin state depends on the current item (unchanged), so this is a
+            # cheap idempotent recompute rather than a skipped refresh.
+            self._refresh_pin_state()
         else:
             self._active_item_ref = None
             self._on_tab_changed(self.item_tabs.currentIndex())
-        self._update_center_stack()
-        self._refresh_file_nav_actions()
+        if not self._batch_active():
+            self._update_center_stack()
+            self._refresh_file_nav_actions()
 
     # ── 标签右键菜单（需求 5）────────────────────────────────────────
 
@@ -1582,9 +1808,17 @@ class MainWindow(QMainWindow):
         return m
 
     def close_all_items(self) -> None:
-        """安全关闭所有标签与 item（倒序 close 避免索引错位）。"""
-        while self.items:
-            self.close_item(len(self.items) - 1)
+        """安全关闭所有标签与 item（倒序 close 避免索引错位）。
+
+        逐项关闭时把目录扫描/面板重载/整窗重绘延后到批量结束统一做一次
+        （旧实现每关一个 tab 就全量重扫目录，30 个标签下总耗时可达数秒）。
+        """
+        owner = self._batch_begin()
+        try:
+            while self.items:
+                self.close_item(len(self.items) - 1)
+        finally:
+            self._batch_end(owner)
 
     def close_items_to_the_right(self, index: int) -> None:
         """把 *index* 右侧的所有标签倒序关闭，*index* 本身与左侧不受影响。
@@ -1595,9 +1829,13 @@ class MainWindow(QMainWindow):
         count = len(self.items)
         if not (0 <= index < count):
             return
-        while count > index + 1:
-            count -= 1
-            self.close_item(count)
+        owner = self._batch_begin()
+        try:
+            while count > index + 1:
+                count -= 1
+                self.close_item(count)
+        finally:
+            self._batch_end(owner)
 
     def _current_item(self) -> ViewerItem | None:
         idx = self.item_tabs.currentIndex()
@@ -2313,6 +2551,8 @@ class MainWindow(QMainWindow):
             # 与 _on_decode_finished 一致：命中时也要回填当前显示数组，
             # 否则 save_display / 后续帧缓存写回会读到过期数据。
             item.current_display = cached.display_array
+            # Cache entries come from the worker (RGB or grayscale), never BGR.
+            item.display_is_bgr = False
             # decode_current already invalidated any preceding request before
             # preflight.  No second cancellation/generation bump is needed here;
             # cached pixels can now be applied without a late worker competing.
@@ -2384,10 +2624,13 @@ class MainWindow(QMainWindow):
     ) -> None:
         try:
             bgr = load_bgr_image(opts.file_path)
-            rgb = bgr[:, :, ::-1]
-            h, w = rgb.shape[:2]
-            qimg = self._qimage_from_rgb(rgb)
-            item.current_display = rgb
+            h, w = bgr.shape[:2]
+            # Feed OpenCV's BGR buffer to Qt as Format_BGR888: reversing to RGB
+            # first costs two extra full-frame copies on the UI thread
+            # (4000x3000: 183 ms -> ~30 ms for the QImage conversion alone).
+            qimg = self._qimage_from_bgr(bgr)
+            item.current_display = bgr
+            item.display_is_bgr = True
             # A standard image is always a single frame; the actual size is only
             # known after decoding, so commit it together with the parameters.
             committed = self._snapshot_options(opts)
@@ -2660,6 +2903,8 @@ class MainWindow(QMainWindow):
         self._pending_commit_frame = None
         self._pending_commit_frames = None
         item.current_display = result.display_array
+        # Worker results are RGB (Bayer/YUV) or grayscale; never BGR.
+        item.display_is_bgr = False
         # P1-1：把这份刚算好的帧写入解码缓存。必须使用 decode 启动时快照的
         # cache key，而非从当前 item.options/current_frame 重算：用户可能已经
         # 翻帧、改参数或外部覆盖同路径文件，重算会把旧字节绑定为新请求的缓存。
@@ -2836,6 +3081,10 @@ class MainWindow(QMainWindow):
         img = item.current_display
         if img.ndim == 2:
             qimg = self._qimage_from_gray(img)
+        elif getattr(item, "display_is_bgr", False):
+            # Standard Image keeps OpenCV's BGR buffer; saving through the RGB
+            # helper would swap red and blue.
+            qimg = self._qimage_from_bgr(img)
         else:
             qimg = self._qimage_from_rgb(img)
         dpi = self.settings.save_dpi
