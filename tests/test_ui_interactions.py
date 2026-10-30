@@ -33,6 +33,11 @@ from unittest import mock
 # unittest discovery does not load pytest's conftest.py.  Establish its owned
 # test INI before any raw_view import; under pytest this reuses conftest's path.
 from _settings_isolation import ensure_test_settings_file  # noqa: E402
+from _qt_cleanup import (  # noqa: E402
+    begin_widget_leak_check,
+    destroy_widget,
+    end_widget_leak_check,
+)
 
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -120,16 +125,56 @@ def _main_form_label_hidden(p: ControlPanel, combo) -> bool:
     return label.isHidden()
 
 
+class _StubWindowCleanupMixin(unittest.TestCase):
+    """Reap the stub windows this test created and assert nothing leaked.
+
+    Stub windows own a real ``QTabWidget``; if it survives, every later
+    ``app.setStyleSheet()`` re-polishes it and the suite slows down
+    quadratically.  The bookkeeping is **per test instance** (not module-level)
+    so an exception path can never leave a stale entry behind for the next test.
+
+    Both halves run in ``tearDown`` so they fire even when an assertion inside
+    the test body failed first.  ``setUp`` arms the L3 guard; a subclass that
+    overrides ``setUp`` must call ``super().setUp()`` (enforced by L2).
+    """
+
+    def setUp(self):
+        self._stub_tabs: list = []
+        # Publish this instance's list so the module-level factory can register
+        # into it.  Scoped per test, so a crashed test cannot leak an entry into
+        # the next one; the module-level name is only a registration channel.
+        global _active_stub_sink
+        _active_stub_sink = self._stub_tabs
+        begin_widget_leak_check()
+
+    def tearDown(self):
+        global _active_stub_sink
+        _active_stub_sink = None
+        while self._stub_tabs:
+            destroy_widget(self._stub_tabs.pop())
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
+
+
+# Per-test registration channel used by ``_new_window_with_tabs``.  It is reset
+# at the start of every test, so entries never outlive the test that made them.
+_active_stub_sink: list | None = None
+
+
 def _new_window_with_tabs():
     """轻量 MainWindow（不跑 _build_ui）+ 真实 QTabWidget / items。
 
     与 tests/test_tab_drag.py 的桩化模式一致：只给被测方法（close_item /
     close_all_items / close_items_to_the_right / _run_tab_menu_action）依赖的
     属性，测纯 Python 逻辑，快速且不弹窗口。
+
+    创建的 QTabWidget 直接挂到宿主用例的 per-test 列表上（``_active_stub_sink``），
+    由该用例的 tearDown 销毁，不跨用例残留。
     """
     w = MainWindow.__new__(MainWindow)
     w.items = []
     w.item_tabs = QTabWidget()
+    if _active_stub_sink is not None:
+        _active_stub_sink.append(w.item_tabs)
     w.item_tabs.setTabsClosable(True)
     w._loading_item = False
     w._active_item_index = -1
@@ -175,9 +220,7 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         self.p.set_presets(self.presets)
 
     def tearDown(self):
-        self.p.close()
-        self.p.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.p)
 
     def _names(self):
         return [self.p.preset_combo.itemText(i) for i in range(self.p.preset_combo.count())
@@ -406,7 +449,7 @@ class MainPanelPresetFilterTests(unittest.TestCase):
         self.assertTrue(self.p.apply_btn.isEnabled())
 
 
-class PresetKeyboardNavigationTests(unittest.TestCase):
+class PresetKeyboardNavigationTests(_StubWindowCleanupMixin):
     """P1-1 production-path regression: use a real MainWindow + real settings.
 
     Earlier coverage mirrored ``_on_preset_selected`` in the test, which hid a
@@ -417,6 +460,8 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
     NAMES = ("Alpha", "Beta", "Delta", "Gamma")
 
     def setUp(self):
+        # Arm the inherited leak guard before any widget is created.
+        super().setUp()
         tmp = tempfile.mkdtemp(prefix="rv-nav-presets-")
         self.addCleanup(shutil.rmtree, tmp, True)
         store = QSettings(os.path.join(tmp, "settings.ini"), QSettings.IniFormat)
@@ -444,9 +489,8 @@ class PresetKeyboardNavigationTests(unittest.TestCase):
         QApplication.processEvents()
 
     def tearDown(self):
-        self.w.close()
-        self.w.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.w)
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
 
     def _combo(self):
         return self.w.panel.preset_combo
@@ -589,9 +633,7 @@ class _PanelSafetyPresetTests(unittest.TestCase):
         self.p = _panel()
 
     def tearDown(self):
-        self.p.close()
-        self.p.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(self.p)
 
     def test_type_format_mismatches_disable_apply_and_preserve_identifier(self):
         for image_type, format_name in (
@@ -688,7 +730,7 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.p = _panel()
 
     def tearDown(self):
-        self.p.deleteLater()
+        destroy_widget(self.p)
 
     def test_raw_shows_advanced_hides_bit_depth(self):
         p = self.p
@@ -823,9 +865,7 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.assertTrue(p._cond_row_labels["align_combo"].isHidden())
         self.assertIsNotNone(p.type_combo.nextInFocusChain())
         self.assertIsNotNone(p.format_combo.nextInFocusChain())
-        p.close()
-        p.deleteLater()
-        QApplication.processEvents()
+        destroy_widget(p)
 
     def test_standard_image_hides_all_advanced(self):
         p = self.p
@@ -931,7 +971,7 @@ class AdvancedFormLayoutTests(unittest.TestCase):
         self.p = _panel()
 
     def tearDown(self):
-        self.p.deleteLater()
+        destroy_widget(self.p)
 
     def test_rows_are_direct_form_rows(self):
         """可见的高级控件是主 QFormLayout 的直接行（labelForField 可定位）。
@@ -1024,7 +1064,7 @@ class FrameHintRemovedTests(unittest.TestCase):
         self.p = _panel()
 
     def tearDown(self):
-        self.p.deleteLater()
+        destroy_widget(self.p)
 
     def test_no_estimated_frame_label(self):
         p = self.p
@@ -1110,7 +1150,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             self.assertIn("10%", panel.zoom_slider.accessibleDescription())
             self.assertIn("1000%", panel.zoom_slider.accessibleDescription())
         finally:
-            panel.deleteLater()
+            destroy_widget(panel)
 
     def test_frame_navigation_names_match_shortcuts(self):
         from raw_view.gui.framenav import FrameNavBar
@@ -1126,7 +1166,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             self.assertIn("Right", nav.next_btn.toolTip())
             self.assertIn("End", nav.last_btn.toolTip())
         finally:
-            nav.deleteLater()
+            destroy_widget(nav)
 
     def test_info_buttons_are_focusable_and_use_non_clipping_icon_size(self):
         from raw_view.gui.dialogs.settings import SettingsDialog
@@ -1167,8 +1207,8 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
                     f"{theme} info 状态不应有外部边框",
                 )
         finally:
-            settings_dialog.deleteLater()
-            variant_button.deleteLater()
+            destroy_widget(settings_dialog)
+            destroy_widget(variant_button)
 
     def test_fourcc_dialogs_remove_unbound_context_help_button(self):
         from raw_view.gui.dialogs.fourcc import FourCCDialog, FourCCEditDialog
@@ -1178,7 +1218,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             try:
                 self.assertFalse(dialog.windowFlags() & Qt.WindowContextHelpButtonHint)
             finally:
-                dialog.deleteLater()
+                destroy_widget(dialog)
 
     def test_fourcc_status_label_escapes_rich_text_query(self):
         """0.4.0-L-3：搜索状态字符串对用户查询做 HTML 转义。
@@ -1203,7 +1243,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             dlg._on_search()
             self.assertNotIn("result(s) for", dlg._status_label.text())
         finally:
-            dlg.deleteLater()
+            destroy_widget(dlg)
 
     def test_batch_start_follows_file_table_state(self):
         from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
@@ -1217,7 +1257,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             dialog._clear_files()
             self.assertFalse(dialog._run_btn.isEnabled())
         finally:
-            dialog.deleteLater()
+            destroy_widget(dialog)
 
     def test_batch_empty_table_placeholder_visible_only_when_empty(self):
         """0.4.0-L-2：空表显示“Add Files 或拖放”引导，有行后隐藏。"""
@@ -1241,7 +1281,7 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
             dialog._clear_files()
             self.assertFalse(dialog._empty_hint.isHidden(), "清空后引导恢复显示")
         finally:
-            dialog.deleteLater()
+            destroy_widget(dialog)
 
     def test_batch_empty_hint_recenters_on_viewport_resize(self):
         """0.4.0-L-2：空表提示必须随 viewport 尺寸变化重新定位。
@@ -1295,10 +1335,10 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
                 )
                 self.assertTrue(dialog._empty_hint.isHidden())
         finally:
-            dialog.deleteLater()
+            destroy_widget(dialog)
 
 
-class ToolbarNavRemovedTests(unittest.TestCase):
+class ToolbarNavRemovedTests(_StubWindowCleanupMixin):
     def test_source_does_not_add_file_nav_to_toolbar(self):
         """工具栏构建源码不再 addAction 文件切换箭头。"""
         src = inspect.getsource(MainWindow._build_toolbar)
@@ -1340,8 +1380,7 @@ class ToolbarNavRemovedTests(unittest.TestCase):
             self.assertNotIn("Previous File", toolbar_actions)
             self.assertNotIn("Next File", toolbar_actions)
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
     def test_nav_action_precise_boundary_enablement(self):
         """0.3.0-L-1 / 0.3.1-L-2：首/尾文件只启用可用的那一个方向。
@@ -1379,14 +1418,13 @@ class ToolbarNavRemovedTests(unittest.TestCase):
 
                 shutil.rmtree(tmpdir, ignore_errors=True)
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
 
 # ── 需求 5：标签右键关闭操作 ──────────────────────────────────────────
 
 
-class TabContextMenuWiringTests(unittest.TestCase):
+class TabContextMenuWiringTests(_StubWindowCleanupMixin):
     def test_custom_context_menu_policy_is_set(self):
         """真实 MainWindow：标签栏使用 CustomContextMenu。"""
         w = MainWindow()
@@ -1394,8 +1432,7 @@ class TabContextMenuWiringTests(unittest.TestCase):
             tab_bar = w.item_tabs.tabBar()
             self.assertEqual(tab_bar.contextMenuPolicy(), Qt.CustomContextMenu)
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
     def test_source_wires_custom_context_menu(self):
         src = inspect.getsource(MainWindow._build_ui)
@@ -1407,16 +1444,13 @@ class TabContextMenuWiringTests(unittest.TestCase):
     def test_menu_actions_created_with_english_labels(self):
         w = _new_window_with_tabs()
         menu = MainWindow._build_tab_context_menu(w)
-        try:
-            texts = [a.text() for a in menu.actions()]
-            self.assertEqual(texts, ["Close All Items", "Close Items to the Right"])
-            for a in menu.actions():
-                self.assertTrue(a.shortcut().isEmpty(), "右键菜单无需快捷键")
-        finally:
-            w.item_tabs.deleteLater()
+        texts = [a.text() for a in menu.actions()]
+        self.assertEqual(texts, ["Close All Items", "Close Items to the Right"])
+        for a in menu.actions():
+            self.assertTrue(a.shortcut().isEmpty(), "右键菜单无需快捷键")
 
 
-class TabContextCloseBehaviorTests(unittest.TestCase):
+class TabContextCloseBehaviorTests(_StubWindowCleanupMixin):
     def test_close_all_items_closes_everything(self):
         w = _new_window_with_tabs()
         for n in ("a", "b", "c", "d"):
@@ -1467,7 +1501,7 @@ class TabContextCloseBehaviorTests(unittest.TestCase):
         self.assertEqual(len(w.items), 3)
 
 
-class TabMenuDispatchTests(unittest.TestCase):
+class TabMenuDispatchTests(_StubWindowCleanupMixin):
     """_run_tab_menu_action：按 exec_ 返回的 QAction 对象身份分派。"""
 
     def test_dispatch_close_all(self):
@@ -1477,7 +1511,6 @@ class TabMenuDispatchTests(unittest.TestCase):
         menu = MainWindow._build_tab_context_menu(w)
         MainWindow._run_tab_menu_action(w, w._acTabCloseAll, index=1)
         self.assertEqual(w.items, [])
-        w.item_tabs.deleteLater()
 
     def test_dispatch_close_right(self):
         w = _new_window_with_tabs()
@@ -1485,7 +1518,6 @@ class TabMenuDispatchTests(unittest.TestCase):
         menu = MainWindow._build_tab_context_menu(w)
         MainWindow._run_tab_menu_action(w, w._acTabCloseRight, index=1)
         self.assertEqual(w.items, items[:2])
-        w.item_tabs.deleteLater()
 
     def test_dispatch_none_is_noop(self):
         w = _new_window_with_tabs()
@@ -1493,7 +1525,6 @@ class TabMenuDispatchTests(unittest.TestCase):
             _add_tab(w, n)
         MainWindow._run_tab_menu_action(w, None, index=0)
         self.assertEqual(len(w.items), 2)
-        w.item_tabs.deleteLater()
 
     def test_right_click_selects_target_tab_before_close_right(self):
         """右键先选中目标标签，再执行 close-right（用被右击标签的 index）。"""
@@ -1517,10 +1548,12 @@ class TabMenuDispatchTests(unittest.TestCase):
 # ── 需求 7：Ctrl+A Apply 快捷键 ────────────────────────────────────────
 
 
-class ApplyShortcutTests(unittest.TestCase):
+class ApplyShortcutTests(_StubWindowCleanupMixin):
     """Ctrl+A 必须走同一 Apply handler，同时绝不抢可编辑控件的 Select All。"""
 
     def setUp(self):
+        # Arm the inherited leak guard before any widget is created.
+        super().setUp()
         self.w = MainWindow()
         self.w.show()
         self.item = ViewerItem()
@@ -1531,9 +1564,8 @@ class ApplyShortcutTests(unittest.TestCase):
         _APP.processEvents()
 
     def tearDown(self):
-        self.w.close()
-        self.w.deleteLater()
-        _APP.processEvents()
+        destroy_widget(self.w)
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
 
     @staticmethod
     def _ctrl_a(widget):
@@ -1590,7 +1622,7 @@ class ApplyShortcutTests(unittest.TestCase):
         _APP.processEvents()
         self.assertEqual(editor.textCursor().selectedText(), "select this text")
         self.assertEqual(self.called, [])
-        editor.deleteLater()
+        destroy_widget(editor)
 
     def test_editable_combo_line_edit_keeps_select_all(self):
         combo = QComboBox(self.w)
@@ -1603,7 +1635,7 @@ class ApplyShortcutTests(unittest.TestCase):
         _APP.processEvents()
         self.assertEqual(combo.lineEdit().selectedText(), "combo editable text")
         self.assertEqual(self.called, [])
-        combo.deleteLater()
+        destroy_widget(combo)
 
     def test_no_item_or_disabled_panel_never_triggers(self):
         self.w._current_item = lambda: None
@@ -1666,7 +1698,7 @@ class HelpShortcutSectionTests(unittest.TestCase):
         titles = {b.title() for b in boxes}
         for cat, _items in hc.SHORTCUTS:
             self.assertIn(cat, titles, f"分类 {cat} 应渲染到对话框")
-        dlg.deleteLater()
+        destroy_widget(dlg)
 
     def test_no_removed_shortcuts_documented(self):
         """被取消的 [ ] 与不存在的 / * 翻帧快捷键不得写入快捷键数据。"""
@@ -1906,7 +1938,7 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
 # ── 0.2.2-L-1 / 0.3.1-M-1,L-1 / 0.4.0-M-2 / 0.4.1-M-2：关闭回收在途解码 ──
 
 
-class DecodeTeardownTests(unittest.TestCase):
+class DecodeTeardownTests(_StubWindowCleanupMixin):
     """关闭标签/窗口时必须断开在途解码的信号，防迟到结果画到新标签。"""
 
     def test_close_item_cancels_inflight_decode_for_closed_item(self):
@@ -1990,9 +2022,9 @@ class DecodeTeardownTests(unittest.TestCase):
             dis.assert_called_once_with()
             self.assertEqual(fake.waited, 400, "关闭时应留下有界短超时")
             # 别在这里 w.close()——会再次进入 closeEvent 重复触发断言；
-            # 真实窗口用 hide+deleteLater 清理即可。
+            # 真实窗口用 hide + 延迟删除清理即可（close=False 保留该语义）。
             w.hide()
-            w.deleteLater()
+            destroy_widget(w, close=False)
 
     def test_close_event_tolerates_no_inflight(self):
         """真实窗口无在途解码（_thread/_pending_decode_item 均 None）关闭不崩。"""
@@ -2002,8 +2034,7 @@ class DecodeTeardownTests(unittest.TestCase):
         try:
             MainWindow.closeEvent(w, self._qclose_event())
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
     def test_close_event_tolerates_deleted_qthread_due_to_runtime_error(self):
         """"已完成解码的线程对象已 deleteLater（C++ 对象销毁）后关闭不崩。
@@ -2029,8 +2060,7 @@ class DecodeTeardownTests(unittest.TestCase):
                 dis.assert_called_once_with()
         finally:
             w._thread = None
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
 
 # ── 0.4.1 回归：Batch 进度框不闪现（进度框延迟显式创建）────────────────
@@ -2063,7 +2093,7 @@ class BatchProgressDialogTests(unittest.TestCase):
         try:
             self.assertIsNone(dlg._progress)
         finally:
-            dlg.deleteLater()
+            destroy_widget(dlg)
 
     def test_run_batch_creates_deferred_progress_and_cleans_up(self):
         """_run_batch 在冲突确认后创建进度框，deferred-show、结束后清空。"""
@@ -2091,7 +2121,7 @@ class BatchProgressDialogTests(unittest.TestCase):
             finally:
                 os.unlink(temp_png)
         finally:
-            dlg.deleteLater()
+            destroy_widget(dlg)
 
     def test_progress_dialog_config_deferred_show(self):
         """进度框配置：minimumDuration>=300ms，且创建后不立即 show（防闪现）。"""
@@ -2133,7 +2163,7 @@ class BatchProgressDialogTests(unittest.TestCase):
             finally:
                 os.unlink(temp_png)
         finally:
-            dlg.deleteLater()
+            destroy_widget(dlg)
 
 
 if __name__ == "__main__":

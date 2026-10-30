@@ -16,6 +16,11 @@ from unittest import mock
 
 # unittest discovery does not load pytest's conftest.py.
 from _settings_isolation import ensure_test_settings_file  # noqa: E402
+from _qt_cleanup import (  # noqa: E402
+    begin_widget_leak_check,
+    destroy_widget,
+    end_widget_leak_check,
+)
 
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -56,6 +61,8 @@ class _IsolatedWindowTest(unittest.TestCase):
     """Shared fixture: temp dir + isolated INI store + real MainWindow."""
 
     def setUp(self):
+        # Arm the runtime leak guard before building the window it must reap.
+        begin_widget_leak_check()
         self.tmp = tempfile.mkdtemp(prefix="rv-mem-pin-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.settings = AppSettings(
@@ -68,9 +75,8 @@ class _IsolatedWindowTest(unittest.TestCase):
         self.w._on_apply_clicked = self.w._on_apply_clicked.__get__(self.w, MainWindow)
 
     def tearDown(self):
-        self.w.close()
-        self.w.deleteLater()
-        _APP.processEvents()
+        destroy_widget(self.w)
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
 
     def _path(self, name: str, size: int) -> str:
         return _write(os.path.join(self.tmp, name), size)
@@ -552,9 +558,7 @@ class PinnedParameterTests(_IsolatedWindowTest):
             self.assertEqual(second.panel.width_spin.value(), 8, "pin drives panel")
             self.assertEqual(second.items[0].options.width, 2560, "item untouched")
         finally:
-            second.close()
-            second.deleteLater()
-            _APP.processEvents()
+            destroy_widget(second)
 
     def test_pin_toggle_updates_icon_tooltip_and_accessibility(self):
         self.assertIn("Pin", self.w.panel.pin_btn.toolTip())
@@ -579,7 +583,7 @@ class PinnedParameterTests(_IsolatedWindowTest):
         QTest.keyClick(editor, Qt.Key_N, Qt.ControlModifier)
         _APP.processEvents()
         self.assertTrue(self.w.panel.is_pinned(), "text editor keeps Ctrl+N")
-        editor.deleteLater()
+        destroy_widget(editor)
 
     def test_pin_action_shortcut_is_registered_without_conflict(self):
         self.assertEqual(self.w.pin_action.shortcut().toString(), "Ctrl+N")
@@ -1334,12 +1338,12 @@ class PinShortcutTextEntryTests(_IsolatedWindowTest):
         _APP.processEvents()
         self.assertEqual(self._ctrl_n(combo), (False, False))
         self.assertEqual(self._ctrl_n(combo.lineEdit()), (False, False))
-        combo.deleteLater()
+        destroy_widget(combo)
         editor = QLineEdit(self.w)
         editor.show()
         _APP.processEvents()
         self.assertEqual(self._ctrl_n(editor), (False, False))
-        editor.deleteLater()
+        destroy_widget(editor)
 
     def test_ctrl_n_still_toggles_from_non_text_focus(self):
         self.w.panel.set_enabled(True)
@@ -1445,9 +1449,7 @@ class PanelPinUiTests(unittest.TestCase):
         _APP.processEvents()
 
     def tearDown(self):
-        self.p.close()
-        self.p.deleteLater()
-        _APP.processEvents()
+        destroy_widget(self.p)
 
     def test_pin_button_and_menu_entries_present(self):
         texts = [a.text() for a in self.p._preset_context_menu().actions() if a.text()]

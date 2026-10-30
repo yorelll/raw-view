@@ -20,6 +20,11 @@ import unittest
 from types import SimpleNamespace
 
 from _settings_isolation import ensure_test_settings_file
+from _qt_cleanup import (
+    begin_widget_leak_check,
+    destroy_widget,
+    end_widget_leak_check,
+)
 
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -167,14 +172,19 @@ class TabMovedSyncTests(unittest.TestCase):
 
 
 class SetMovableWiringTests(unittest.TestCase):
+    def setUp(self):
+        begin_widget_leak_check()
+
+    def tearDown(self):
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
+
     def test_tab_widget_is_movable(self):
         """setMovable(True) 必须在 _build_ui 中被调用（运行时校验）。"""
         w = MainWindow()
         try:
             self.assertTrue(w.item_tabs.isMovable())
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
     def test_tab_close_button_shown(self):
         """每个标签右侧显示关闭 X 按钮（用户可拖入，也可点击 X 关闭单个标签页）。
@@ -189,8 +199,7 @@ class SetMovableWiringTests(unittest.TestCase):
             # 通过信号连接数间接验证：tabCloseRequested 有连接即可。
             self.assertTrue(w.item_tabs.receivers(w.item_tabs.tabCloseRequested) > 0)
         finally:
-            w.close()
-            w.deleteLater()
+            destroy_widget(w)
 
     def test_source_contains_setmovable_and_tab_moved_connection(self):
         """源码层面：_build_ui 显式启用 setMovable，并连接了 tabMoved 处理器。
@@ -242,9 +251,7 @@ class RealWindowTabOrderTests(unittest.TestCase):
             self.assertIs(w.items[0], moved)
             self.assertIs(w._current_item(), moved)
         finally:
-            w.close()
-            w.deleteLater()
-            _APP.processEvents()
+            destroy_widget(w)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 

@@ -24,6 +24,7 @@ from unittest import mock
 import numpy as np
 
 from _settings_isolation import ensure_test_settings_file
+from _qt_cleanup import destroy_widget
 
 ensure_test_settings_file()
 
@@ -642,8 +643,7 @@ class FrameSizeFormatTests(unittest.TestCase):
             p.height_spin.setValue(100)
             self.assertFalse(p.apply_btn.isEnabled())
         finally:
-            p.close()
-            p.deleteLater()
+            destroy_widget(p)
 
 
 class TabDirtyGuardTests(unittest.TestCase):

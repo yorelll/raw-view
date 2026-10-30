@@ -15,6 +15,7 @@ from unittest import mock
 import numpy as np
 
 from _settings_isolation import ensure_test_settings_file
+from _qt_cleanup import destroy_widget
 
 ensure_test_settings_file()
 
@@ -328,8 +329,7 @@ class YOnlyUIIntegrationTests(unittest.TestCase):
             p.bit_depth_combo.setCurrentText("16")
             self.assertEqual(p.get_values()["format_name"], "YOnly16")
         finally:
-            p.close()
-            p.deleteLater()
+            destroy_widget(p)
 
     def test_convert_batch_dialogs_source_panel_yuv_list(self):
         # 两个转换对话框的 YUV 下拉不再硬编码列表，而是直接引用

@@ -74,14 +74,65 @@ docs/review/
 ## 3. 测试执行分工（必守）
 
 - **实现 agent（Agent A 等）**：交付前**必须**跑全量测试（`python -m pytest tests/ -q`，必要时加 `python -m unittest discover -s tests -q`）并确认全绿，附真实数字。未通过不得交付。
-- **review agent（Agent B/E 等）**：**默认无需跑全量测试**——实现 agent 已保证全绿，重复全量只浪费时间（当前全量约 55–76 分钟）。
+- **review agent（Agent B/E 等）**：**默认无需跑全量测试**——实现 agent 已保证全绿，重复全量只浪费时间（当前全量约 45–105 秒，见 §4）。
   - review 只做**只读审查**；"只读"的定义是 **review 结束后代码区域与 review 前保持一致**，而不是过程中不能改。
   - 为了更有效地审查，review 允许在过程中**临时修改代码/测试**来验证假设（例如 mutation testing、反向注入、临时探针），但**必须还原**，并在报告中说明改了什么、如何还原、还原后是否逐字节一致。
   - review 可以只跑**定向**测试（`-k` 选择相关用例）或写独立脚本做功能验证；不跑全量。
   - 若 review 期间发现实现 agent 的改动让某些测试失败，只需报告失败项，不必自己跑完整矩阵。
 - 例外：review 若怀疑实现 agent 的测试结果不可信（例如怀疑测试被改弱），可**定向重跑**相关模块，但不需要全量。
 
-## 4. 常用命令（本地）
+## 4. GUI 测试 teardown 必须真正销毁 Qt 对象（必守）
+
+- **禁止**：`widget.deleteLater()` 后跟 `app.processEvents()`。
+  `QApplication.processEvents()` **不会消费** `DeferredDelete` 事件，Qt 对象永远不会被销毁。
+- **后果**：每个未销毁的 `MainWindow` 会留下约 144 个 widget 存活；而 `MainWindow.__init__`
+  里的 `_apply_theme()` → `app.setStyleSheet()` 会重新 polish **全进程所有存活 widget**，
+  因此测试耗时随数量 O(n²) 增长（实测：58 分钟 → 修复后 37 秒）。
+- **必须**：使用 `tests/_qt_cleanup.destroy_widget(widget)`，它内部用 `QTest.qWait(0)`
+  真正跑一轮事件循环（无需 sleep，实测比 `qWait(1)` 快约 7 倍且回收效果等价），
+  并额外 `sendPostedEvents(None, QEvent.DeferredDelete)` 双保险。
+- 若测试本身刻意不能调用 `close()`（例如要保留 `closeEvent` 未被重复触发的语义），
+  用 `destroy_widget(widget, close=False)`。
+
+正例：
+```python
+from _qt_cleanup import destroy_widget
+
+def tearDown(self):
+    destroy_widget(self.w)
+```
+
+反例（会被 L2 静态守卫与 L3 运行时守卫拦截）：
+```python
+def tearDown(self):
+    self.w.close()
+    self.w.deleteLater()
+    _APP.processEvents()   # ← 对象永不销毁
+```
+
+**三层守卫**（改测试时请一并维护）：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| L1 | 本节 + `tests/_qt_cleanup.py` 模块文档 | 规则说明与原理 |
+| L2 | `tests/test_qt_cleanup_guard.py` | 静态检查：**任何** `deleteLater()` 调用直接 fail（报 `文件:行号`）；`setUp` 覆盖基类却未 `super().setUp()` 也 fail |
+| L3 | `tests/conftest.py`（pytest）+ `_qt_cleanup` 的 `begin/end_widget_leak_check`（unittest） | 运行时检查：用例结束后存活 widget 增长超 `WIDGET_LEAK_TOLERANCE`（4）则 fail |
+
+- 本仓库已完成迁移的 teardown 共 **52 处**（`destroy_widget(...)` 调用点，覆盖 6 个测试文件）；
+  另有 3 处 `item_tabs` 由 `_destroy_stub_tabs()` 集中收割（原 55 处 `.deleteLater()` 调用已全部消除）。
+- L3 在 pytest 路径由 autouse fixture 自动生效；`unittest discover` 不加载 `conftest.py`，
+  因此 GUI 测试基类（如 `tests/test_ui_interactions.py` 的 `_StubWindowCleanupMixin`、
+  `tests/test_params_memory_pin.py` 的 `_IsolatedWindowTest`）在 `setUp` 里调
+  `begin_widget_leak_check()`、`tearDown` 里调 `end_widget_leak_check(...)`。
+- **硬性要求：子类覆盖 `setUp` 时必须调用 `super().setUp()`**（首行），否则该类的 L3
+  守卫不会 arm。未 arm 时 `end_widget_leak_check` 会 **fail-loud**（历史上 CI 的
+  unittest 路径正因漏掉这行而完全没有 L3 保护）；L2 静态检查也会同时拦截。
+- **新增 GUI 测试时**：继承上述基类（或自行配对 `begin/end_widget_leak_check`），
+  否则 CI 的 unittest 路径会失去 L3 保护。
+- 本机若同时跑多个 pytest 进程，`qt_material` 会争用 `~/.qt_material` 导致随机
+  `FileNotFoundError`；**跑全量请串行**。
+
+## 5. 常用命令（本地）
 
 ```bash
 # 全量测试（实现 agent 必跑；review agent 默认不跑）
@@ -98,7 +149,7 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view \
   --add-data "assets;assets" raw_view/__main__.py
 ```
 
-## 5. 仓库要点
+## 6. 仓库要点
 
 - **技术栈**：Python 3.12 + PyQt5 5.15 + numpy + opencv-python + qt-material/qtawesome，PyInstaller 打包。
 - **入口**：`python -m raw_view`（GUI）/ `view` / `convert` / `batch`（CLI）。

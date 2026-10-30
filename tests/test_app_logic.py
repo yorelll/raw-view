@@ -35,6 +35,7 @@ import numpy as np
 # unittest discovery does not load pytest's conftest.py.  Establish its owned
 # test INI before any raw_view import; under pytest this reuses conftest's path.
 from _settings_isolation import ensure_test_settings_file  # noqa: E402
+from _qt_cleanup import destroy_widget  # noqa: E402
 
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -336,9 +337,7 @@ class PersistentPresetSearchPathTests(unittest.TestCase):
                 # Usage was persisted because this was a real selection signal.
                 self.assertEqual(isolated.preset_usage["test"]["count"], 1)
             finally:
-                w.close()
-                w.deleteLater()
-                _APP.processEvents()
+                destroy_widget(w)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -501,9 +500,7 @@ class LegacyPresetCompatibilityTests(unittest.TestCase):
             self.assertEqual(settings.sensor_presets[0].format_name, "RAW8")
             self.assertEqual(settings.sensor_presets[0].width, 222)
         finally:
-            dlg.close()
-            dlg.deleteLater()
-            _APP.processEvents()
+            destroy_widget(dlg)
 
     def test_manager_unknown_format_round_trips_after_width_rename_and_save(self):
         settings = _PresetSettings([
@@ -524,9 +521,7 @@ class LegacyPresetCompatibilityTests(unittest.TestCase):
             restored = SensorPreset.from_dict(payload)
             self.assertEqual(restored.format_name, "VendorRAW")
         finally:
-            dlg.close()
-            dlg.deleteLater()
-            _APP.processEvents()
+            destroy_widget(dlg)
 
 
 class PresetManagerFormatFilterTests(unittest.TestCase):
@@ -539,9 +534,7 @@ class PresetManagerFormatFilterTests(unittest.TestCase):
         self.dlg = PresetManagerDialog(self.settings)
 
     def tearDown(self):
-        self.dlg.close()
-        self.dlg.deleteLater()
-        _APP.processEvents()
+        destroy_widget(self.dlg)
 
     def _names(self):
         return [self.dlg.list_widget.item(i).text() for i in range(self.dlg.list_widget.count())]
@@ -645,9 +638,7 @@ class MainWindowPresetWorkflowTests(unittest.TestCase):
         self.w._current_item = lambda: None
 
     def tearDown(self):
-        self.w.close()
-        self.w.deleteLater()
-        _APP.processEvents()
+        destroy_widget(self.w)
 
     def test_user_selection_fills_values_records_usage_and_never_applies(self):
         index = self.w.panel.preset_combo.findData("raw10test")
@@ -746,9 +737,7 @@ class MainWindowLegacyPresetRefreshTests(unittest.TestCase):
                 w._save_panel_to_item(item)
                 self.assertEqual(item.options.format_name, "RAW8")
             finally:
-                w.close()
-                w.deleteLater()
-                _APP.processEvents()
+                destroy_widget(w)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -840,9 +829,7 @@ class InitialDecodeErrorTests(unittest.TestCase):
                 w._open_item(path, decode=True)
                 self.assertEqual(captured, [((), {"show_error": False})])
             finally:
-                w.close()
-                w.deleteLater()
-                _APP.processEvents()
+                destroy_widget(w)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1687,9 +1674,7 @@ class OpenItemGuardTests(unittest.TestCase):
             self.assertEqual(len(w.items), 1)
             self.assertEqual(w.items[0].options.image_type, "RAW")
         finally:
-            w.close()
-            w.deleteLater()
-            _APP.processEvents()
+            destroy_widget(w)
 
     def test_open_item_auto_rejects_unknown_extension(self):
         """auto 来源（扫描/拖放）：带未知后缀（.exe/.txt）被拒，不建标签。"""
@@ -1700,9 +1685,7 @@ class OpenItemGuardTests(unittest.TestCase):
                     w._open_item(path, decode=False, source="auto")
                     self.assertEqual(len(w.items), 0)
                 finally:
-                    w.close()
-                    w.deleteLater()
-                    _APP.processEvents()
+                    destroy_widget(w)
 
     def test_open_item_explicit_accepts_unknown_data_extension(self):
         """explicit 来源（打开对话框/启动参数/最近文件）：.dat 等未知后缀按 RAW 打开。"""
@@ -1712,9 +1695,7 @@ class OpenItemGuardTests(unittest.TestCase):
             self.assertEqual(len(w.items), 1)
             self.assertEqual(w.items[0].options.image_type, "RAW")
         finally:
-            w.close()
-            w.deleteLater()
-            _APP.processEvents()
+            destroy_widget(w)
 
     def test_open_item_explicit_rejects_dangerous_extension_with_feedback(self):
         """explicit 来源：.exe 等可执行后缀被拒，且给出状态栏/GUI 反馈而非静默。"""
@@ -1729,9 +1710,7 @@ class OpenItemGuardTests(unittest.TestCase):
                     self.assertTrue(status_msgs, "被拒原因应写入状态栏反馈")
                     self.assertIn("可执行文件", status_msgs[0])
                 finally:
-                    w.close()
-                    w.deleteLater()
-                    _APP.processEvents()
+                    destroy_widget(w)
 
     def test_is_dangerous_extension_set(self):
         for ext in (".exe", ".dll", ".sys", ".bat", ".cmd", ".com", ".scr",

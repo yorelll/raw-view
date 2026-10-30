@@ -1,8 +1,12 @@
-"""Pytest-wide isolation for real-user QSettings.
+"""Pytest-wide isolation for real-user QSettings, plus the widget-leak guard.
 
 Every test process gets an INI-backed temporary settings file before raw_view is
 imported.  AppSettings honours this test-only environment path, so GUI tests
 cannot mutate HKCU\\Software\\yorelll\\raw-view (including sensor presets).
+
+The second half of this module is the runtime half of the teardown rule (see
+``_qt_cleanup``): a test that leaves widgets alive is failed at teardown rather
+than silently making the rest of the session quadratically slower.
 """
 
 from __future__ import annotations
@@ -25,3 +29,55 @@ atexit.register(shutil.rmtree, _SETTINGS_DIR, ignore_errors=True)
 from _settings_isolation import adopt_pytest_settings_file  # noqa: E402
 
 adopt_pytest_settings_file(_SETTINGS_FILE)
+
+
+# ---------------------------------------------------------------------------
+# L3: runtime widget-leak guard (pytest path)
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _assert_no_widget_leak():
+    """Fail a test whose live Qt widget count grew beyond tolerance.
+
+    The check runs after the test function *and* its fixtures/tearDown have
+    finished, so a correctly cleaned-up GUI test measures 0 growth.  Tests that
+    legitimately create widgets without destroying them are the ones this guard
+    is meant to catch (each leaked ``MainWindow`` is ~144 widgets and makes the
+    next ``setStyleSheet()`` re-polish all of them).
+
+    Skipped automatically when Qt is not initialised, so non-GUI tests and
+    platforms without PyQt5 pay nothing.
+    """
+    try:
+        from _qt_cleanup import (
+            WIDGET_LEAK_TOLERANCE,  # noqa: F401  (documents the bound)
+            live_widget_count,
+            widget_leak_growth,
+            widget_leak_message,
+        )
+    except Exception:  # pragma: no cover - PyQt5 unavailable in this env
+        yield
+        return
+
+    try:
+        before = live_widget_count()
+    except Exception:  # pragma: no cover - defensive, Qt torn down mid-run
+        yield
+        return
+
+    yield
+
+    try:
+        after = live_widget_count()
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    if widget_leak_growth(before, after) > 0:
+        pytest.fail(
+            widget_leak_message("widget leak", before, after, after - before),
+            pytrace=False,
+        )
+
