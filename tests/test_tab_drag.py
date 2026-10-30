@@ -19,7 +19,10 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from _settings_isolation import ensure_test_settings_file
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
 from _qt_cleanup import (
     begin_widget_leak_check,
     destroy_widget,
@@ -27,6 +30,9 @@ from _qt_cleanup import (
 )
 
 ensure_test_settings_file()
+# Per-process qt_material icon tree (concurrent pytest processes otherwise
+# delete each other's generated SVGs).
+isolated_qt_material_resources()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtWidgets import QApplication, QLabel, QTabWidget  # noqa: E402

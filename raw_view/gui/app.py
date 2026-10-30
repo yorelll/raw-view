@@ -543,6 +543,35 @@ class MainWindow(QMainWindow):
         dot = self._STATE_DOT_COLORS.get(kind, "#9E9E9E")
         self.state_status.setText(f'<span style="color:{dot};">&#9679;</span> {text}')
 
+    def _set_item_state(self, item: ViewerItem | None, text: str, kind: str = "idle") -> None:
+        """Record a decode status on *item* and show it only if it is current.
+
+        Every tab owns its own status line, so switching tabs can never show a
+        neighbour's text (v0.5.2 issue 3) and a background batch decode cannot
+        overwrite what the user is looking at (issue 2).
+        """
+        if item is None:
+            self._set_state(text, kind)
+            return
+        # ``MainWindow.__new__`` test stubs never run __init__, and touching an
+        # unset Qt attribute raises RuntimeError rather than AttributeError, so
+        # probe the instance dict like the rest of this class does.
+        items = self.__dict__.get("items")
+        if items is not None and item not in items:
+            # The item was closed while its decode was running: keep the label
+            # untouched, there is no tab left to explain.
+            return
+        item.status_text = text
+        item.status_kind = kind
+        try:
+            visible = item is self._current_item()
+        except RuntimeError:
+            # A ``MainWindow.__new__`` stub has no QTabWidget at all; treat the
+            # decoded item as the visible one so the status still surfaces.
+            visible = True
+        if visible:
+            self._set_state(text, kind)
+
     def _build_menus(self) -> None:
         menu = self.menuBar()
 
@@ -1139,12 +1168,7 @@ class MainWindow(QMainWindow):
                 logger.info("Drop aborted by user (%d files)", len(paths))
                 return
         logger.info("Drop: %d file(s) resolved from drag", len(paths))
-        for path in paths:
-            self._open_item(path, decode=False)
-        if paths:
-            # First automatic decode uses defaults; a size/format mismatch must
-            # not interrupt the user before they can enter the real parameters.
-            self.decode_current(show_error=False)
+        self._open_paths(paths, source="auto")
 
     # ── File open ─────────────────────────────────────────────────────
 
@@ -1158,10 +1182,91 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         logger.info("Opening %d file(s)", len(paths))
+        self._open_paths(paths, source="explicit")
+
+    def _open_paths(self, paths: list[str], source: str = "auto") -> None:
+        """Open several files and decode **each** of them (v0.5.2 issue 2).
+
+        Previously a multi-file open built one tab per path but decoded only
+        the last one, so every other tab stayed blank while showing the last
+        file's "Restored remembered parameters (...)" text.  Now every opened
+        item is queued for its own silent decode; a failure only marks that tab
+        (status text ``Decode failed``) and never blocks the rest.
+
+        The queue is event-driven: :meth:`_advance_open_queue` is called from
+        the decode success/error slots, never from a timer or a sleep.  Only
+        one decode runs at a time because there is a single worker/thread.
+        """
+        opened: list[ViewerItem] = []
         for path in paths:
-            self._open_item(path, decode=False, source="explicit")
-        if paths:
+            before = len(self.items)
+            self._open_item(path, decode=False, source=source)
+            if len(self.items) > before:
+                opened.append(self.items[-1])
+        if not opened:
+            return
+        if len(opened) == 1:
+            # Single-file open keeps the historical behaviour exactly.
             self.decode_current(show_error=False)
+            return
+        self._open_decode_pending = opened[1:]
+        self._open_decode_in_flight = opened[0]
+        self._open_decode_total = len(opened)
+        # The first file decodes through the normal path (visible tab).
+        self.item_tabs.setCurrentIndex(self.items.index(opened[0]))
+        self.decode_current(show_error=False)
+
+    def _advance_open_queue(self, item: ViewerItem | None, succeeded: bool) -> None:
+        """Start the next queued file after *item* finished (success or not).
+
+        Called from the decode success/error slots and from every preflight
+        early return, so a single unreadable file cannot stall the batch.  A
+        standard-image decode is synchronous, hence the drain loop instead of
+        plain recursion: a folder of hundreds of PNGs must not grow the Python
+        stack.  The re-entrant call made by that synchronous decode returns
+        immediately (``_open_queue_draining``) and the loop here continues.
+        """
+        pending = self.__dict__.get("_open_decode_pending")
+        in_flight = self.__dict__.get("_open_decode_in_flight")
+        if not pending and in_flight is None:
+            return
+        if self.__dict__.get("_open_queue_draining"):
+            return
+        if item is not None and in_flight is not item:
+            # An unrelated (user-initiated) decode finished mid-batch: it must
+            # not advance the open queue, whose own step is still in flight.
+            return
+        if not pending:
+            # The file that just finished was the last one in the batch.
+            self._finish_open_queue()
+            return
+        self._open_queue_draining = True
+        try:
+            self._open_decode_in_flight = None
+            while True:
+                # Drop queued items the user closed while they were waiting.
+                pending[:] = [queued for queued in pending if queued in self.items]
+                if not pending:
+                    self._finish_open_queue()
+                    return
+                nxt = pending.pop(0)
+                self._open_decode_in_flight = nxt
+                self._decode_item(nxt, show_error=False)
+                # An async decode reports back through its signal; only a
+                # synchronous one (standard image) is already finished here.
+                if nxt.decoding:
+                    return
+        finally:
+            self._open_queue_draining = False
+
+    def _finish_open_queue(self) -> None:
+        """Clear the batch-open bookkeeping once every file has been decoded."""
+        total = self.__dict__.get("_open_decode_total", 0)
+        self._open_decode_pending = []
+        self._open_decode_in_flight = None
+        self._open_decode_total = 0
+        if total > 1:
+            logger.debug("Batch open finished: %d file(s) decoded", total)
 
     def _open_item(self, path: str, decode: bool, source: str = "auto") -> None:
         """Open one file into a new tab.
@@ -1330,8 +1435,18 @@ class MainWindow(QMainWindow):
         self._active_item_index = index
         self._active_item_ref = self.items[index] if 0 <= index < len(self.items) else None
         if 0 <= index < len(self.items):
-            self._load_item_to_panel(self.items[index])
-            self._sync_status_from_item(self.items[index])
+            current = self.items[index]
+            self._load_item_to_panel(current)
+            self._sync_status_from_item(current)
+            # The status-bar state label belongs to the item, not to whatever
+            # finished last (v0.5.2 issue 3): switching to a queued/failed tab
+            # must show that tab's own text, never a neighbour's "Restored ...".
+            self._set_state(
+                current.status_text
+                if current.status_text is not None
+                else "Not decoded yet",
+                current.status_kind if current.status_text is not None else "idle",
+            )
         self.panel.set_enabled(index >= 0)
         # set_enabled(True) enables all controls blindly, so re-sync
         # type-specific control states (e.g., disable bayer for YUV) and
@@ -1383,6 +1498,15 @@ class MainWindow(QMainWindow):
         # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
         # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
         self._cancel_decode_for(closing)
+        # Closing an item a batch-open queue is waiting for must not stall the
+        # queue: drop it from the pending list and, if it was the in-flight one,
+        # advance now (its late signals were just disconnected above).
+        pending = self.__dict__.get("_open_decode_pending")
+        if pending:
+            pending[:] = [queued for queued in pending if queued is not closing]
+            if self.__dict__.get("_open_decode_in_flight") is closing:
+                self._open_decode_in_flight = None
+                self._advance_open_queue(None, False)
         if not self.items:
             self._active_item_index = -1
             self._active_item_ref = None
@@ -2039,6 +2163,23 @@ class MainWindow(QMainWindow):
         item = self._current_item()
         if item is None:
             return
+        self._decode_item(
+            item, warn_mismatch=warn_mismatch, show_error=show_error,
+            user_apply=user_apply,
+        )
+
+    def _decode_item(
+        self, item: ViewerItem, *, warn_mismatch: bool = False,
+        show_error: bool = True, user_apply: bool = False,
+    ) -> None:
+        """Decode one specific *item* (which need not be the visible tab).
+
+        Split out of :meth:`decode_current` so the multi-file open queue can
+        decode background tabs without switching the user's tab (v0.5.2 issue
+        2).  The panel is only consulted when *item* is the visible tab; for a
+        background item its own ``options`` are the sole source of truth, so a
+        queue step can never inherit the panel's (or the pin's) values.
+        """
         path = item.options.file_path
         if not path:
             return
@@ -2054,6 +2195,7 @@ class MainWindow(QMainWindow):
         # return (unsupported format, unreadable size, frame-too-large, declined
         # size-mismatch prompt, read failure, worker error) leaves the item's own
         # parameters completely untouched -- no per-branch rollback needed.
+        is_visible = item is self._current_item()
         if user_apply or warn_mismatch:
             # Explicit Apply: the panel is the source of truth (this is also what
             # the pin uses), but it is only a *candidate* until success.
@@ -2065,11 +2207,20 @@ class MainWindow(QMainWindow):
             # own options and must never copy the pinned values into it (that
             # would silently overwrite the file's parameters on plain open).
             opts = item.options
-        else:
+        elif is_visible:
             # Frame navigation / silent decodes keep the previous semantics:
             # the panel is mirrored into the item so the two stay in sync.
             self._save_panel_to_item(item)
             opts = item.options
+        else:
+            # Background queue step: never consult or write the shared panel.
+            opts = item.options
+
+        item.decoding = True
+        item.status_text = "Decoding..."
+        item.status_kind = "busy"
+        if is_visible:
+            self._set_state("Decoding...", "busy")
 
         if not is_supported_preset_format_for_type(opts.image_type, opts.format_name):
             message = (
@@ -2078,8 +2229,8 @@ class MainWindow(QMainWindow):
             )
             logger.warning("Decode rejected: %s", message)
             self._show_decode_error_if_requested(show_error, "Decode Failed", message)
-            self._set_state("Decode failed: unsupported format", "error")
-            self._finish_batch_step_on_preflight_failure()
+            self._set_item_state(item, "Decode failed: unsupported format", "error")
+            self._finish_batch_step_on_preflight_failure(item)
             return
 
         logger.debug(
@@ -2115,8 +2266,8 @@ class MainWindow(QMainWindow):
             self._show_decode_error_if_requested(
                 show_error, "Read Error", f"Failed to read file size: {path}"
             )
-            self._set_state("Decode failed", "error")
-            self._finish_batch_step_on_preflight_failure()
+            self._set_item_state(item, "Decode failed", "error")
+            self._finish_batch_step_on_preflight_failure(item)
             return
 
         # 单帧内存上限（512MB）——GUI 与 CLI/batch 统一保护，防超大宽高 OOM
@@ -2130,8 +2281,8 @@ class MainWindow(QMainWindow):
                     "Frame Too Large",
                     f"{exc}\n\n请降低宽度/高度，或换用更低位深/非 32-bit 格式。",
                 )
-                self._set_state("Decode rejected: frame too large", "error")
-                self._finish_batch_step_on_preflight_failure()
+                self._set_item_state(item, "Decode rejected: frame too large", "error")
+                self._finish_batch_step_on_preflight_failure(item)
                 return
 
         # Only an explicit Apply pops the size-mismatch dialog; open/drop and
@@ -2172,7 +2323,7 @@ class MainWindow(QMainWindow):
                 user_apply=user_apply, committed_options=opts,
                 committed_frame=candidate_frame,
             )
-            self._set_state("Decoded (cached)", "ok")
+            self._set_item_state(item, "Decoded (cached)", "ok")
             return
 
         read_len = frame_size if frame_size > 0 else actual
@@ -2183,8 +2334,8 @@ class MainWindow(QMainWindow):
                 "Read Error",
                 f"Failed to read {read_len} bytes at offset {effective_offset}: {path}",
             )
-            self._set_state("Decode failed", "error")
-            self._finish_batch_step_on_preflight_failure()
+            self._set_item_state(item, "Decode failed", "error")
+            self._finish_batch_step_on_preflight_failure(item)
             return
 
         # RAW/YUV — async. The exact key representing these bytes is passed to
@@ -2200,12 +2351,17 @@ class MainWindow(QMainWindow):
         if show_error:
             QMessageBox.critical(self, title, message)
 
-    def _finish_batch_step_on_preflight_failure(self) -> None:
-        """Advance an apply-to-all batch when a preflight check failed.
+    def _finish_batch_step_on_preflight_failure(
+        self, item: ViewerItem | None = None,
+    ) -> None:
+        """Mark a preflight-failed step done and let both queues advance.
 
         Preflight failures (unsupported format, unreadable size, frame too
-        large) never reach the async error slot, so the serial queue has to be
-        advanced here; otherwise one bad item would stall the whole batch.
+        large, unreadable frame bytes) never reach the async error slot, so the
+        serial queues have to be advanced here.  *Both* of them: apply-to-all
+        **and** the multi-file open queue.  Missing the latter stalled the open
+        batch permanently — the failing tab kept ``decoding`` forever and every
+        file behind it never decoded (v0.5.2 G-review P1).
         """
         self._pending_commit_options = None
         self._pending_commit_frame = None
@@ -2213,6 +2369,14 @@ class MainWindow(QMainWindow):
         current = self.__dict__.get("_apply_all_current")
         if current is not None:
             self._advance_apply_all(current, False)
+        if item is not None and self.__dict__.get("_open_decode_in_flight") is item:
+            # Clearing the flag is what matters: without it the failed tab would
+            # show "Decoding..." forever.  Clearing *before* advancing is for
+            # readability only -- ``_advance_open_queue`` resets
+            # ``_open_decode_in_flight`` itself and looks at the *next* item's
+            # ``decoding`` flag, so the order is not behaviour-critical.
+            item.decoding = False
+            self._advance_open_queue(item, False)
 
     def _decode_standard_image(
         self, item: ViewerItem, opts: DecodeOptions, show_error: bool = True,
@@ -2237,8 +2401,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.exception("Failed to decode standard image: %s", opts.file_path)
             self._show_decode_error_if_requested(show_error, "Decode Failed", str(exc))
-            self._set_state("Decode failed", "error")
-            self._finish_batch_step_on_preflight_failure()
+            self._set_item_state(item, "Decode failed", "error")
+            item.decoding = False
+            self._finish_batch_step_on_preflight_failure(item)
         finally:
             # A standard-image decode is synchronous and takes over the
             # display; an in-flight async result must not clobber it later.
@@ -2334,7 +2499,8 @@ class MainWindow(QMainWindow):
         self._worker.error.connect(lambda *_: thread.quit())
         self._thread.finished.connect(thread.deleteLater)
 
-        self._set_state("Decoding...", "busy")
+        if item is self._current_item():
+            self._set_state("Decoding...", "busy")
         self._thread.start()
 
     def _invalidate_pending_decode(self) -> None:
@@ -2460,10 +2626,22 @@ class MainWindow(QMainWindow):
             return False
         if generation != self._decode_generation:
             return False
-        return id(item) == id(self._pending_decode_item)
+        pending = self.__dict__.get("_pending_decode_item")
+        if pending is not None and self.__dict__.get("_open_decode_in_flight") is pending:
+            # A batch-open step decodes a background tab on purpose; its own
+            # item owns the result even though it is not the visible tab.
+            return True
+        return id(item) == id(pending)
+
+    def _decode_result_target(self) -> ViewerItem | None:
+        """The item a worker result belongs to (visible tab or batch step)."""
+        pending = self.__dict__.get("_pending_decode_item")
+        if pending is not None and self.__dict__.get("_open_decode_in_flight") is pending:
+            return pending
+        return self._current_item()
 
     def _on_decode_finished(self, generation: int, result) -> None:
-        item = self._current_item()
+        item = self._decode_result_target()
         if not self._should_apply_decode(generation, item):
             logger.debug(
                 "Discarding stale decode result (gen=%d, current=%d)",
@@ -2549,34 +2727,38 @@ class MainWindow(QMainWindow):
         # （缓存命中与后台线程结果都汇聚到这里；不能放在 _save_panel_to_item，
         #   那会被 tab 切换/预设选择误触发）。
         self._set_tab_dirty(item, False)
+        item.decoding = False
         item.view.set_pixmap(QPixmap.fromImage(qimg))
         item.view.fit_image()
-        path = item.options.file_path
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            size = 0
-        self.file_status.setText(f"File: {os.path.basename(path)} ({size:,} bytes)")
-        self.file_status.setToolTip(path)
-        frame_size = self._get_frame_size(item.options)
-        if frame_size > 0:
-            self.image_status.setText(
-                f"Image: {width}x{height} ({frame_size:,} bytes) | Format: {format_name}"
-            )
-        else:
-            self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
-        if restored_msg is not None:
-            self._set_state(restored_msg, "ok")
-        else:
-            self._set_state("Decoded", "ok")
-        self._update_frame_display(item)
+        self._set_item_state(
+            item, restored_msg if restored_msg is not None else "Decoded", "ok",
+        )
+        # Only the visible tab owns the shared status bar (v0.5.2 issue 2/3):
+        # a background queue step must not overwrite what the user is reading.
+        if item is self._current_item():
+            path = item.options.file_path
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            self.file_status.setText(f"File: {os.path.basename(path)} ({size:,} bytes)")
+            self.file_status.setToolTip(path)
+            frame_size = self._get_frame_size(item.options)
+            if frame_size > 0:
+                self.image_status.setText(
+                    f"Image: {width}x{height} ({frame_size:,} bytes) | Format: {format_name}"
+                )
+            else:
+                self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
+            self._update_frame_display(item)
         self._refresh_forget_action()
         current = self.__dict__.get("_apply_all_current")
         if current is not None:
             self._advance_apply_all(current, True)
+        self._advance_open_queue(item, True)
 
     def _on_decode_error(self, generation: int, message: str) -> None:
-        item = self._current_item()
+        item = self._decode_result_target()
         if not self._should_apply_decode(generation, item):
             logger.debug(
                 "Discarding stale decode error (gen=%d, current=%d)",
@@ -2599,15 +2781,18 @@ class MainWindow(QMainWindow):
             # name) but say so explicitly; never pop a modal for this.
             item.remembered_params_pending = False
             item.remembered_params_failed = True
-            self._set_state(
-                "Restored remembered parameters, but decoding failed", "error",
+            self._set_item_state(
+                item, "Restored remembered parameters, but decoding failed", "error",
             )
         else:
-            self._set_state("Decode failed", "error")
+            self._set_item_state(item, "Decode failed", "error")
+        if item is not None:
+            item.decoding = False
         self._refresh_pin_state()
         current = self.__dict__.get("_apply_all_current")
         if current is not None:
             self._advance_apply_all(current, False)
+        self._advance_open_queue(item, False)
 
     # ── Save ─────────────────────────────────────────────────────────
 
@@ -3073,8 +3258,6 @@ def run(files: list[str] | None = None) -> None:
     w.resize(1200, 700)
     w.show()
     if files:
-        for path in files:
-            w._open_item(path, decode=False, source="explicit")
-        if files:
-            w.decode_current(show_error=False)
+        # Every startup file decodes, not just the last one (v0.5.2 issue 2).
+        w._open_paths(files, source="explicit")
     app.exec_()

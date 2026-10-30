@@ -9,9 +9,15 @@ from unittest import mock
 
 import numpy as np
 
-from _settings_isolation import ensure_test_settings_file
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
 
 ensure_test_settings_file()
+# Per-process qt_material icon tree (concurrent pytest processes otherwise
+# delete each other's generated SVGs).
+isolated_qt_material_resources()
 
 from raw_view.converter import (
     _imwrite_extension,

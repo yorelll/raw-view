@@ -34,10 +34,16 @@ import numpy as np
 
 # unittest discovery does not load pytest's conftest.py.  Establish its owned
 # test INI before any raw_view import; under pytest this reuses conftest's path.
-from _settings_isolation import ensure_test_settings_file  # noqa: E402
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
 from _qt_cleanup import destroy_widget  # noqa: E402
 
 ensure_test_settings_file()
+# Per-process qt_material icon tree (concurrent pytest processes otherwise
+# delete each other's generated SVGs).
+isolated_qt_material_resources()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QSettings  # noqa: E402

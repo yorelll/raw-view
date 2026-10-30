@@ -23,6 +23,7 @@ dist/
 .claude/
 
 raw_pic/
+ref/
 
 # 本地代码审查 / 总结 / 改进文档（本地维护，不上传到远程仓库）
 docs/review/

@@ -5,9 +5,15 @@ import unittest
 import unittest.mock as mock
 from pathlib import PurePosixPath
 
-from _settings_isolation import ensure_test_settings_file
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
 
 ensure_test_settings_file()
+# Per-process qt_material icon tree (concurrent pytest processes otherwise
+# delete each other's generated SVGs).
+isolated_qt_material_resources()
 
 from raw_view.models import (
     THEME_PALETTES,

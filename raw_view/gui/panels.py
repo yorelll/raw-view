@@ -247,7 +247,23 @@ class ControlPanel(QWidget):
         self.preset_filter_btn.setAutoRaise(True)
         self.preset_filter_btn.setIcon(_qta_icon("fa5s.filter"))
         self.preset_filter_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.preset_filter_btn.setIconSize(QSize(16, 16))
         self.preset_filter_btn.setFixedSize(30, 30)
+        # qt-material's global ``QToolButton`` rule adds ``margin: 3px``,
+        # ``padding: 3px`` AND ``border-left/right: 12px solid`` — 36px of
+        # horizontal chrome inside a 30px button (v0.5.2 issue 1).  The icon's
+        # content rect went negative and was clipped away entirely; only the
+        # InstantPopup menu indicator survived, which is why the button looked
+        # like a lone triangle in the lower area.  An ID-scoped rule resets the
+        # chrome (the pin button does the same, which is why only the filter
+        # button was broken) and keeps 2px of symmetric room for the indicator.
+        self.preset_filter_btn.setStyleSheet(
+            "QToolButton#presetFilterButton { padding: 0px 2px 0px 0px;"
+            " border: 1px solid transparent; border-radius: 6px; }"
+            "QToolButton#presetFilterButton:hover { background: rgba(74,144,217,0.18);"
+            " border: 1px solid rgba(74,144,217,0.55); }"
+            "QToolButton#presetFilterButton:pressed { background: rgba(74,144,217,0.30); }"
+        )
         self._preset_filter_menu = QMenu(self.preset_filter_btn)
         self._preset_filter_menu.setObjectName("presetFilterMenu")
         self._preset_filter_group = QActionGroup(self._preset_filter_menu)

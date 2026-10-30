@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.5.1** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.5.2** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -19,6 +19,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - 支持主界面拖拽打开文件、拖拽文件夹自动扫描 RAW/YUV 文件、拖入时高亮窗口边框视觉反馈
 - 支持转换输入拖拽
 - 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item；**点住标签名称可左右拖动排序**
+- **批量打开逐个解码**：一次打开/拖入多个文件（含拖入文件夹、CLI 启动多文件）时，**每个文件都会用自己的本体参数静默解码一次**，不再只有最后一个显示图像。解码由单 worker 串行排队、事件驱动推进：界面不阻塞，可随时切换/关闭标签（关闭排队的文件会被安全跳过，队列继续），单个文件失败只把该标签标为 `Decode failed`，不会弹窗也不影响其它文件。状态栏与每个标签各自的状态文案绑定，切到未解码的文件显示 `Not decoded yet`，绝不会残留上一个文件的 `Restored remembered parameters (...)`
 - 支持 Recent Files 最近文件列表
 - Convert 输出支持默认 `convert_out` 目录（可在 Settings 调整）与手动更改
 - 内置 Help：格式排列、Packed bit 规则与示例
@@ -249,7 +250,7 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 为了避免每次打开新 sensor 的 raw 文件都要重复填写一整套参数，主面板顶部提供 **Preset** 行：
 
 - **Preset 下拉框**：只用于选择，不能输入搜索。选择后会把所有字段写入面板；请再点击 **Apply** 才会渲染当前文件。列表按**最近使用优先**排序，未使用过的名称按 A→Z / 拼音排序。
-- **筛选按钮（漏斗图标）**：点击后在 `All`、`RAW`、`YUV`、`Standard images` 四类间切换浏览范围；tooltip 显示当前类型。若当前已选 preset 不在新范围内，下拉框显示 `(Current preset hidden by filter)`，面板已填字段保持不变，也不会静默加载其它 preset。
+- **筛选按钮（漏斗图标）**：点击后在 `All`、`RAW`、`YUV`、`Standard images` 四类间切换浏览范围；tooltip 显示当前类型。若当前已选 preset 不在新范围内，下拉框显示 `(Current preset hidden by filter)`，面板已填字段保持不变，也不会静默加载其它 preset。按钮为 30×30 方框：漏斗图标与右下角的下拉三角都完整显示，内容重心相对按钮中心偏差 ≤1.5px（浅色/深色主题均验证）。
 - **右键菜单**：在左侧控制面板空白/非文本控件上右键，可选择 **Save current as preset…**、**Manage presets…**、**Pin parameters**、**Apply these parameters to all items**、**Forget remembered parameters for this file**；文本框、数值框与下拉框保留各自的原生右键菜单。
 - **管理对话框**：独立保留 **Preset type** 行与搜索框；列表按名称 A→Z（中文按拼音）排序。名称可直接输入搜索，也支持仅尖括号内的结构化条件：`<type:VALUE format:VALUE>名称`。`type`/`t`、`format`/`f` 是唯一支持的键，条件之间用**空格**分隔（旧写法 `+` 仍兼容），条件与尖括号外的名称 AND。例如 `<t:yuv f:yuyv>`、`<type:raw format:raw10 packed>name`、`< t : yuv   f : raw10packed > NAME`。大小写不敏感，格式比较忽略空白；裸 `type:yuv` 只是普通名称搜索。语法错误、未知键或未知 type 显示无结果，避免意外扩大范围。
 
@@ -382,7 +383,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.5.1` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.5.2` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

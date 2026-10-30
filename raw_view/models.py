@@ -379,7 +379,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -605,7 +605,7 @@ class ImportResult:
         return self.added + self.overwritten
 
 
-@dataclass
+@dataclass(eq=False)
 class ViewerItem:
     """State container for one opened file tab and its decode/view configuration.
 
@@ -615,6 +615,13 @@ class ViewerItem:
     used by the per-file parameter memory, so merely editing the panel or
     picking a preset (which only copies values into ``options``) can never be
     mistaken for "the user applied these parameters".
+
+    ``eq=False`` is deliberate: the default dataclass ``__eq__`` compares every
+    field, and ``current_display`` holds a numpy array.  ``item in items`` /
+    ``items.index(item)`` would then evaluate ``array == array`` and raise
+    ``ValueError: truth value of an array with more than one element is
+    ambiguous`` as soon as two items had decoded pixels (v0.5.2 issue 4).
+    Identity is the only meaningful equality for a tab's state container.
     """
 
     options: DecodeOptions = field(default_factory=DecodeOptions)
@@ -629,6 +636,14 @@ class ViewerItem:
     # the automatic decode result can report "restored ..." in the status bar.
     remembered_params_pending: bool = False
     remembered_params_failed: bool = False
+    # Status-bar state owned by this item, so switching tabs can never show a
+    # neighbour's "Restored remembered parameters (other.raw)" text (v0.5.2
+    # issue 3).  ``None`` means "not decoded yet" → neutral wording.
+    status_text: str | None = None
+    status_kind: str = "idle"
+    # True while a decode for this item is queued/running, so the tab can say
+    # "Decoding..." instead of pretending nothing happened.
+    decoding: bool = False
 
 
 # ── Settings ─────────────────────────────────────────────────────────────

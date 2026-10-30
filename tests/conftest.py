@@ -26,9 +26,19 @@ atexit.register(shutil.rmtree, _SETTINGS_DIR, ignore_errors=True)
 # This module is loaded before pytest imports test modules.  Make its owned
 # path available to unittest-style test modules too, without creating a second
 # resource in the pytest process.
-from _settings_isolation import adopt_pytest_settings_file  # noqa: E402
+from _settings_isolation import (  # noqa: E402
+    adopt_pytest_settings_file,
+    isolated_qt_material_resources,
+)
 
 adopt_pytest_settings_file(_SETTINGS_FILE)
+# qt-material regenerates its SVG icon tree (rmtree + makedirs) into the shared
+# ~/.qt_material on every apply_stylesheet().  Concurrent pytest processes on one
+# machine thereby delete each other's files and fail with a random
+# FileNotFoundError; give each process a private resource tree instead.  The
+# directory is created now and the module patch is (re)applied by the autouse
+# fixture below, i.e. only once PyQt has been imported by the test module.
+isolated_qt_material_resources()
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +46,13 @@ adopt_pytest_settings_file(_SETTINGS_FILE)
 # ---------------------------------------------------------------------------
 
 import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_qt_material_resources():
+    """Re-assert the per-process qt_material tree once PyQt is imported."""
+    isolated_qt_material_resources()
+    yield
 
 
 @pytest.fixture(autouse=True)

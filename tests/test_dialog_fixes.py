@@ -18,9 +18,15 @@ from pathlib import Path
 
 from PyQt5.QtCore import QRectF
 
-from _settings_isolation import ensure_test_settings_file
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
 
 ensure_test_settings_file()
+# Per-process qt_material icon tree (concurrent pytest processes otherwise
+# delete each other's generated SVGs).
+isolated_qt_material_resources()
 
 from raw_view.gui.dialogs.batch_convert import (
     DEFAULT_CONVERT_HEIGHT as BATCH_DEFAULT_HEIGHT,

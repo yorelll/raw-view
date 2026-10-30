@@ -149,7 +149,11 @@ Each success is remembered per file name.</li>
 </ul>
 <h3>Productivity</h3>
 <ul>
-<li>Support dragging files into the main window to open quickly.</li>
+<li>Support dragging files into the main window to open quickly. Opening, dropping or passing several
+files at once decodes <b>every</b> file (each with its own parameters), queued one at a time so the UI
+stays responsive; a failing file only marks its own tab as <code>Decode failed</code> and never blocks
+the rest. Switching tabs always shows that tab's own status text, and a tab that has not been decoded
+yet says <code>Not decoded yet</code> instead of repeating the previous file's message.</li>
 <li>Conversion input supports drag-and-drop; output defaults to the folder configured in <b>Settings</b> (默认 <code>convert_out</code>，可自定义).</li>
 <li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
 </ul>
