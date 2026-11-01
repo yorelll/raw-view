@@ -11,7 +11,14 @@ from pathlib import Path
 import numpy as np
 from PyQt5 import sip
 
-from PyQt5.QtCore import QEvent, QSignalBlocker, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QSignalBlocker,
+    QThread,
+    Qt,
+    pyqtSignal,
+)
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
@@ -3306,6 +3313,14 @@ class MainWindow(QMainWindow):
         # for error messages via `source_offset`.
         spec = ImageSpec(opts.width, opts.height, 0)
 
+        # Rebinding ``_thread`` drops the last strong reference to the previous
+        # one.  If that thread is still running its only remaining tie is the
+        # self-cycle created by ``finished -> deleteLater``, which the cyclic GC
+        # may collect right here (inside this very function -- that is the exact
+        # frame CI's faulthandler dump points at).  Freeing the wrapper of a
+        # running QThread makes Qt abort the process (exit 134).  Wait it out
+        # first: the queue is serial anyway, so a superseded worker is short.
+        self._join_decode_thread(self.__dict__.get("_thread"))
         self._thread = QThread()
         self._worker = DecodeWorker()
         self._worker.moveToThread(self._thread)
@@ -3347,6 +3362,42 @@ class MainWindow(QMainWindow):
         if item is self._current_item():
             self._set_state("Decoding...", "busy")
         self._thread.start()
+
+    @staticmethod
+    def _join_decode_thread(thread, *, timeout_ms: int = 20000) -> None:
+        """Wait for a superseded decode thread to stop before dropping it.
+
+        ``_start_async_decode`` rebinds ``_thread`` and ``closeEvent`` clears
+        it; in both cases a still-running ``QThread`` would otherwise be kept
+        alive only by its own ``finished -> deleteLater`` cycle.  The cyclic GC
+        can free that wrapper while the C++ thread runs, and Qt aborts the whole
+        process: ``QThread: Destroyed while thread is still running`` / exit 134.
+        Every assertion may already have passed, so the failure looks unrelated
+        to the test that caused it.
+
+        Waiting is event-driven with a real deadline (not a fixed sleep), and
+        duck-typed stubs -- bare ``object()`` placeholders in ``_thread`` -- are
+        ignored.  A thread that will not stop within the bound is left running:
+        blocking the UI thread forever would be worse than the abort risk.
+        """
+        if thread is None:
+            return
+        is_running = getattr(thread, "isRunning", None)
+        wait = getattr(thread, "wait", None)
+        if is_running is None or wait is None:
+            return
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            try:
+                if not is_running():
+                    wait()
+                    return
+            except RuntimeError:  # pragma: no cover - wrapper already deleted
+                return
+            # Let the worker's finished/quit signals run; ``QThread.wait()``
+            # alone would block the UI thread before the thread's event loop
+            # gets a chance to process them.
+            QCoreApplication.processEvents()
 
     def _invalidate_pending_decode(self) -> None:
         """Supersede an in-flight request so its late UI signals are stale.
