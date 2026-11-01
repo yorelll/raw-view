@@ -3321,6 +3321,15 @@ class MainWindow(QMainWindow):
         # running QThread makes Qt abort the process (exit 134).  Wait it out
         # first: the queue is serial anyway, so a superseded worker is short.
         self._join_decode_thread(self.__dict__.get("_thread"))
+        # Hold the old worker/thread until this request installs its own: they
+        # are about to lose their last named reference, and the GC pass that
+        # frees them can run inside this function (CI's dump points exactly
+        # here).  Keeping them referenced past it means any destruction happens
+        # in a frame that has already handed control back to Qt.
+        retired = (
+            self.__dict__.get("_thread"),
+            self.__dict__.get("_worker"),
+        )
         self._thread = QThread()
         self._worker = DecodeWorker()
         self._worker.moveToThread(self._thread)
@@ -3362,6 +3371,10 @@ class MainWindow(QMainWindow):
         if item is self._current_item():
             self._set_state("Decoding...", "busy")
         self._thread.start()
+        # ``retired`` is intentionally left in scope: it must survive every
+        # allocation in this function so a GC pass cannot free the previous
+        # (already stopped) thread/worker from inside decode setup.  It is
+        # released when the frame returns.
 
     @staticmethod
     def _join_decode_thread(thread, *, timeout_ms: int = 20000) -> None:
