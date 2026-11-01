@@ -48,6 +48,7 @@ __all__ = [
     "begin_widget_leak_check",
     "destroy_widget",
     "end_widget_leak_check",
+    "captured_decode_thread",
     "flush_deferred_deletes",
     "join_decode_thread",
     "live_widget_count",
@@ -126,6 +127,11 @@ def join_decode_thread(widget, *, timeout_ms: int = 20000) -> None:
     thread = getattr(widget, "__dict__", {}).get("_thread")
     if not isinstance(thread, QThread):
         return
+    _wait_for_thread(thread, timeout_ms=timeout_ms)
+
+
+def _wait_for_thread(thread, *, timeout_ms: int = 20000) -> None:
+    """Join one ``QThread``, event-driven, up to *timeout_ms*."""
     deadline = time.monotonic() + timeout_ms / 1000.0
     while time.monotonic() < deadline:
         try:
@@ -136,6 +142,18 @@ def join_decode_thread(widget, *, timeout_ms: int = 20000) -> None:
             # Wrapper already deleted by Qt (the thread stopped on its own).
             return
         QTest.qWait(5)
+
+
+def captured_decode_thread(widget):
+    """Return the window's decode ``QThread`` now, for later waiting.
+
+    Call this **before** ``widget.close()``: ``MainWindow.closeEvent`` drops
+    ``self._thread`` through ``_cancel_async_decode()``, so afterwards there is
+    nothing left to wait on and the still-running thread would be freed by the
+    C++ destructor -- the Qt abort this module exists to prevent.
+    """
+    thread = getattr(widget, "__dict__", {}).get("_thread")
+    return thread if isinstance(thread, QThread) else None
 
 
 def destroy_widget(widget, *, close: bool = True) -> None:
@@ -150,18 +168,16 @@ def destroy_widget(widget, *, close: bool = True) -> None:
     if widget is None:
         return
 
-    # Join a still-running decode thread *before* close(): ``MainWindow.closeEvent``
-    # calls ``_cancel_async_decode()``, which drops ``self._thread`` -- a join
-    # after close would find nothing to wait for and leave the real QThread
-    # running into the C++ destructor, which is exactly the abort below.
-    join_decode_thread(widget)
+    # Hold the decode thread across close(): ``closeEvent`` clears
+    # ``self._thread``, so a join afterwards would have nothing to wait for and
+    # the live QThread would die with the C++ window (Qt aborts, exit 134).
+    thread = captured_decode_thread(widget)
     if close:
         close_method = getattr(widget, "close", None)
         if close_method is not None:
             _ignore_missing_method_error(close_method)
-    # Belt and braces: ``closeEvent`` only waits a bounded 400 ms, so a decode
-    # slower than that leaves a live thread behind even now.
-    join_decode_thread(widget)
+    if thread is not None:
+        _wait_for_thread(thread)
     delete_later = getattr(widget, "deleteLater", None)
     if delete_later is not None:
         _ignore_missing_method_error(delete_later)
