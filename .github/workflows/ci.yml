@@ -54,7 +54,14 @@ jobs:
           pip install -r requirements.txt -c constraints.txt
 
       - name: Run test suite (unittest)
-        run: python -m unittest discover -s tests -q
+        # Verbose + faulthandler: Qt aborts on a destroyed-but-running QThread
+        # and reports only "QThread: Destroyed while thread is still running",
+        # naming no test.  The last verbose line plus the faulthandler dump
+        # identify which case did it (the abort kills the process, so -q gives
+        # no signal at all).
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: python -u -m unittest discover -s tests -v
 
       - name: Smoke test CLI --batch-help
         run: python -m raw_view --batch-help

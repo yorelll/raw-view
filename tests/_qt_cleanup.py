@@ -150,13 +150,17 @@ def destroy_widget(widget, *, close: bool = True) -> None:
     if widget is None:
         return
 
+    # Join a still-running decode thread *before* close(): ``MainWindow.closeEvent``
+    # calls ``_cancel_async_decode()``, which drops ``self._thread`` -- a join
+    # after close would find nothing to wait for and leave the real QThread
+    # running into the C++ destructor, which is exactly the abort below.
+    join_decode_thread(widget)
     if close:
         close_method = getattr(widget, "close", None)
         if close_method is not None:
             _ignore_missing_method_error(close_method)
-    # Join a still-running decode thread *before* the C++ window dies: Qt aborts
-    # the process outright when a running QThread is destroyed, which would turn
-    # any async-decode test into a suite-wide core dump (see the helper).
+    # Belt and braces: ``closeEvent`` only waits a bounded 400 ms, so a decode
+    # slower than that leaves a live thread behind even now.
     join_decode_thread(widget)
     delete_later = getattr(widget, "deleteLater", None)
     if delete_later is not None:
