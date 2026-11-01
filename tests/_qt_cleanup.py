@@ -36,8 +36,9 @@ Two guards make the rule enforceable instead of merely documented:
 from __future__ import annotations
 
 import logging
+import time
 
-from PyQt5.QtCore import QCoreApplication, QEvent
+from PyQt5.QtCore import QCoreApplication, QEvent, QThread
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
@@ -48,6 +49,7 @@ __all__ = [
     "destroy_widget",
     "end_widget_leak_check",
     "flush_deferred_deletes",
+    "join_decode_thread",
     "live_widget_count",
     "widget_leak_growth",
     "widget_leak_message",
@@ -99,6 +101,43 @@ def flush_deferred_deletes() -> None:
     app.processEvents()
 
 
+def join_decode_thread(widget, *, timeout_ms: int = 20000) -> None:
+    """Wait for a ``MainWindow``'s decode ``QThread`` to stop, then join it.
+
+    Qt aborts the whole process -- ``QThread: Destroyed while thread is still
+    running`` followed by ``Aborted (core dumped)``, exit code 134 -- when a
+    running ``QThread`` is destroyed.  That is not a test failure, it kills the
+    run: on CI (GitHub's ``ubuntu-latest``, Python 3.12) a batch-open test left
+    the worker running and the entire suite aborted with every assertion having
+    passed.  Local runs passed because the thread happened to finish first, so
+    this must be structural rather than per-fixture.
+
+    Waiting is event-driven (``QTest.qWait``) up to *timeout_ms*: a real
+    deadline, not a fixed sleep, so a decode that finishes in 5 ms costs 5 ms.
+
+    Only a **real** ``QThread`` is waited on.  Several tests install a
+    duck-typed stub (``__new__``-built windows, fake threads whose
+    ``isRunning()`` is permanently ``True`` to assert the bounded wait in
+    ``closeEvent``); joining those would burn the full timeout for nothing and
+    the object they stand in for cannot abort the process anyway.
+    """
+    if widget is None:
+        return
+    thread = getattr(widget, "__dict__", {}).get("_thread")
+    if not isinstance(thread, QThread):
+        return
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        try:
+            if not thread.isRunning():
+                thread.wait()
+                return
+        except RuntimeError:
+            # Wrapper already deleted by Qt (the thread stopped on its own).
+            return
+        QTest.qWait(5)
+
+
 def destroy_widget(widget, *, close: bool = True) -> None:
     """Close *widget*, schedule its deletion, and flush it immediately.
 
@@ -115,6 +154,10 @@ def destroy_widget(widget, *, close: bool = True) -> None:
         close_method = getattr(widget, "close", None)
         if close_method is not None:
             _ignore_missing_method_error(close_method)
+    # Join a still-running decode thread *before* the C++ window dies: Qt aborts
+    # the process outright when a running QThread is destroyed, which would turn
+    # any async-decode test into a suite-wide core dump (see the helper).
+    join_decode_thread(widget)
     delete_later = getattr(widget, "deleteLater", None)
     if delete_later is not None:
         _ignore_missing_method_error(delete_later)
