@@ -412,6 +412,9 @@ class MainWindow(QMainWindow):
         self._active_item_ref: ViewerItem | None = None
         self._loading_item = False
         self._thread: QThread | None = None
+        # Superseded (thread, worker) pairs kept referenced until their thread
+        # stops: freeing a running QThread makes Qt abort (see _start_async_decode).
+        self._held_decode_threads: list[tuple] = []
         self._worker: DecodeWorker | None = None
         # Generation counter for async decodes. Incremented on every start, so
         # results/errors from an older (cancelled/abandoned) worker, whose
@@ -3320,16 +3323,23 @@ class MainWindow(QMainWindow):
         # frame CI's faulthandler dump points at).  Freeing the wrapper of a
         # running QThread makes Qt abort the process (exit 134).  Wait it out
         # first: the queue is serial anyway, so a superseded worker is short.
+        # A serial queue replaces the thread on every step, while the previous
+        # one is still winding down (``_on_decode_finished`` runs on the worker
+        # thread before ``quit()`` takes effect).  Rebinding below would leave
+        # it referenced only by its own ``finished -> deleteLater`` cycle, and
+        # the GC may free that wrapper during *any* allocation in this function
+        # -- CI's faulthandler dump points at the ``DecodeWorker()`` line.
+        # Freeing a running QThread aborts the process (exit 134), so join the
+        # outgoing thread and keep every thread this window ever created
+        # referenced until it has stopped.
         self._join_decode_thread(self.__dict__.get("_thread"))
-        # Hold the old worker/thread until this request installs its own: they
-        # are about to lose their last named reference, and the GC pass that
-        # frees them can run inside this function (CI's dump points exactly
-        # here).  Keeping them referenced past it means any destruction happens
-        # in a frame that has already handed control back to Qt.
+        self._reap_finished_threads()
         retired = (
             self.__dict__.get("_thread"),
             self.__dict__.get("_worker"),
         )
+        if retired[0] is not None:
+            self.__dict__.setdefault("_held_decode_threads", []).append(retired)
         self._thread = QThread()
         self._worker = DecodeWorker()
         self._worker.moveToThread(self._thread)
@@ -3375,6 +3385,27 @@ class MainWindow(QMainWindow):
         # allocation in this function so a GC pass cannot free the previous
         # (already stopped) thread/worker from inside decode setup.  It is
         # released when the frame returns.
+
+    def _reap_finished_threads(self) -> None:
+        """Drop held references to decode threads that have now stopped.
+
+        ``_start_async_decode`` parks each outgoing (thread, worker) pair in
+        ``self._held_decode_threads`` so a GC pass cannot free a still-running
+        ``QThread`` (Qt aborts the process: exit 134).  Once a thread has
+        actually stopped the pair can be released normally.
+        """
+        held = self.__dict__.get("_held_decode_threads")
+        if not held:
+            return
+        still_running = []
+        for thread, worker in held:
+            try:
+                if thread.isRunning():
+                    still_running.append((thread, worker))
+                    continue
+            except RuntimeError:  # pragma: no cover - wrapper already deleted
+                continue
+        self._held_decode_threads = still_running
 
     @staticmethod
     def _join_decode_thread(thread, *, timeout_ms: int = 20000) -> None:
