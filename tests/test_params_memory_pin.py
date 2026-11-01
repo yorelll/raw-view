@@ -417,8 +417,11 @@ class UserApplyIntentTests(_IsolatedWindowTest):
         _pump(lambda: self.w._pending_decode_item is None)
         self.assertEqual(self.settings.file_param_history, {})
         # Reopening the same name must therefore keep the default parameters.
-        self.w._open_item(path, decode=False)
-        self.assertEqual(self.w.items[1].remembered_params_pending, False)
+        # The same path is already open, so this reuses that tab in place
+        # (duplicate-tab dedupe) instead of appending a second one.
+        reopened = self.w._open_item(path, decode=False)
+        self.assertIs(reopened, self.w.items[0])
+        self.assertEqual(self.w.items[0].remembered_params_pending, False)
 
     def test_remembered_restore_decode_does_not_re_record(self):
         path = self._path("restore.raw", 4 * 4)

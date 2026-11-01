@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from PyQt5 import sip
 
 from PyQt5.QtCore import QEvent, QSignalBlocker, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
@@ -249,6 +250,27 @@ def _is_supported_file(path: str) -> bool:
     """
     suffix = Path(path).suffix.lower()
     return not suffix or suffix in SUPPORTED_EXTENSIONS
+
+
+def _widget_alive(widget) -> bool:
+    """Whether *widget* is usable: present and not a destroyed C++ object.
+
+    ``sip.isdeleted`` only accepts a SIP wrapper, while tests (and a few
+    duck-typed stubs) pass plain objects, so this helper answers ``True`` for
+    anything that is not a SIP wrapper — those cannot be destroyed C++ widgets.
+
+    Consequence for readers: this guard is meaningful **only for real Qt
+    objects**.  A duck-typed test stub (``SimpleNamespace``, a fake view) always
+    passes, so the guard protects production from use-after-free without making
+    the stubs fail.  Do not "tighten" it into an isinstance check: that would
+    break the stub-based tests without adding any safety.
+    """
+    if widget is None:
+        return False
+    try:
+        return not sip.isdeleted(widget)
+    except TypeError:
+        return True
 
 
 def _suffix_of(name: str) -> str:
@@ -1098,10 +1120,14 @@ class MainWindow(QMainWindow):
 
     def _update_frame_display(self, item: ViewerItem) -> None:
         """Update frame nav bar and status bar from item state."""
-        if item.frame_nav is None:
+        frame_nav = getattr(item, "frame_nav", None)
+        # The nav bar may already be destroyed when a decode finishes for an
+        # item that was reloaded/closed mid-flight (its ViewerItem survives in
+        # the worker's closure).  Touching the dead C++ widget would crash.
+        if not _widget_alive(frame_nav):
             return
-        item.frame_nav.set_frame_info(item.current_frame, item.total_frames)
-        item.frame_nav.setVisible(item.total_frames > 1)
+        frame_nav.set_frame_info(item.current_frame, item.total_frames)
+        frame_nav.setVisible(item.total_frames > 1)
         if item.total_frames > 1:
             self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
         else:
@@ -1369,17 +1395,33 @@ class MainWindow(QMainWindow):
         The queue is event-driven: :meth:`_advance_open_queue` is called from
         the decode success/error slots, never from a timer or a sleep.  Only
         one decode runs at a time because there is a single worker/thread.
+
+        Duplicate paths (including case/relative variants of one file) reuse the
+        existing tab, so ``self.items`` may not grow for them.  The queue is
+        therefore built from :meth:`_open_item`'s **return value**, not from a
+        ``len(items)`` diff — the diff would drop those files from the queue and
+        leave their tabs undecoded.  Each item is queued at most once.
         """
+        # Deduplicate by canonical path up front: opening the same file twice in
+        # one batch must produce one tab, one decode, and one queue entry.
+        unique: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = self._canonical_item_path(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+
         # UI refresh is coalesced across the whole batch; the decode queue below
         # is untouched and still runs one file at a time (v0.5.2 contract).
-        owner = self._batch_begin() if len(paths) > 1 else None
+        owner = self._batch_begin() if len(unique) > 1 else None
         try:
             opened: list[ViewerItem] = []
-            for path in paths:
-                before = len(self.items)
-                self._open_item(path, decode=False, source=source)
-                if len(self.items) > before:
-                    opened.append(self.items[-1])
+            for path in unique:
+                item = self._open_item(path, decode=False, source=source)
+                if item is not None and item not in opened:
+                    opened.append(item)
         finally:
             if owner is not None:
                 self._batch_end(owner)
@@ -1387,14 +1429,26 @@ class MainWindow(QMainWindow):
             return
         if len(opened) == 1:
             # Single-file open keeps the historical behaviour exactly.
-            self.decode_current(show_error=False)
+            self._decode_item(opened[0], show_error=False)
             return
-        self._open_decode_pending = opened[1:]
-        self._open_decode_in_flight = opened[0]
+        # Book the queue *before* the first decode: a synchronous (standard
+        # image) first decode can advance the queue from inside
+        # ``_decode_item``, and an empty pending list at that moment would make
+        # ``_advance_open_queue`` treat the batch as finished.
         self._open_decode_total = len(opened)
-        # The first file decodes through the normal path (visible tab).
-        self.item_tabs.setCurrentIndex(self.items.index(opened[0]))
-        self.decode_current(show_error=False)
+        self._open_decode_in_flight = opened[0]
+        self._open_decode_pending = opened[1:]
+        # The first opened file becomes the visible tab (historical behaviour:
+        # a multi-file open lands on its first file, not its last one).
+        first = opened[0]
+        self.item_tabs.setCurrentIndex(self.items.index(first))
+        if first is self._current_item():
+            self._decode_item(first, show_error=False)
+        else:
+            # Defensive: if selecting it did not take effect (e.g. the batch ran
+            # while another item was mid-decode), decode it as a background item
+            # so its own tab — not the visible one — receives the result.
+            self._decode_item(first, show_error=False, background=True)
 
     def _advance_open_queue(self, item: ViewerItem | None, succeeded: bool) -> None:
         """Start the next queued file after *item* finished (success or not).
@@ -1448,8 +1502,43 @@ class MainWindow(QMainWindow):
         if total > 1:
             logger.debug("Batch open finished: %d file(s) decoded", total)
 
-    def _open_item(self, path: str, decode: bool, source: str = "auto") -> None:
-        """Open one file into a new tab.
+    @staticmethod
+    def _canonical_item_path(path: str) -> str:
+        """Stable identity for "the same file" (duplicate-tab detection).
+
+        Mirrors :meth:`DecodeCache._canonical_path`: absolute + ``realpath`` +
+        ``normcase``.  On Windows ``normcase`` lower-cases, so ``D:\\a.raw`` and
+        ``d:/A.RAW`` collide as one file; on POSIX ``normcase`` is the identity
+        function, so a case-sensitive file system keeps them distinct.  Relative
+        paths and symlinks resolve to the same key as their target.
+        """
+        return os.path.normcase(os.path.abspath(os.path.realpath(path)))
+
+    def _index_of_open_path(self, path: str) -> int:
+        """Index of an already-open item showing *path*, or ``-1``.
+
+        Comparison is canonical-path based (see :meth:`_canonical_item_path`),
+        never raw string equality, so case and relative-path variants of one
+        file are recognised as duplicates.
+        """
+        target = self._canonical_item_path(path)
+        for index, item in enumerate(self.items):
+            item_path = item.options.file_path
+            if item_path and self._canonical_item_path(item_path) == target:
+                return index
+        return -1
+
+    def _open_item(
+        self, path: str, decode: bool, source: str = "auto",
+    ) -> ViewerItem | None:
+        """Open one file into a new tab (or refresh the tab already showing it).
+
+        Returns the item representing *path* after the call, or ``None`` when the
+        file was rejected (missing / dangerous / unsupported).  Callers that
+        queue decoding use this return value instead of a ``len(items)`` diff:
+        a duplicate path reuses the existing tab and therefore does not grow
+        ``self.items``, and a length-diff heuristic would silently drop that file
+        from the decode queue (the v0.5.2 failure mode).
 
         Parameters
         ----------
@@ -1467,56 +1556,37 @@ class MainWindow(QMainWindow):
         """
         if not path or not os.path.isfile(path):
             logger.warning("File not found: %s", path)
-            return
+            return None
         # 显式选择来源：危险（可执行/脚本）后缀必须拒绝并反馈，绝不静默。
         if source == "explicit" and _is_dangerous_extension(path):
             logger.warning("Refusing to open executable file as RAW: %s", path)
             self._reject_open_feedback(
                 f"{os.path.basename(path)} 是可执行文件，已拒绝按 RAW 打开"
             )
-            return
+            return None
         # 自动来源 / 显式来源的其余情况：无后缀接受；自动来源的未知后缀拒绝。
         if not _is_supported_file(path) and source == "auto":
             logger.warning("Unsupported file type, ignored: %s", path)
-            return
+            return None
         logger.info("Opening item: %s (decode=%s, source=%s)", path, decode, source)
 
+        existing = self._index_of_open_path(path)
+        if existing >= 0:
+            # Same file already open: refresh that tab in place rather than
+            # creating a second tab for identical content.  Reusing the reload
+            # path keeps one implementation of "re-read from disk, same index".
+            logger.info("File already open, reloading in place: %s", path)
+            # ``decode`` is forwarded, not applied again afterwards: the reload
+            # path is the single place that decides whether the rebuild decodes
+            # immediately, so ``decode`` keeps the same meaning on both branches.
+            return self._reload_item_at(existing, path=path, decode=decode)
+
         item = ViewerItem()
-        item.view = ImageView()
-        item.view.zoomChanged.connect(lambda zoom: self._on_item_zoom_changed(item, zoom))
-        item.view.contextMenuRequested.connect(self._show_image_context_menu)
-        item.view.framePrevRequested.connect(lambda: self._nav_frame(item, -1))
-        item.view.frameNextRequested.connect(lambda: self._nav_frame(item, 1))
-
-        # Frame navigation bar below the image
-        item.frame_nav = FrameNavBar()
-        item.frame_nav.frameChanged.connect(self._on_frame_changed)
-
-        # Container: ImageView + FrameNavBar
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(item.view, 1)
-        layout.addWidget(item.frame_nav)
-
-        # Configure item options based on file extension
-        item.options.file_path = path
-        ext = Path(path).suffix.lower()
-        if ext in IMAGE_EXTENSIONS:
-            item.options.image_type = "Standard Image"
-            item.options.format_name = "N/A"
-        elif ext in _YUV_EXTS:
-            item.options.image_type = "YUV"
-            item.options.format_name = _YUV_EXTS[ext]
-        else:
-            # Default: RAW (covers .raw, .bin, no extension, unknown extension)
-            item.options.image_type = "RAW"
-            item.options.format_name = "RAW12"
-            item.options.alignment = "msb"
-
-        item.options.width = 2560
-        item.options.height = 1440
+        # Page construction + per-item signal wiring live in _build_item_page so
+        # a reload cannot drift from a fresh open (a missed connection would
+        # break zoom/frame navigation only after reloading).
+        container = self._build_item_page(item)
+        self._apply_default_options(item, path)
 
         # Per-file parameter memory (keyed by basename only).  A hit replaces the
         # freshly defaulted options before the first decode, so opening the same
@@ -1527,13 +1597,7 @@ class MainWindow(QMainWindow):
         # prefers `_pinned_params`), never how a newly opened item is
         # initialized.  A pinned host must still open a remembered capture with
         # the parameters the user last applied to that capture.
-        remembered = self.settings.get_file_params(path)
-        if remembered is not None:
-            remembered.file_path = path
-            item.options = remembered
-            item.remembered_params_pending = True
-        else:
-            item.remembered_params_pending = False
+        self._apply_remembered_options(item, path)
 
         self.settings.add_recent_file(path)
         # Inside a multi-file batch these per-item refreshes are deferred to
@@ -1560,6 +1624,78 @@ class MainWindow(QMainWindow):
             # RAW12/2560x1440 frequently mismatches a newly opened capture, so
             # errors are recorded in state/logs but do not block parameter entry.
             self.decode_current(show_error=False)
+        return item
+
+    def _build_item_page(self, item: ViewerItem) -> QWidget:
+        """Create the tab page for *item* and wire its per-item signals.
+
+        The lambdas capture the item, which is what keeps a removed tab's widget
+        tree alive (the known per-item cycle); ``_destroy_page`` disconnects them
+        explicitly.  A signal emitted between the detach and the deferred delete
+        would still reach a half-destroyed ``ImageView``, so each handler also
+        checks that the view is still a live C++ object — that turns a potential
+        crash into a no-op.
+        """
+        def _view_alive() -> bool:
+            return _widget_alive(item.view)
+
+        item.view = ImageView()
+        item.view.zoomChanged.connect(
+            lambda zoom: (
+                self._on_item_zoom_changed(item, zoom)
+                if _view_alive() else None
+            )
+        )
+        item.view.contextMenuRequested.connect(self._show_image_context_menu)
+        item.view.framePrevRequested.connect(
+            lambda: self._nav_frame(item, -1) if _view_alive() else None
+        )
+        item.view.frameNextRequested.connect(
+            lambda: self._nav_frame(item, 1) if _view_alive() else None
+        )
+
+        # Frame navigation bar below the image.  ``_on_frame_changed`` already
+        # resolves the *current* item itself, so it cannot touch a dead page.
+        item.frame_nav = FrameNavBar()
+        item.frame_nav.frameChanged.connect(self._on_frame_changed)
+
+        # Container: ImageView + FrameNavBar
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(item.view, 1)
+        layout.addWidget(item.frame_nav)
+        return container
+
+    def _apply_default_options(self, item: ViewerItem, path: str) -> None:
+        """Initialise *item*'s own parameters from the file extension."""
+        item.options.file_path = path
+        ext = Path(path).suffix.lower()
+        if ext in IMAGE_EXTENSIONS:
+            item.options.image_type = "Standard Image"
+            item.options.format_name = "N/A"
+        elif ext in _YUV_EXTS:
+            item.options.image_type = "YUV"
+            item.options.format_name = _YUV_EXTS[ext]
+        else:
+            # Default: RAW (covers .raw, .bin, no extension, unknown extension)
+            item.options.image_type = "RAW"
+            item.options.format_name = "RAW12"
+            item.options.alignment = "msb"
+
+        item.options.width = 2560
+        item.options.height = 1440
+
+    def _apply_remembered_options(self, item: ViewerItem, path: str) -> None:
+        """Overlay the per-file parameter memory (keyed by basename) on *item*."""
+        remembered = self.settings.get_file_params(path)
+        if remembered is not None:
+            remembered.file_path = path
+            item.options = remembered
+            item.remembered_params_pending = True
+        else:
+            item.remembered_params_pending = False
 
     def _reject_open_feedback(self, message: str) -> None:
         """任何被拒绝打开的原因都要让用户看到，绝不只有 logger。
@@ -1691,19 +1827,14 @@ class MainWindow(QMainWindow):
         self.items.pop(index)
         self._loading_item = False
         # QTabWidget.removeTab() only detaches the page widget; it does NOT
-        # delete it.  The per-item lambdas created in _open_item (ViewerItem
-        # <-> ImageView signal connections) form a reference cycle CPython
-        # cannot collect across the PyQt wrapper boundary, so every closed tab
-        # used to leak its whole widget subtree (plus pixmap) for the rest of
-        # the session — measured +15 widgets / +59 MB per open+close cycle, with
-        # app.setStyleSheet() (and therefore startup/theme switches) degrading
-        # from 0.5 s to 5 s after 40 leaked pages.
-        if page is not None:
-            try:
-                page.setParent(None)
-                page.deleteLater()
-            except RuntimeError:  # pragma: no cover - wrapper already deleted
-                pass
+        # delete it, and the per-item lambdas created in _open_item
+        # (ViewerItem <-> ImageView signal connections) form a reference cycle
+        # CPython cannot collect across the PyQt wrapper boundary.  Without an
+        # explicit destroy every closed tab leaked its widget subtree plus
+        # pixmap for the rest of the session (measured +15 widgets / +59 MB per
+        # open+close cycle, with app.setStyleSheet() degrading from 0.5 s to 5 s
+        # after 40 leaked pages).
+        self._detach_item_from_page(closing, page)
         # 0.2.2-L-1 / 0.3.1-M-1 / 0.4.1-M-2：若被关闭项正是当前在途解码目标，
         # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
         # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
@@ -1711,12 +1842,7 @@ class MainWindow(QMainWindow):
         # Closing an item a batch-open queue is waiting for must not stall the
         # queue: drop it from the pending list and, if it was the in-flight one,
         # advance now (its late signals were just disconnected above).
-        pending = self.__dict__.get("_open_decode_pending")
-        if pending:
-            pending[:] = [queued for queued in pending if queued is not closing]
-            if self.__dict__.get("_open_decode_in_flight") is closing:
-                self._open_decode_in_flight = None
-                self._advance_open_queue(None, False)
+        self._drop_from_open_queue(closing, advance=True)
         if not self.items:
             self._active_item_index = -1
             self._active_item_ref = None
@@ -1752,6 +1878,444 @@ class MainWindow(QMainWindow):
             self._update_center_stack()
             self._refresh_file_nav_actions()
 
+    # ── Reload in place (right-click menu + duplicate-tab handling) ───
+
+    def _reload_item_at(
+        self, index: int, *, path: str | None = None, decode: bool = True,
+    ) -> ViewerItem | None:
+        """Reload the item at *index* from disk, keeping its tab position.
+
+        Semantics: exactly "close this item and open the path again", except the
+        tab stays where it was instead of the new tab appending at the end.  The
+        page is rebuilt in place (new ``ViewerItem`` + fresh widget subtree), so
+        nothing survives from the previous file version but the ordering.
+
+        Decisions that are not obvious:
+
+        * **Unapplied panel edits are discarded.**  Reload is defined as
+          close+open, and a close already drops unapplied edits (see
+          ``close_item``); keeping them would silently apply them to the *new*
+          file content, which is the opposite of "load what is on disk".
+        * **The per-file parameter memory is still honoured.**  The fresh item
+          goes through the same ``_apply_remembered_options`` as a normal open,
+          because that memory only ever contains parameters from a *successful
+          explicit Apply* — it is the user's intent for this file name, not an
+          unapplied edit.
+        * **Nothing is written to that memory.**  The follow-up decode is silent
+          (``show_error=False``, ``user_apply=False``), so only an explicit Apply
+          can persist parameters (0.5.0 H-1).
+
+        ``path`` lets the duplicate-tab path re-read the same file under the
+        spelling the user just chose (e.g. a differently-cased path); when
+        omitted the item's current path is used.
+
+        ``decode`` mirrors :meth:`_open_item` exactly: ``True`` decodes the
+        rebuilt tab immediately, ``False`` leaves it undecoded for the caller to
+        drive.  Both entry points must agree, otherwise the same argument means
+        "decode" on one path and "do not decode" on the other.
+        """
+        if not (0 <= index < len(self.items)):
+            return None
+        old_item = self.items[index]
+        target_path = path if path is not None else old_item.options.file_path
+        if not target_path:
+            return None
+
+        # The whole point of a reload is to see what is on disk now, so every
+        # cached frame for this path must go *before* the decode can consult it.
+        cache = self.__dict__.get("decode_cache")
+        if cache is not None:
+            cache.remove_file(target_path)
+            if old_item.options.file_path != target_path:
+                cache.remove_file(old_item.options.file_path)
+
+        # Detach the old item from every lifecycle queue while it is still a
+        # real item: a stale entry would keep a destroyed object alive.
+        #
+        # ``advance=True`` when the open queue owns this item: its in-flight slot
+        # must be freed *and* the queue resumed, otherwise the queue waits forever
+        # for a step whose item this reload just replaced (the reload/open-queue
+        # deadlock).  Outside a batch this is a no-op because no step is in
+        # flight.
+        was_queue_in_flight = (
+            self.__dict__.get("_open_decode_in_flight") is old_item
+        )
+        self._cancel_decode_for(old_item)
+        self._drop_from_open_queue(old_item, advance=was_queue_in_flight)
+
+        was_current = self.item_tabs.currentIndex() == index
+        old_page = self.item_tabs.widget(index)
+
+        # Build the replacement before touching the widget tree, so a failure
+        # leaves the existing tab exactly as it was.
+        item = ViewerItem()
+        container = self._build_item_page(item)
+        self._apply_default_options(item, target_path)
+        self._apply_remembered_options(item, target_path)
+
+        # Ordering matters here and in _destroy_page: keep the new page hidden
+        # while the old one is removed/destroyed, and show it only after it has
+        # been inserted.  Otherwise Qt performs layout/paint on a page that is
+        # already scheduled for deletion, and in a multi-item Reload All that
+        # showed up as an access violation.  See ``_destroy_page`` for the other
+        # half of this handshake (hide -> setParent(None) -> deleteLater).
+        container.hide()
+        container.setParent(self.item_tabs)
+
+        self.items[index] = item
+        # Any cached view reference to the old page must be dropped before the
+        # swap, otherwise the identity-based helpers may still resolve to it.
+        if self.__dict__.get("_active_item_ref") is old_item:
+            self._active_item_ref = None
+        # Detach the old page from the tab widget *first* (it must not be around
+        # while the new page is installed), then destroy it before the new page
+        # becomes visible.  Doing the destroy between ``removeTab`` and
+        # ``insertTab`` keeps the tab count/indices stable for the whole swap,
+        # so the reload never briefly removes the tab (which would let Qt pick a
+        # neighbour page and fire ``currentChanged`` with a half-built state).
+        self._loading_item = True
+        try:
+            self.item_tabs.removeTab(index)
+            self._detach_item_from_page(old_item, old_page)
+            self.item_tabs.insertTab(index, container, os.path.basename(target_path))
+            self.item_tabs.setTabToolTip(index, target_path)
+            if was_current:
+                self.item_tabs.setCurrentIndex(index)
+        finally:
+            self._loading_item = False
+        container.show()
+
+        self.settings.add_recent_file(target_path)
+        batched = self._batch_active()
+        if not batched:
+            self._refresh_recent_files_menu()
+            self._refresh_file_nav_actions()
+            self._update_center_stack()
+
+        if was_current:
+            # Repaint panel/status/pin from the new item.  ``_loading_item`` is
+            # already False, so this runs the normal (not suppressed) reload.
+            # ``_active_item_ref`` must be cleared first: ``_on_tab_changed``
+            # saves the panel back into the *previous* item, and pointing that at
+            # the freshly built item would copy the stale panel values over the
+            # parameters a reload just read from disk.
+            self._active_item_index = index
+            self._active_item_ref = None
+            self._on_tab_changed(index)
+        else:
+            # Background reload: the visible tab's panel/status must not change.
+            # Only the identity pointers and the (per-file) forget action need a
+            # refresh, plus the pin state which may depend on the reloaded item.
+            self._active_item_index = self.item_tabs.currentIndex()
+            self._active_item_ref = self._current_item()
+            self._refresh_pin_state()
+
+        if decode:
+            # Silent, non-Apply decode: identical to a first automatic open, so
+            # it can neither pop a modal nor write the parameter memory.
+            if was_current:
+                self._decode_item(item, show_error=False)
+            else:
+                # A background tab must own its own result.  Without the
+                # marker the worker reply is attributed to the *visible* tab,
+                # the identity check drops it, and the reloaded tab stays on
+                # "Decoding..." forever (Reload All froze every tab except the
+                # last, and a duplicate open of a background file froze too).
+                self._decode_item(item, show_error=False, background=True)
+        return item
+
+    def _detach_item_from_page(self, item: ViewerItem | None, page) -> None:
+        """Drop *item*'s references to a page that is about to be destroyed.
+
+        Two things must happen before the widget dies:
+
+        * its per-item signal connections are disconnected (otherwise a queued
+          signal reaches a half-destroyed ``ImageView``);
+        * ``item.view`` / ``item.frame_nav`` become ``None``.
+
+        The second part matters when an item is *reloaded* with a decode still in
+        flight: the viewer item survives in the worker's closure, so its late
+        result/error can run after the page is gone.  Clearing the references
+        turns those callbacks into no-ops through the existing ``is None``
+        guards instead of a use-after-free.
+        """
+        self._disconnect_item_signals(item)
+        if item is not None:
+            item.view = None
+            item.frame_nav = None
+        self._destroy_page(page)
+
+    def _destroy_page(self, page) -> None:
+        """Destroy a detached tab page (see ``close_item`` for the rationale).
+
+        The page is hidden first.  ``deleteLater()`` only *queues* the deletion,
+        so a still-visible page would keep receiving paint/resize/layout work
+        until the event loop unwinds — and for a page detached during a reload
+        that work can reach a child whose C++ object is already being torn down
+        (observed as an access violation when several items are reloaded in one
+        batch).  Hiding + detaching makes the widget inert before it dies.
+        """
+        if page is None:
+            return
+        try:
+            page.hide()
+            page.setParent(None)
+            page.deleteLater()
+        except RuntimeError:  # pragma: no cover - wrapper already deleted
+            pass
+
+    @staticmethod
+    def _disconnect_item_signals(item: ViewerItem | None) -> None:
+        """Drop an item's own signal connections before its page is destroyed.
+
+        ``_build_item_page`` connects four lambdas that capture the item.  They
+        keep the widget subtree alive (the known per-item cycle) and, worse, a
+        signal already queued in the event loop can fire *while* the page is
+        being torn down, invoking a slot on a half-destroyed ``ImageView`` — that
+        surfaced as an access violation during a multi-item reload.  Calling this
+        on a page that is being replaced (reload) or removed (close) removes both
+        risks.  Failures are ignored: the object may already be gone.
+        """
+        if item is None:
+            return
+        view = getattr(item, "view", None)
+        frame_nav = getattr(item, "frame_nav", None)
+        for owner, names in (
+            (view, (
+                "zoomChanged", "contextMenuRequested",
+                "framePrevRequested", "frameNextRequested",
+            )),
+            (frame_nav, ("frameChanged",)),
+        ):
+            if owner is None:
+                continue
+            for name in names:
+                signal = getattr(owner, name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+
+    def _drop_from_open_queue(
+        self, item: ViewerItem | None, *, advance: bool = False,
+    ) -> None:
+        """Remove *item* from the multi-file open queue without stalling it.
+
+        ``advance`` is off by default: when an item is being *replaced* (reload)
+        the queue keeps running normally, and advancing here would start a
+        second decode on top of the replacement's own.  Closing an item passes
+        ``advance=True`` because its in-flight slot must be freed immediately.
+        """
+        pending = self.__dict__.get("_open_decode_pending")
+        if pending:
+            pending[:] = [queued for queued in pending if queued is not item]
+        if (
+            item is not None
+            and self.__dict__.get("_open_decode_in_flight") is item
+        ):
+            self._open_decode_in_flight = None
+            if advance:
+                self._advance_open_queue(None, False)
+
+    # ── Reload All state machine ─────────────────────────────────────
+    #
+    # Reload All is event-driven: it rebuilds one item, dispatches its decode,
+    # and resumes from the decode completion handlers.  Three invariants keep it
+    # from wedging the window (all three were real 0.5.4 review findings):
+    #
+    # 1. **Non-recursive**: the step loop must never call itself on the stack.
+    #    A synchronous decode (standard image) makes the "already finished" case
+    #    common, and a recursive implementation blew the Python stack at ~165
+    #    items (RecursionError was swallowed by the Qt slot, silently aborting
+    #    the batch and leaving ``updatesEnabled(False)`` forever).
+    # 2. **Paired ownership**: the value returned by ``_batch_begin()`` is stored
+    #    on the state object and is the *only* thing ``_batch_end()`` is called
+    #    with.  Re-entering the batch without keeping it would bump the depth
+    #    without a matching decrement.
+    # 3. **Idempotent, exception-safe finish**: whatever happens (exception in a
+    #    reload step, an async completion raising, a double invocation), exactly
+    #    one finish runs and it restores depth/suppress/repaints.
+
+    def reload_item(self, index: int) -> ViewerItem | None:
+        """Reload one item in place (right-click → Reload); returns the new item."""
+        return self._reload_item_at(index)
+
+    def _reload_all_active(self) -> bool:
+        """Whether a Reload All batch is currently running."""
+        return self.__dict__.get("_reload_all_state") is not None
+
+    def reload_all_items(self) -> None:
+        """Reload every open item in place (right-click → Reload All Items).
+
+        A single decode pipeline means the reloads are **serialised**: each item
+        is rebuilt and dispatched, and the next step starts only when the
+        previous decode reports back.  Dispatching all of them back-to-back would
+        make every request invalidate its predecessor (``_decode_generation`` is
+        bumped per request), leaving all tabs but the last on ``Decoding...``.
+
+        Two arbitration rules, both required for correctness:
+
+        * **Idempotent entry.**  While a batch is running a second invocation is
+          ignored (a double-clicked menu entry used to bump the batch depth twice
+          but finish it once, leaving ``updatesEnabled(False)`` permanently).
+        * **The open queue is taken over.**  If a multi-file open is still
+          decoding, its remaining work is cancelled first: otherwise both state
+          machines wait on each other (the queue waits for its own in-flight
+          step, Reload All waits for "nothing decoding").  Taking it over means
+          those files are decoded by this Reload All instead — the tabs are
+          rebuilt from disk either way, so the user still gets every file
+          decoded, just through one serialised pass.
+
+        The UI refresh is coalesced: per-item recent-menu / prev-next / panel
+        repaint is suppressed during the batch and performed once at the end.
+        """
+        if not self.items:
+            return
+        if self._reload_all_active():
+            logger.debug("Reload All already running; ignoring repeated trigger")
+            return
+        # Take over the open queue *before* entering the batch, so no queue step
+        # can be in flight while this batch dispatches its own decodes.
+        self._take_over_open_queue_for_reload()
+        owner = self._batch_begin()
+        self._reload_all_state = {"index": 0, "batch_owner": owner}
+        try:
+            self._run_reload_all_steps()
+        except Exception:
+            logger.exception("Reload All failed; restoring state")
+            self._finish_reload_all()
+            raise
+
+    def _take_over_open_queue_for_reload(self) -> None:
+        """Cancel a running multi-file open queue (Reload All supersedes it).
+
+        The queued files keep their tabs; Reload All rebuilds and decodes each
+        one, so no file is left undecoded.  Cancelling is what prevents the
+        mutual wait described in :meth:`reload_all_items`.
+        """
+        pending = self.__dict__.get("_open_decode_pending")
+        in_flight = self.__dict__.get("_open_decode_in_flight")
+        total = self.__dict__.get("_open_decode_total")
+        if not pending and in_flight is None and not total:
+            return
+        logger.debug(
+            "Reload All takes over the open queue (%d pending, in-flight=%s)",
+            len(pending or []), bool(in_flight),
+        )
+        self._open_decode_pending = []
+        self._open_decode_in_flight = None
+        self._open_decode_total = 0
+        if in_flight is not None and in_flight in self.items:
+            # Detach the queue step's worker *properly* rather than only flipping
+            # the UI flag: `_cancel_decode_for` drops `_pending_decode_item`,
+            # disconnects the finished/error slots and bumps nothing, so a late
+            # reply from a still-running worker is discarded by
+            # `_should_apply_decode` (generation changed by the reload's own
+            # decode) instead of drawing into a tab this batch is rebuilding.
+            # Only then is clearing ``decoding`` truthful: no further UI update
+            # for it will be applied by the queue path.
+            self._cancel_decode_for(in_flight)
+            in_flight.decoding = False
+        if self.__dict__.get("_background_decode_item") is in_flight:
+            self._background_decode_item = None
+
+    def _run_reload_all_steps(self) -> None:
+        """Advance the batch until it needs to wait for an async decode.
+
+        A plain ``while`` loop, never a self-call: a synchronous decode completes
+        inside ``_reload_item_at``, and the loop simply continues.  An async one
+        returns with ``decoding`` set, and the completion handlers call
+        :meth:`_advance_reload_all` to resume.
+        """
+        state = self.__dict__.get("_reload_all_state")
+        if state is None:
+            return
+        if self.__dict__.get("_reload_all_draining"):
+            return
+        self._reload_all_draining = True
+        try:
+            self._run_reload_all_steps_locked(state)
+        finally:
+            self._reload_all_draining = False
+
+    def _run_reload_all_steps_locked(self, state: dict) -> None:
+        """The step loop itself; callers must hold ``_reload_all_draining``."""
+        while state["index"] < len(self.items):
+            index = state["index"]
+            state["index"] = index + 1
+            try:
+                item = self._reload_item_at(index)
+            except Exception:
+                # One bad item must not abort the batch: log, mark it failed and
+                # keep going.  The final finish is what restores the UI state.
+                logger.exception("Reload All: item %d failed", index)
+                continue
+            if item is None:
+                continue
+            if any(it.decoding for it in self.items):
+                # An asynchronous decode is running; its completion resumes us.
+                return
+        self._finish_reload_all()
+
+    def _advance_reload_all(self, finished: ViewerItem | None) -> None:
+        """Resume the batch after a decode reported back (success or error).
+
+        A **synchronous** decode (standard image) reports success from inside
+        ``_reload_item_at`` itself, i.e. while ``_run_reload_all_steps`` (the loop
+        that dispatched it) is still on the stack.  Resuming there would recurse
+        one frame per item and blow the Python stack at ~150 items, so the
+        in-progress loop keeps ownership: it continues by itself once the decode
+        returns, and this handler only serves the asynchronous case.
+        """
+        if not self._reload_all_active():
+            return
+        if self.__dict__.get("_reload_all_draining"):
+            # A step loop is on the stack; it will continue when the (synchronous)
+            # decode returns.  Re-entering here would recurse.
+            return
+        if any(it.decoding for it in self.items):
+            # Another decode is still running (e.g. a user-initiated one).
+            return
+        try:
+            self._run_reload_all_steps()
+        except Exception:
+            # Never let an exception escape into the Qt slot: Qt swallows it and
+            # the batch would stay half-open with repaints disabled.
+            logger.exception("Reload All advance failed; restoring state")
+            self._finish_reload_all()
+
+    def _finish_reload_all(self) -> None:
+        """Close out a Reload All batch and perform its single UI refresh.
+
+        Idempotent and defensive: even without a live state object it repairs a
+        leaked batch section, so no path can leave the window with repaints
+        disabled.
+        """
+        state = self.__dict__.get("_reload_all_state")
+        self._reload_all_state = None
+        if state is not None:
+            self._batch_end(state.get("batch_owner"))
+        elif self.__dict__.get("_batch_suppress"):
+            # A previous (interrupted) batch left the section open: close it
+            # outright rather than leaving the window unable to repaint.
+            #
+            # Trade-off, stated explicitly: this repair *masks* an unpaired
+            # ``_batch_begin``/``_batch_end`` elsewhere (the depth is forced to
+            # zero instead of being decremented).  That is accepted deliberately —
+            # a stuck ``updatesEnabled(False)`` freezes the whole window with no
+            # user-recoverable path, which is strictly worse than hiding a
+            # bookkeeping bug.  Today only Reload All can reach this branch; if a
+            # second caller appears, give it its own repair instead of widening
+            # this one.
+            self._batch_depth = 0
+            self._batch_suppress = False
+            try:
+                self.setUpdatesEnabled(True)
+            except (RuntimeError, AttributeError):  # pragma: no cover - stub
+                pass
+
     # ── 标签右键菜单（需求 5）────────────────────────────────────────
 
     def _show_tab_context_menu(self, pos) -> None:
@@ -1783,7 +2347,11 @@ class MainWindow(QMainWindow):
         """
         if action is None:
             return
-        if action is self.__dict__.get("_acTabCloseAll"):
+        if action is self.__dict__.get("_acTabReload"):
+            self.reload_item(index)
+        elif action is self.__dict__.get("_acTabReloadAll"):
+            self.reload_all_items()
+        elif action is self.__dict__.get("_acTabCloseAll"):
             self.close_all_items()
         elif action is self.__dict__.get("_acTabCloseRight"):
             self.close_items_to_the_right(index)
@@ -1793,16 +2361,27 @@ class MainWindow(QMainWindow):
 
         动作与菜单都以 ``item_tabs``（真实 QObject）为父对象：真实窗口与
         ``MainWindow.__new__`` 测试桩（不带完整 Qt 初始化）下都能安全构造。
-        两个 action 不带 triggered 连接：真正分派在 ``_show_tab_context_menu``
+        各 action 不带 triggered 连接：真正分派在 ``_show_tab_context_menu``
         里按 exec_ 返回的对象身份完成，避免 `QMenu.exec_` 触发动作再叠加一次。
+
+        菜单顺序：Reload / Reload All Items ─(分隔线)─ Close Items to the Right /
+        Close All Items。Reload 组在前，因为它是"把磁盘内容读进现有标签"的
+        非破坏性操作；关闭组在后且带分隔线，避免误点到关闭。
         """
         parent = self.item_tabs
+        reload_one = QAction("Reload", parent)
+        reload_all = QAction("Reload All Items", parent)
         close_all = QAction("Close All Items", parent)
         close_right = QAction("Close Items to the Right", parent)
         m = QMenu(parent)
-        m.addAction(close_all)
+        m.addAction(reload_one)
+        m.addAction(reload_all)
+        m.addSeparator()
         m.addAction(close_right)
+        m.addAction(close_all)
         self._tabRMenu = m
+        self._acTabReload = reload_one
+        self._acTabReloadAll = reload_all
         self._acTabCloseAll = close_all
         self._acTabCloseRight = close_right
         return m
@@ -2292,11 +2871,20 @@ class MainWindow(QMainWindow):
         self.decode_current(show_error=True)
 
     def _nav_frame(self, item: ViewerItem, delta: int) -> None:
-        """Navigate frames by delta (-1 prev, +1 next) for any item (not just current)."""
+        """Navigate frames by delta (-1 prev, +1 next) for any item (not current).
+
+        Guarded like its neighbours: ``_detach_item_from_page`` sets
+        ``frame_nav`` to ``None`` for a reloaded/closed item, so a call reached
+        through a stale reference must be a no-op rather than an AttributeError.
+        """
+        if item is None:
+            return
         new_index = item.current_frame + delta
         if 0 <= new_index < item.total_frames:
             item.current_frame = new_index
-            item.frame_nav.set_frame_index(new_index)
+            frame_nav = getattr(item, "frame_nav", None)
+            if _widget_alive(frame_nav):
+                frame_nav.set_frame_index(new_index)
             # If this is the current visible tab, decode immediately.
             if item is self._current_item():
                 self.decode_current(show_error=True)
@@ -2409,6 +2997,7 @@ class MainWindow(QMainWindow):
     def _decode_item(
         self, item: ViewerItem, *, warn_mismatch: bool = False,
         show_error: bool = True, user_apply: bool = False,
+        background: bool = False,
     ) -> None:
         """Decode one specific *item* (which need not be the visible tab).
 
@@ -2417,6 +3006,12 @@ class MainWindow(QMainWindow):
         2).  The panel is only consulted when *item* is the visible tab; for a
         background item its own ``options`` are the sole source of truth, so a
         queue step can never inherit the panel's (or the pin's) values.
+
+        ``background=True`` marks the request as intentionally decoding a tab
+        that is not the visible one (queue step, reload of a background tab,
+        duplicate open of it).  The marker is armed *after*
+        ``_invalidate_pending_decode()`` — that call clears it — so the worker
+        reply can be attributed to this item instead of the visible tab.
         """
         path = item.options.file_path
         if not path:
@@ -2427,6 +3022,8 @@ class MainWindow(QMainWindow):
         # then rejects every late finished/error signal while lifecycle signal
         # connections still quit/delete the old worker/thread normally.
         self._invalidate_pending_decode()
+        if background:
+            self._background_decode_item = item
         # STRUCTURAL no-commit guarantee: build the candidate parameters on a
         # *temporary* object.  ``item.options`` is only overwritten by
         # ``_on_decode_success`` once a decode really succeeded, so every early
@@ -2582,7 +3179,7 @@ class MainWindow(QMainWindow):
         # the starter; it is saved only after any old worker is disconnected.
         self._start_async_decode(
             data, item, opts, effective_offset, cache_key, show_error,
-            user_apply=user_apply, commit_options=opts,
+            user_apply=user_apply, background=background, commit_options=opts,
             commit_frame=candidate_frame, commit_frames=candidate_frames,
         )
 
@@ -2661,6 +3258,7 @@ class MainWindow(QMainWindow):
         cache_key: str | None = None,
         show_error: bool = True,
         user_apply: bool = False,
+        background: bool = False,
         commit_options: DecodeOptions | None = None,
         commit_frame: int | None = None,
         commit_frames: int | None = None,
@@ -2670,6 +3268,10 @@ class MainWindow(QMainWindow):
         # standalone still supersede their predecessor exactly once.
         self._invalidate_pending_decode()
         self._pending_decode_item = item
+        # Re-arm here, not in _decode_item: this method invalidates again, which
+        # clears the marker, so the background ownership must be re-stated after
+        # the pending item is recorded.
+        self._background_decode_item = item if background else None
         # _cancel_async_decode() clears the old request's key; only now is it
         # safe to associate the new worker with the exact bytes/key it reads.
         self._pending_cache_key = cache_key
@@ -2779,6 +3381,7 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self._pending_decode_item = None
+        self._background_decode_item = None
         self._pending_cache_key = None
         self._pending_decode_show_error = True
         self._pending_user_apply = False
@@ -2870,16 +3473,32 @@ class MainWindow(QMainWindow):
         if generation != self._decode_generation:
             return False
         pending = self.__dict__.get("_pending_decode_item")
-        if pending is not None and self.__dict__.get("_open_decode_in_flight") is pending:
-            # A batch-open step decodes a background tab on purpose; its own
-            # item owns the result even though it is not the visible tab.
+        return id(item) == id(pending) or self._owns_background_decode(pending)
+
+    def _owns_background_decode(self, pending: ViewerItem | None) -> bool:
+        """Whether *pending* is an intentionally **background** decode target.
+
+        Two features decode a tab that is not the visible one:
+
+        * the multi-file open queue (``_open_decode_in_flight``), and
+        * a reload of a *background* tab / a duplicate open of it
+          (``_background_decode_item``).
+
+        Both must be recognised here, otherwise ``_decode_result_target`` answers
+        with the visible tab, the identity check fails, the result is discarded
+        and the background tab stays on ``Decoding...`` forever (the state that
+        made Reload All freeze every tab except the last).
+        """
+        if pending is None:
+            return False
+        if self.__dict__.get("_open_decode_in_flight") is pending:
             return True
-        return id(item) == id(pending)
+        return self.__dict__.get("_background_decode_item") is pending
 
     def _decode_result_target(self) -> ViewerItem | None:
-        """The item a worker result belongs to (visible tab or batch step)."""
+        """The item a worker result belongs to (visible tab or a background one)."""
         pending = self.__dict__.get("_pending_decode_item")
-        if pending is not None and self.__dict__.get("_open_decode_in_flight") is pending:
+        if self._owns_background_decode(pending):
             return pending
         return self._current_item()
 
@@ -2892,6 +3511,7 @@ class MainWindow(QMainWindow):
             )
             return
         self._pending_decode_item = None
+        self._background_decode_item = None
         # Consume the per-request intent together with the pending refs: only
         # this request's own flag may authorize the memory write (H-1).
         user_apply = self.__dict__.get("_pending_user_apply", False)
@@ -2973,8 +3593,16 @@ class MainWindow(QMainWindow):
         #   那会被 tab 切换/预设选择误触发）。
         self._set_tab_dirty(item, False)
         item.decoding = False
-        item.view.set_pixmap(QPixmap.fromImage(qimg))
-        item.view.fit_image()
+        # The item may have been reloaded or closed while its decode was in
+        # flight: the ViewerItem survives in the worker's closure but its page
+        # (and therefore its ImageView) has already been destroyed.  Touching a
+        # dead C++ widget is a use-after-free, so guard on the item still owning
+        # a live view before painting.  Data/status updates above are harmless
+        # and are kept so late results stay observable in the logs/state.
+        view = getattr(item, "view", None)
+        if _widget_alive(view):
+            view.set_pixmap(QPixmap.fromImage(qimg))
+            view.fit_image()
         self._set_item_state(
             item, restored_msg if restored_msg is not None else "Decoded", "ok",
         )
@@ -3001,6 +3629,7 @@ class MainWindow(QMainWindow):
         if current is not None:
             self._advance_apply_all(current, True)
         self._advance_open_queue(item, True)
+        self._advance_reload_all(item)
 
     def _on_decode_error(self, generation: int, message: str) -> None:
         item = self._decode_result_target()
@@ -3012,6 +3641,7 @@ class MainWindow(QMainWindow):
             return
         show_error = self.__dict__.get("_pending_decode_show_error", True)
         self._pending_decode_item = None
+        self._background_decode_item = None
         self._pending_decode_show_error = True
         # A failed request never authorizes a memory write and never commits its
         # candidate parameters; drop both so a later decode cannot inherit them.
@@ -3038,6 +3668,7 @@ class MainWindow(QMainWindow):
         if current is not None:
             self._advance_apply_all(current, False)
         self._advance_open_queue(item, False)
+        self._advance_reload_all(item)
 
     # ── Save ─────────────────────────────────────────────────────────
 

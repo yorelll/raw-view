@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.5.3** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.5.5** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -18,7 +18,8 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **CLI 模式**：支持命令行解码 RAW/YUV→PNG/JPEG（`python -m raw_view view`）、编码 image→RAW/YUV（`convert`）、批量模式（`batch`）、启动 GUI 并打开文件
 - 支持主界面拖拽打开文件、拖拽文件夹自动扫描 RAW/YUV 文件、拖入时高亮窗口边框视觉反馈
 - 支持转换输入拖拽
-- 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item；**点住标签名称可左右拖动排序**
+- 支持多标签页 item：可同时打开多文件、独立参数、关闭单个 item；**点住标签名称可左右拖动排序**；**标签右键支持 Reload / Reload All Items**（从磁盘重新读取并重新解码，等价于关闭再打开但保持标签位置不变，用于外部修改文件后刷新显示）
+- **同路径自动去重**：再次打开已打开的文件时不再产生第二个标签，而是用最新读取的内容覆盖原标签并**保持其位置**；批量打开中的重复路径同样只保留一份，且不会漏解码
 - **批量打开逐个解码**：一次打开/拖入多个文件（含拖入文件夹、CLI 启动多文件）时，**每个文件都会用自己的本体参数静默解码一次**，不再只有最后一个显示图像。解码由单 worker 串行排队、事件驱动推进：界面不阻塞，可随时切换/关闭标签（关闭排队的文件会被安全跳过，队列继续），单个文件失败只把该标签标为 `Decode failed`，不会弹窗也不影响其它文件。状态栏与每个标签各自的状态文案绑定，切到未解码的文件显示 `Not decoded yet`，绝不会残留上一个文件的 `Restored remembered parameters (...)`
 - 支持 Recent Files 最近文件列表
 - Convert 输出支持默认 `convert_out` 目录（可在 Settings 调整）与手动更改
@@ -383,7 +384,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
-- **GitHub Actions 自动发布**：推送形如 `v0.5.3` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.5.5` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

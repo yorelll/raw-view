@@ -1451,7 +1451,18 @@ class TabContextMenuWiringTests(_StubWindowCleanupMixin):
         w = _new_window_with_tabs()
         menu = MainWindow._build_tab_context_menu(w)
         texts = [a.text() for a in menu.actions()]
-        self.assertEqual(texts, ["Close All Items", "Close Items to the Right"])
+        # Reload group first (non-destructive), then a separator, then the
+        # close group.  A separator action reports an empty text.
+        self.assertEqual(
+            texts,
+            [
+                "Reload",
+                "Reload All Items",
+                "",
+                "Close Items to the Right",
+                "Close All Items",
+            ],
+        )
         for a in menu.actions():
             self.assertTrue(a.shortcut().isEmpty(), "右键菜单无需快捷键")
 

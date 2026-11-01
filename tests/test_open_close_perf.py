@@ -37,7 +37,12 @@ from _settings_isolation import ensure_test_settings_file  # noqa: E402
 ensure_test_settings_file()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from _qt_cleanup import destroy_widget, flush_deferred_deletes  # noqa: E402
+from _qt_cleanup import (  # noqa: E402
+    begin_widget_leak_check,
+    destroy_widget,
+    end_widget_leak_check,
+    flush_deferred_deletes,
+)
 from PyQt5.QtCore import QSettings  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
@@ -66,9 +71,15 @@ def _write(path: str, size: int = 64) -> str:
 
 
 class _WindowFixture(unittest.TestCase):
-    """Temp dir + isolated INI settings + a real, shown MainWindow."""
+    """Temp dir + isolated INI settings + a real, shown MainWindow.
+
+    Arms the L3 widget-leak guard: ``unittest discover`` never loads
+    ``conftest.py``, so a bare ``unittest.TestCase`` fixture would leave the CI
+    path without leak protection (CLAUDE.md §4).
+    """
 
     def setUp(self):
+        begin_widget_leak_check()
         self.tmp = tempfile.mkdtemp(prefix="rv-perf-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.settings = AppSettings(
@@ -81,7 +92,10 @@ class _WindowFixture(unittest.TestCase):
         _APP.processEvents()
 
     def tearDown(self):
-        destroy_widget(self.w)
+        try:
+            destroy_widget(self.w)
+        finally:
+            end_widget_leak_check(type(self).__name__)
 
     def _file(self, name: str, size: int = 64) -> str:
         return _write(os.path.join(self.tmp, name), size)
