@@ -1,0 +1,46 @@
+# Temporary diagnostic workflow (not part of the release pipeline).
+#
+# Goal: pin down the "QThread: Destroyed while thread is still running" abort
+# that only reproduces on ubuntu-latest / Python 3.12.  Each job runs ONE
+# targeted experiment so the result is unambiguous.  Delete this file once the
+# root cause is fixed.
+
+name: DIAG
+
+on:
+  push:
+    branches:
+      - diag
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: ${{ matrix.experiment }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        experiment:
+          - single-test
+          - single-test-gc-off
+          - single-test-thread-hooks
+          - three-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -c constraints.txt
+
+      - name: Run experiment
+        env:
+          PYTHONFAULTHANDLER: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: python -u tools/diag_thread_abort.py "${{ matrix.experiment }}"
