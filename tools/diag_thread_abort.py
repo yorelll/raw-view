@@ -35,6 +35,15 @@ _APP = QApplication.instance() or QApplication([])
 from raw_view.gui.app import MainWindow  # noqa: E402
 from raw_view.models import AppSettings, DecodeOptions  # noqa: E402
 
+_SUITE_MODULES = (
+    "test_app_logic", "test_batch_open_and_chrome", "test_cli_fixes",
+    "test_converter", "test_converter_extended", "test_dialog_fixes",
+    "test_formats", "test_formats_extended", "test_gui_helpers",
+    "test_improvements", "test_open_close_perf", "test_params_memory_pin",
+    "test_qt_cleanup_guard", "test_reload_and_dedupe", "test_tab_drag",
+    "test_ui_interactions", "test_yonly",
+)
+
 #: One default-geometry RAW8 frame; enough to make a decode take real time.
 _SIZE = 8 * 8
 
@@ -190,7 +199,9 @@ def main(argv: list[str]) -> int:
         _teardown(window)
         print("  OK", flush=True)
 
-    elif experiment in ("suite-gc-on", "suite-gc-off", "suite-gc-freeze"):
+    elif experiment in (
+        "suite-gc-on", "suite-gc-off", "suite-gc-freeze", "suite-gc-on-repeat",
+    ):
         # Hypothesis: the cyclic GC frees a QThread whose thread is still
         # running (its only strong reference is a cycle through the
         # finished->deleteLater lambdas).  Running the *whole* suite is what the
@@ -209,27 +220,27 @@ def main(argv: list[str]) -> int:
             print("  gc default", flush=True)
 
         suite = unittest.TestSuite()
-        for name in (
-            "test_app_logic", "test_batch_open_and_chrome", "test_cli_fixes",
-            "test_converter", "test_converter_extended", "test_dialog_fixes",
-            "test_formats", "test_formats_extended", "test_gui_helpers",
-            "test_improvements", "test_open_close_perf",
-            "test_params_memory_pin", "test_qt_cleanup_guard",
-            "test_reload_and_dedupe", "test_tab_drag",
-            "test_ui_interactions", "test_yonly",
-        ):
+        for name in _SUITE_MODULES:
             try:
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
             except Exception as exc:  # pragma: no cover - diagnostic only
                 print(f"  skip {name}: {exc}", flush=True)
         print(f"  loaded {suite.countTestCases()} tests", flush=True)
-        result = unittest.TextTestRunner(verbosity=1).run(suite)
-        print(
-            f"  run={result.testsRun} failures={len(result.failures)} "
-            f"errors={len(result.errors)}",
-            flush=True,
-        )
-        return 0 if result.wasSuccessful() else 1
+        rounds = 2 if experiment == "suite-gc-on-repeat" else 1
+        for round_index in range(rounds):
+            print(f"  -- suite round {round_index} --", flush=True)
+            suite = unittest.TestSuite()
+            for name in _SUITE_MODULES:
+                suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
+            result = unittest.TextTestRunner(verbosity=1).run(suite)
+            print(
+                f"  run={result.testsRun} failures={len(result.failures)} "
+                f"errors={len(result.errors)}",
+                flush=True,
+            )
+            if not result.wasSuccessful():
+                return 1
+        return 0
 
     elif experiment == "three-tests":
         # Hypothesis: single runs pass, but consecutive windows abort (state

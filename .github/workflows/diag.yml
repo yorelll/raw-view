@@ -24,8 +24,7 @@ jobs:
       matrix:
         experiment:
           - suite-gc-on
-          - suite-gc-off
-          - suite-gc-freeze
+          - suite-gc-on-repeat
     steps:
       - uses: actions/checkout@v4
 
