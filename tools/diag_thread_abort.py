@@ -157,6 +157,39 @@ def main(argv: list[str]) -> int:
         _teardown(window)
         print("  OK", flush=True)
 
+    elif experiment in ("file-only", "file-only-preceded"):
+        # Hypothesis: the abort needs a *previous* test's leaked QThread to be
+        # collectable when the current test allocates.  Run the real test file
+        # (or a couple of files) through unittest on this runner.
+        import unittest
+
+        suite = unittest.TestSuite()
+        if experiment == "file-only-preceded":
+            for name in ("test_app_logic", "test_ui_interactions",
+                         "test_open_close_perf", "test_params_memory_pin"):
+                suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
+        suite.addTests(
+            unittest.defaultTestLoader.loadTestsFromName("test_batch_open_and_chrome")
+        )
+        result = unittest.TextTestRunner(verbosity=1).run(suite)
+        print(f"  tests run={result.testsRun} failures={len(result.failures)} "
+              f"errors={len(result.errors)}", flush=True)
+        return 0 if result.wasSuccessful() else 1
+
+    elif experiment == "faithful-runcase":
+        # Hypothesis: the abort needs `close_all_items()` from a *previous*
+        # run_case to strand a running thread, which the next case's decode
+        # setup then collects.  Mirrors the test body exactly, one window.
+        window = _new_window()
+        for step in range(4):
+            print(f"  -- run_case {step} --", flush=True)
+            _preflight_case(window)
+            window.close_all_items()
+            _APP.processEvents()
+            print(f"  close_all_items {step} done", flush=True)
+        _teardown(window)
+        print("  OK", flush=True)
+
     elif experiment == "three-tests":
         # Hypothesis: single runs pass, but consecutive windows abort (state
         # carried across cases, e.g. a held thread from the previous window).

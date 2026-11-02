@@ -23,10 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         experiment:
-          - single-test
-          - single-test-gc-off
-          - single-test-thread-hooks
-          - three-tests
+          - faithful-runcase
+          - file-only
+          - file-only-preceded
     steps:
       - uses: actions/checkout@v4
 
