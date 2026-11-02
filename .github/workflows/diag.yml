@@ -24,7 +24,7 @@ jobs:
       matrix:
         experiment:
           - suite-gc-on
-          - suite-gc-on-repeat
+          - file-only
     steps:
       - uses: actions/checkout@v4
 
