@@ -190,6 +190,47 @@ def main(argv: list[str]) -> int:
         _teardown(window)
         print("  OK", flush=True)
 
+    elif experiment in ("suite-gc-on", "suite-gc-off", "suite-gc-freeze"):
+        # Hypothesis: the cyclic GC frees a QThread whose thread is still
+        # running (its only strong reference is a cycle through the
+        # finished->deleteLater lambdas).  Running the *whole* suite is what the
+        # CI job does, so it is the environment that matters -- the minimal
+        # scripts above all survived.
+        import unittest
+
+        if experiment == "suite-gc-off":
+            gc.disable()
+            print("  gc disabled", flush=True)
+        elif experiment == "suite-gc-freeze":
+            gc.collect()
+            gc.freeze()
+            print("  gc frozen (all current objects moved to permanent)", flush=True)
+        else:
+            print("  gc default", flush=True)
+
+        suite = unittest.TestSuite()
+        for name in (
+            "test_app_logic", "test_batch_open_and_chrome", "test_cli_fixes",
+            "test_converter", "test_converter_extended", "test_dialog_fixes",
+            "test_formats", "test_formats_extended", "test_gui_helpers",
+            "test_improvements", "test_open_close_perf",
+            "test_params_memory_pin", "test_qt_cleanup_guard",
+            "test_reload_and_dedupe", "test_tab_drag",
+            "test_ui_interactions", "test_yonly",
+        ):
+            try:
+                suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
+            except Exception as exc:  # pragma: no cover - diagnostic only
+                print(f"  skip {name}: {exc}", flush=True)
+        print(f"  loaded {suite.countTestCases()} tests", flush=True)
+        result = unittest.TextTestRunner(verbosity=1).run(suite)
+        print(
+            f"  run={result.testsRun} failures={len(result.failures)} "
+            f"errors={len(result.errors)}",
+            flush=True,
+        )
+        return 0 if result.wasSuccessful() else 1
+
     elif experiment == "three-tests":
         # Hypothesis: single runs pass, but consecutive windows abort (state
         # carried across cases, e.g. a held thread from the previous window).

@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         experiment:
-          - faithful-runcase
-          - file-only
-          - file-only-preceded
+          - suite-gc-on
+          - suite-gc-off
+          - suite-gc-freeze
     steps:
       - uses: actions/checkout@v4
 
