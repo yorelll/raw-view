@@ -54,11 +54,6 @@ jobs:
           pip install -r requirements.txt -c constraints.txt
 
       - name: Run test suite (unittest)
-        # faulthandler stays on: a QThread lifecycle bug aborts the process
-        # rather than failing an assertion, and the dump is the only trace that
-        # names the test that triggered it.
-        env:
-          PYTHONFAULTHANDLER: "1"
         run: python -m unittest discover -s tests -q
 
       - name: Smoke test CLI --batch-help

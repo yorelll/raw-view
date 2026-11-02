@@ -11,14 +11,7 @@ from pathlib import Path
 import numpy as np
 from PyQt5 import sip
 
-from PyQt5.QtCore import (
-    QCoreApplication,
-    QEvent,
-    QSignalBlocker,
-    QThread,
-    Qt,
-    pyqtSignal,
-)
+from PyQt5.QtCore import QEvent, QSignalBlocker, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
@@ -412,9 +405,6 @@ class MainWindow(QMainWindow):
         self._active_item_ref: ViewerItem | None = None
         self._loading_item = False
         self._thread: QThread | None = None
-        # Superseded (thread, worker) pairs kept referenced until their thread
-        # stops: freeing a running QThread makes Qt abort (see _start_async_decode).
-        self._held_decode_threads: list[tuple] = []
         self._worker: DecodeWorker | None = None
         # Generation counter for async decodes. Incremented on every start, so
         # results/errors from an older (cancelled/abandoned) worker, whose
@@ -3316,30 +3306,6 @@ class MainWindow(QMainWindow):
         # for error messages via `source_offset`.
         spec = ImageSpec(opts.width, opts.height, 0)
 
-        # Rebinding ``_thread`` drops the last strong reference to the previous
-        # one.  If that thread is still running its only remaining tie is the
-        # self-cycle created by ``finished -> deleteLater``, which the cyclic GC
-        # may collect right here (inside this very function -- that is the exact
-        # frame CI's faulthandler dump points at).  Freeing the wrapper of a
-        # running QThread makes Qt abort the process (exit 134).  Wait it out
-        # first: the queue is serial anyway, so a superseded worker is short.
-        # A serial queue replaces the thread on every step, while the previous
-        # one is still winding down (``_on_decode_finished`` runs on the worker
-        # thread before ``quit()`` takes effect).  Rebinding below would leave
-        # it referenced only by its own ``finished -> deleteLater`` cycle, and
-        # the GC may free that wrapper during *any* allocation in this function
-        # -- CI's faulthandler dump points at the ``DecodeWorker()`` line.
-        # Freeing a running QThread aborts the process (exit 134), so join the
-        # outgoing thread and keep every thread this window ever created
-        # referenced until it has stopped.
-        self._join_decode_thread(self.__dict__.get("_thread"))
-        self._reap_finished_threads()
-        retired = (
-            self.__dict__.get("_thread"),
-            self.__dict__.get("_worker"),
-        )
-        if retired[0] is not None:
-            self.__dict__.setdefault("_held_decode_threads", []).append(retired)
         self._thread = QThread()
         self._worker = DecodeWorker()
         self._worker.moveToThread(self._thread)
@@ -3381,67 +3347,6 @@ class MainWindow(QMainWindow):
         if item is self._current_item():
             self._set_state("Decoding...", "busy")
         self._thread.start()
-        # ``retired`` is intentionally left in scope: it must survive every
-        # allocation in this function so a GC pass cannot free the previous
-        # (already stopped) thread/worker from inside decode setup.  It is
-        # released when the frame returns.
-
-    def _reap_finished_threads(self) -> None:
-        """Drop held references to decode threads that have now stopped.
-
-        ``_start_async_decode`` parks each outgoing (thread, worker) pair in
-        ``self._held_decode_threads`` so a GC pass cannot free a still-running
-        ``QThread`` (Qt aborts the process: exit 134).  Once a thread has
-        actually stopped the pair can be released normally.
-        """
-        held = self.__dict__.get("_held_decode_threads")
-        if not held:
-            return
-        still_running = []
-        for thread, worker in held:
-            try:
-                if thread.isRunning():
-                    still_running.append((thread, worker))
-                    continue
-            except RuntimeError:  # pragma: no cover - wrapper already deleted
-                continue
-        self._held_decode_threads = still_running
-
-    @staticmethod
-    def _join_decode_thread(thread, *, timeout_ms: int = 20000) -> None:
-        """Wait for a superseded decode thread to stop before dropping it.
-
-        ``_start_async_decode`` rebinds ``_thread`` and ``closeEvent`` clears
-        it; in both cases a still-running ``QThread`` would otherwise be kept
-        alive only by its own ``finished -> deleteLater`` cycle.  The cyclic GC
-        can free that wrapper while the C++ thread runs, and Qt aborts the whole
-        process: ``QThread: Destroyed while thread is still running`` / exit 134.
-        Every assertion may already have passed, so the failure looks unrelated
-        to the test that caused it.
-
-        Waiting is event-driven with a real deadline (not a fixed sleep), and
-        duck-typed stubs -- bare ``object()`` placeholders in ``_thread`` -- are
-        ignored.  A thread that will not stop within the bound is left running:
-        blocking the UI thread forever would be worse than the abort risk.
-        """
-        if thread is None:
-            return
-        is_running = getattr(thread, "isRunning", None)
-        wait = getattr(thread, "wait", None)
-        if is_running is None or wait is None:
-            return
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        while time.monotonic() < deadline:
-            try:
-                if not is_running():
-                    wait()
-                    return
-            except RuntimeError:  # pragma: no cover - wrapper already deleted
-                return
-            # Let the worker's finished/quit signals run; ``QThread.wait()``
-            # alone would block the UI thread before the thread's event loop
-            # gets a chance to process them.
-            QCoreApplication.processEvents()
 
     def _invalidate_pending_decode(self) -> None:
         """Supersede an in-flight request so its late UI signals are stale.
