@@ -65,6 +65,34 @@ from raw_view.models import (
 
 logger = get_logger(__name__)
 
+#: Strong references to decode ``QThread`` instances that have been started but
+#: have not yet reported ``finished``.
+#:
+#: Why this exists (CI-only crash, ubuntu-latest + Python 3.12):
+#: ``_cancel_async_decode`` deliberately drops ``self._thread`` so a superseded
+#: decode stops being tracked.  The thread object then only survived through the
+#: reference cycle formed by its own ``finished``/``error`` lambda connections
+#: (``thread.finished.connect(thread.deleteLater)`` etc.).  Python's cyclic GC
+#: is free to collect such a cycle at *any* allocation — including while the OS
+#: thread is still running — and PyQt then destroys a running ``QThread``, which
+#: Qt turns into ``QThread: Destroyed while thread is still running`` followed by
+#: ``abort()`` (exit code 134).  That abort happens inside whatever allocation
+#: triggered the collection, which is why the traceback pointed at the *next*
+#: decode's ``QThread()`` construction rather than at the cancelled one.
+#:
+#: Holding each running thread here makes "collectable while running"
+#: impossible; the strong reference is released only from the thread's own
+#: ``finished`` signal, i.e. after Qt has stopped it.  The set is module-level
+#: (not per-window) so a thread that outlives its ``MainWindow`` — exactly the
+#: cross-test case that blew up in CI — is still protected.
+_ACTIVE_THREADS: set[QThread] = set()
+
+
+def _retain_running_thread(thread: QThread) -> None:
+    """Keep *thread* strongly referenced until it has actually stopped."""
+    _ACTIVE_THREADS.add(thread)
+    thread.finished.connect(lambda: _ACTIVE_THREADS.discard(thread))
+
 
 def resource_path(relative: str) -> str:
     """Resolve a bundled resource path in both dev and PyInstaller runs."""
@@ -3335,14 +3363,27 @@ class MainWindow(QMainWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_decode_finished)
         self._worker.error.connect(self._on_decode_error)
-        # deleteLater() is queued on the worker thread BEFORE quit(), so the
-        # deferred delete is processed as the event loop unwinds; the QThread
-        # wrapper is deleteLater'd once the thread has fully stopped.
-        self._worker.finished.connect(lambda *_: worker.deleteLater())
+        # Worker teardown is chained to the *thread* finishing, not to the
+        # worker's own signal: ``_on_decode_finished``/``_on_decode_error`` are
+        # queued into the GUI thread, so deleting the worker on the worker
+        # thread can destroy the C++ object before the GUI thread has dispatched
+        # that queued call — a use-after-free observed as a segfault inside the
+        # per-item lambda (ubuntu-latest + Python 3.12, second full-suite round).
+        # Quitting the thread on the worker signal is still correct and is what
+        # lets ``finished`` fire at all.
         self._worker.finished.connect(lambda *_: thread.quit())
-        self._worker.error.connect(lambda *_: worker.deleteLater())
         self._worker.error.connect(lambda *_: thread.quit())
+        # ``thread.finished`` is emitted by the QThread object, whose thread
+        # affinity is the GUI thread, so these run there: the worker's event loop
+        # has already stopped (safe to delete) and no further queued worker call
+        # can be in flight.
+        self._thread.finished.connect(worker.deleteLater)
         self._thread.finished.connect(thread.deleteLater)
+        # Protect the thread from the cyclic GC until it has really stopped: a
+        # cancelled decode drops `self._thread`, and collecting the remaining
+        # reference cycle while the OS thread still runs makes Qt abort the
+        # whole process (see _ACTIVE_THREADS).
+        _retain_running_thread(thread)
 
         if item is self._current_item():
             self._set_state("Decoding...", "busy")
