@@ -1196,6 +1196,28 @@ class BatchTargetValidationTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("NaN", proc.stderr)
 
+    def test_per_entry_enum_errors_are_readable_not_tracebacks(self):
+        """Per-entry mode/target/input_type validation happens inside the FAIL path."""
+        import cv2
+
+        png = os.path.join(self._tmp, "i.png")
+        cv2.imwrite(png, np.zeros((4, 4, 3), dtype=np.uint8))
+        for entry, needle in (
+            ({"input": png, "mode": "FROBNICATE"}, "invalid mode"),
+            ({"input": png, "target": "PNG"}, "invalid target"),
+            ({"input": png, "input_type": "nope"}, "invalid input_type"),
+        ):
+            with self.subTest(entry=entry):
+                proc = self._run_spec({
+                    "mode": "convert", "target": "RAW", "raw_type": "RAW8",
+                    "width": 4, "height": 4, "files": [entry],
+                })
+                self.assertEqual(proc.returncode, 1)
+                combined = proc.stdout + proc.stderr
+                self.assertIn(needle, combined)
+                self.assertNotIn("Traceback (most recent call last)", combined)
+                self.assertIn("FAIL", combined)
+
     def test_malformed_json_is_a_readable_error(self):
         proc = self._run_spec("{not json")
         self.assertEqual(proc.returncode, 1)

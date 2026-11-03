@@ -1232,12 +1232,15 @@ def _run_batch(args: argparse.Namespace) -> None:
             continue
 
         params = _resolve_entry_params(entry, defaults)
-        mode = _normalize_choice(params["mode"], _BATCH_MODES, "mode")
-        target = _normalize_choice(params["target"], _BATCH_TARGETS, "target")
-        output_dir = params.pop("output_dir") or _default_out_dir(mode)
 
         # ── Input source for this entry (each entry carries its own) ──
+        # Everything that can reject the entry's own settings happens here,
+        # before any output directory is created or any file is written.  The
+        # enum checks live inside the try too: a per-entry "mode": "FROBNICATE"
+        # must produce one readable FAIL line, not a traceback (D6).
         try:
+            mode = _normalize_choice(params["mode"], _BATCH_MODES, "mode")
+            target = _normalize_choice(params["target"], _BATCH_TARGETS, "target")
             kind = _resolve_entry_input_type(params, mode)
             width, height = _resolve_entry_dimensions(
                 kind, params["width"], params["height"]
@@ -1250,6 +1253,7 @@ def _run_batch(args: argparse.Namespace) -> None:
             print(f"  FAIL: {input_path} -> {exc}")
             failed += 1
             continue
+        output_dir = params.pop("output_dir") or _default_out_dir(mode)
 
         # ── 单帧字节上限校验（防超大宽高导致 OOM/崩溃/写出巨型文件）──
         # D1: convert 分支此前完全没有校验（batch 能真的写出 513MB 的 RAW32、
