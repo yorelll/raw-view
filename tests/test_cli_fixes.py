@@ -29,6 +29,7 @@ import numpy as np
 
 from _settings_isolation import (
     ensure_test_settings_file,
+    isolated_env,
     isolated_qt_material_resources,
 )
 
@@ -41,8 +42,9 @@ _MAIN_DIR = Path(__file__).resolve().parents[1]
 
 
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["PYTHONIOENCODING"] = "utf-8"
+    # isolated_env() points RAW_VIEW_LOG_DIR at a per-session temp directory, so
+    # this subprocess never appends to the developer's real raw-view.log.
+    env = isolated_env()
     return subprocess.run(
         [sys.executable, "-m", "raw_view", *argv],
         capture_output=True, text=True, encoding="utf-8", errors="replace",

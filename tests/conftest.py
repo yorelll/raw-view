@@ -32,6 +32,16 @@ from _settings_isolation import (  # noqa: E402
 )
 
 adopt_pytest_settings_file(_SETTINGS_FILE)
+
+# Same reasoning for file logging: tests that spawn ``python -m raw_view`` would
+# otherwise append to the developer's real log, and several of them running
+# concurrently make RotatingFileHandler's rename fail on Windows -- which used to
+# dump a "--- Logging error ---" traceback onto the CLI's stderr.  One temp
+# directory per session, published so every test module agrees on it.
+_LOG_DIR = tempfile.mkdtemp(prefix="raw-view-pytest-logs-")
+atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
+os.environ["RAW_VIEW_TEST_LOG_DIR"] = _LOG_DIR
+os.environ["RAW_VIEW_LOG_DIR"] = _LOG_DIR
 # qt-material regenerates its SVG icon tree (rmtree + makedirs) into the shared
 # ~/.qt_material on every apply_stylesheet().  Concurrent pytest processes on one
 # machine thereby delete each other's files and fail with a random

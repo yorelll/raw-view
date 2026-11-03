@@ -15,8 +15,16 @@
 3. GitHub Actions 工作流 `.github/workflows/build-release.yml`（tag 触发）自动：
    - Windows 环境安装 Python 3.12 + 全部依赖（叠加 `constraints.txt` 锁定版本）；
    - 运行 `python -m unittest discover -s tests -q`（**测试不过不发布**）；
-   - 先用 PyInstaller **目录模式（onedir）** 打包 `dist/raw-view/`，再用 `--onefile` 打包单文件 exe（两次都在 staging 中暂存，互不覆盖）；
-   - 把 onedir 目录压缩为 `raw-view-<版本>-windows-x64.zip`（解压即用）；
+   - 用 PyInstaller 做 **3 次 onedir 构建 + 1 次 onefile 构建**（每次都 staging，互不覆盖）：
+     | 构建 | 入口 | 产物 |
+     |---|---|---|
+     | onedir `--windowed` | `raw_view/gui_entry.py` | `raw-view-gui.exe` + `_internal` |
+     | onedir `--console` | `raw_view/cli_entry.py` | `raw-view-cli.exe` |
+     | onedir `--windowed` | `raw_view/launcher.py` | `raw-view.exe`（launcher） |
+     | onefile `--windowed` | `raw_view/gui_entry.py` | `raw-view.exe`（单文件，仅 GUI） |
+   - 把三个 exe 组装进 **同一份 `_internal/`**（各带一份会让 zip 从约 136 MB 涨到约 383 MB）；
+   - 校验 PE subsystem 必须为 **2 / 2 / 3**（launcher / GUI / CLI）；
+   - 把目录压缩为 `raw-view-<版本>-windows-x64.zip`（解压即用）；
    - 生成 `raw-view.exe.sha256` 与 zip 的 `.sha256` 校验和；
    - 创建/更新 Release（名称 `raw-view <版本>`，包含 **zip + exe + 两个校验和** + 版本说明）。
 4. 到仓库 **Releases** 页面即可看到并下载 `raw-view-<版本>-windows-x64.zip`（推荐，解压即用）或 `raw-view.exe`（单文件）。
@@ -36,14 +44,58 @@ Windows 中双击（或在 `cmd` 中执行 `release.bat`）会自动：
 1. 激活项目 `.venv`；
 2. 运行 `python -m pytest tests/ -q`，测试失败则中止；
 3. 读取 `raw_view.models.APP_VERSION`；
-4. 分别构建 onedir 目录包与单文件 exe（使用 staging 目录避免两次 `--clean` 互删）；
-5. 生成 `dist/raw-view.exe`、`dist/raw-view-<版本>-windows-x64.zip` 及各自 `.sha256`。
+4. 构建 3 次 onedir（windowed GUI / console CLI / windowed launcher）+ 1 次 onefile，
+   每次用独立的 `--distpath`/`--workpath`，避免 `--clean` 互删；
+5. 组装 `dist/raw-view/`：三个 exe + 一份共享 `_internal/`；
+6. 生成 `dist/raw-view.exe`、`dist/raw-view-<版本>-windows-x64.zip` 及各自 `.sha256`。
 
 > 这是**本地打包**工具，不会提交、推送或创建 GitHub Release。正式远程发布仍应按上文流程：
 > 提交 → push main → CI 通过 → 打 `v<版本>` tag，使 GitHub Actions 生成官方 Release。
 >
 > 前提：已创建 `.venv` 并安装依赖与 PyInstaller（见下方准备环境）。脚本根据当前
 > `APP_VERSION` 自动命名产物，避免手工修改版本号。
+
+---
+
+## 0.6 三种 exe 与共享 `_internal`（重要）
+
+zip 包里是**三个可执行文件 + 一份 `_internal/`**：
+
+```
+raw-view/
+├── raw-view.exe        launcher   GUI 子系统  无参数/view → GUI；命令/选项 → 转交 CLI
+├── raw-view-gui.exe    GUI only   GUI 子系统
+├── raw-view-cli.exe    CLI only   Console 子系统（不会弹窗）
+└── _internal/          三者共用（依赖树只存一份）
+```
+
+**为什么需要 launcher**：Windows 由**被启动的那个 exe** 的 PE subsystem 决定控制台行为。
+GUI 子系统写不了终端，Console 子系统双击时弹黑框，一个二进制无法兼顾，所以用 launcher 分流。
+
+**为什么必须共享 `_internal`**：实测两次 onedir 构建（windowed / console）的 `_internal`
+共 3177 个文件，其中 **3176 个逐字节相同**，唯一差异 `base_library.zip` 内容等价
+（155 个 entry 大小/CRC/内容全同，仅 ZIP 内条目顺序不同），交叉运行已验证。因此三者共享
+一份即可：zip 从约 383 MB 降到约 136 MB。
+
+**launcher 的终端处理**（最容易做错的地方）：必须**先包装继承来的 std 句柄，再按需
+`AttachConsole`**。顺序反过来会让 `> file` 与 `| pipe` 都变成 0 字节——`AttachConsole`
+会覆盖继承的重定向/管道句柄。实现见 `raw_view/launcher.py` 的 `_forward()`。
+
+**分流规则**（`raw_view/launcher.py::decide_target`，纯函数、可单测）：
+
+| 输入 | 目标 |
+|---|---|
+| 无参数 / `view` / `view f1 f2…` | GUI |
+| `-h` `--help` `--version` `--batch-help` | CLI |
+| `convert …` / `batch …` / `view -i …` | CLI |
+| 任一 CLI 选项（含 `--width=800` 形式） | CLI |
+| 其它（如裸文件名 `a.raw`） | CLI，由 argparse 报 usage（rc=2） |
+
+> 刻意**不做参数改写**：`raw-view.exe a.raw` 不会变成 `view a.raw`。若把无法识别的参数
+> 判成 GUI，`raw-view.exe --width 800`（拼错的选项）会真的弹窗并阻塞终端。
+
+`raw-view-cli.exe` 通过环境变量 `RAW_VIEW_NO_GUI=1`（由 `cli_entry.main()` 设置）保证
+**任何路径都不会启动 GUI**：缺 `-i` 或没有子命令时直接报 usage 并返回 2，而不是挂起。
 
 ---
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -74,6 +75,137 @@ _initialized = False
 #: 环境变量名：以数字或级别名（DEBUG/INFO/WARNING/...）控制全局 logger 级别，
 #: 覆盖 setup_logger 的默认 DEBUG。不设置时行为与旧版一致（DEBUG）。
 _LEVEL_ENV = "RAW_VIEW_LOG_LEVEL"
+
+
+# ---------------------------------------------------------------------------
+# File handler: a rotation that cannot rename the log must never reach stderr
+# ---------------------------------------------------------------------------
+
+#: Minimum seconds between two "rotation failed" notices, so a permanently
+#: locked log cannot turn the file itself into a flood.
+_ROTATE_NOTICE_INTERVAL = 60.0
+
+
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """``RotatingFileHandler`` whose failures stay out of the user's terminal.
+
+    Two independent problems are handled here.
+
+    **1. A failed rotation keeps the handler alive.**  ``doRollover()`` renames
+    ``raw-view.log`` to ``raw-view.log.1``.  On Windows that rename fails with
+    ``WinError 32`` whenever another process holds the file open -- a second
+    running instance, a log viewer, a backup agent.  ``RotatingFileHandler``
+    then propagates the ``PermissionError`` out of ``emit()``, ``logging`` calls
+    ``Handler.handleError``, and Python prints a full ``--- Logging error ---``
+    traceback *to stderr*.  For a CLI that promises one readable ``Error: ...``
+    line (see ``__main__._log_failure``) that is a contract break: the user gets
+    five stack traces instead of one sentence.  A failed rotation is therefore
+    swallowed and the handler keeps appending to the current file -- the log
+    stays complete, it just does not get rotated this time.
+
+    **2. ``handleError`` is also neutered for this handler only.**  Rotation is
+    not the only way ``emit()`` can fail (the disk can fill up, the file can be
+    deleted mid-run).  ``Handler.handleError`` is a *global* switch
+    (``logging.raiseExceptions``) that affects every handler, so changing it
+    would silence real problems elsewhere.  Overriding it on this one instance
+    keeps the blast radius to file logging.
+
+    Errors are not hidden: they are counted, and the next *successful* write
+    records a one-line notice (rate-limited) so the log itself shows the gap.
+    That is why ``handleError`` sets a flag instead of simply returning.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: Set whenever an emit/rotation went wrong; consumed by the next write.
+        self._pending_notice: str | None = None
+        self._last_notice_at = 0.0
+        self._writing_notice = False
+
+    # -- emission / rotation ----------------------------------------------
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Rotate if needed, then write -- and keep writing when rotation fails.
+
+        ``RotatingFileHandler.emit`` wraps ``doRollover()`` and
+        ``FileHandler.emit()`` in one ``try``: a failed rollover therefore skips
+        the write *and* escapes to ``handleError``.  Splitting the two lets a
+        locked file degrade to "no rotation this time, record still appended",
+        which keeps the log complete.
+        """
+        try:
+            if self.shouldRollover(record):
+                try:
+                    self.doRollover()
+                except OSError as exc:
+                    self._note_failure(
+                        f"log rotation failed ({exc.__class__.__name__}: {exc}); "
+                        f"continuing to append to {self.baseFilename}"
+                    )
+            # Deliberately the FileHandler implementation: the record is written
+            # even when the rollover above gave up.
+            logging.FileHandler.emit(self, record)
+        except Exception:  # noqa: BLE001 - mirrors logging's own catch-all
+            self.handleError(record)
+        else:
+            self._flush_pending_notice()
+
+    # -- error reporting --------------------------------------------------
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802
+        """Record that formatting/writing failed; never write to stderr.
+
+        Deliberately does **not** call ``super().handleError``: the base
+        implementation prints ``--- Logging error ---`` plus a traceback and a
+        call stack to ``sys.stderr``.  Scoping the override to this handler (as
+        opposed to the global ``logging.raiseExceptions``) leaves every other
+        handler unaffected.
+        """
+        self._note_failure(
+            f"could not write log record from {record.name}; "
+            "file logging may be incomplete"
+        )
+
+    def _note_failure(self, message: str) -> None:
+        """Remember a failure so the next successful write can mention it."""
+        # Last one wins: a burst of identical rotation errors is one problem.
+        self._pending_notice = message
+
+    def _flush_pending_notice(self) -> None:
+        """Write the deferred notice, at most once per ``_ROTATE_NOTICE_INTERVAL``.
+
+        This is what keeps a swallowed failure observable: the log itself gains
+        a ``logging degraded: ...`` line, so "the log has a gap" is discoverable
+        without ever writing to the user's terminal.
+        """
+        notice = self._pending_notice
+        if notice is None or self._writing_notice:
+            return
+        now = time.monotonic()
+        if now - self._last_notice_at < _ROTATE_NOTICE_INTERVAL:
+            return
+        self._last_notice_at = now
+        self._pending_notice = None
+        self._writing_notice = True
+        try:
+            # Write through the file handler directly: going through the logger
+            # would re-enter this emit().
+            logging.FileHandler.emit(
+                self,
+                logging.LogRecord(
+                    name="raw_view.logger",
+                    level=logging.WARNING,
+                    pathname=__file__,
+                    lineno=0,
+                    msg="logging degraded: %s",
+                    args=(notice,),
+                    exc_info=None,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - the notice must never break logging
+            pass
+        finally:
+            self._writing_notice = False
 
 
 def _parse_level(level: int | str | None) -> int:
@@ -152,7 +284,7 @@ def setup_logger(
     # -- File handler (loglevel 级别的文件过滤) --
     # 文件 handler 固定不高于全局级别，避免低级别日志写满磁盘。
     try:
-        fh = RotatingFileHandler(
+        fh = SafeRotatingFileHandler(
             str(log_file), maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
         )
         fh.setLevel(level)

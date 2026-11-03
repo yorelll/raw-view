@@ -35,6 +35,54 @@ import tempfile
 
 _SETTINGS_FILE: str | None = None
 _RESOURCES_DIR: str | None = None
+_LOG_DIR: str | None = None
+
+
+#: Environment variable raw_view honours to redirect file logging.  Tests that
+#: spawn ``python -m raw_view`` must set it: otherwise every such subprocess
+#: appends to the developer's real ``%LOCALAPPDATA%\raw-view\logs\raw-view.log``.
+LOG_DIR_ENV = "RAW_VIEW_LOG_DIR"
+#: Environment variable pytest's conftest publishes so every test module in the
+#: same session shares one temp log directory (see conftest.py).
+_LOG_DIR_ENV_FOR_TESTS = "RAW_VIEW_TEST_LOG_DIR"
+
+
+def session_log_dir() -> str:
+    """Return this session's private log directory, creating it on first use.
+
+    One directory per *test process* (not per test) is enough: the point is that
+    no subprocess ever touches the real user log, not that two tests cannot
+    interleave their lines.  Reusing one directory also keeps the file count
+    low and lets a test that cares read back what its own child wrote.
+    """
+    global _LOG_DIR
+    if _LOG_DIR is None:
+        # pytest's conftest may have created one already; honour it so modules
+        # loaded under different import paths still agree.
+        adopted = os.environ.get(_LOG_DIR_ENV_FOR_TESTS, "").strip()
+        if adopted:
+            _LOG_DIR = adopted
+            os.makedirs(_LOG_DIR, exist_ok=True)
+        else:
+            _LOG_DIR = tempfile.mkdtemp(prefix="raw-view-test-logs-")
+            atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
+    return _LOG_DIR
+
+
+def isolated_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a subprocess environment with logging redirected to a temp dir.
+
+    Deliberately sets ``RAW_VIEW_LOG_DIR`` *after* copying the current
+    environment and *before* applying *extra*, so a caller that is explicitly
+    testing the override (an unusable path, a relative path) can still win by
+    passing its own value in *extra*.
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env[LOG_DIR_ENV] = session_log_dir()
+    if extra:
+        env.update(extra)
+    return env
 
 
 def adopt_pytest_settings_file(path: str) -> None:
@@ -60,6 +108,13 @@ def ensure_test_settings_file() -> str:
     # Do not use setdefault: an inherited shell setting must never direct this
     # test process at another file.
     os.environ["RAW_VIEW_TEST_SETTINGS_FILE"] = _SETTINGS_FILE
+    # Same for logging.  Installing it in the process environment (not only in
+    # per-call subprocess env dicts) is what covers indirect spawns too -- the
+    # launcher tests start `python -m raw_view` through launcher.run(), which
+    # inherits os.environ rather than taking an env argument.
+    log_dir = session_log_dir()
+    os.environ[LOG_DIR_ENV] = log_dir
+    os.environ[_LOG_DIR_ENV_FOR_TESTS] = log_dir
     return _SETTINGS_FILE
 
 

@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 
 from _settings_isolation import (
     ensure_test_settings_file,
+    isolated_env,
     isolated_qt_material_resources,
 )
 
@@ -170,7 +171,7 @@ class CLIFixTests(unittest.TestCase):
     def test_command_does_not_crash_as_module_subprocess(self):
         """Full end-to-end: ``python -m raw_view --batch-help`` exits 0."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        env = dict(os.environ)
+        env = isolated_env()
         env.pop("PYTHONIOENCODING", None)
         env.pop("PYTHONUTF8", None)
         proc = subprocess.run(

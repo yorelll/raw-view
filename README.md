@@ -90,7 +90,6 @@ python -m raw_view view -i input.raw -o gray.png --target RAW --preview-mode Gra
 # 无 -i 时启动交互式 GUI（可同时打开文件）
 python -m raw_view view
 python -m raw_view view file1.raw file2.png
-python -m raw_view file1.raw file2.png
 ```
 
 ### CLI 转换模式（Image → RAW/YUV）
@@ -422,6 +421,48 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 - RAW 格式默认：RAW12、MSB 对齐、2560×1440
 - YUV 格式默认：YUYV
 - 帧号显示与状态栏均从 1 开始计数
+
+## 两种分发形态（务必区分）
+
+| | **zip 版**（推荐） | **单文件版** |
+|---|---|---|
+| 产物 | 目录 + 3 个 exe + 一份 `_internal/` | 单个 `raw-view.exe` |
+| GUI | ✅ `raw-view.exe`（双击）/ `raw-view-gui.exe` | ✅ 双击 |
+| **命令行** | ✅ `raw-view.exe <命令>` / `raw-view-cli.exe <命令>` | ❌ **不支持** |
+| 启动速度 | 快（无需自解压） | 首次较慢（自解压到临时目录） |
+| 体积 | 约 136 MB（zip 压缩后） | 约 122 MB |
+
+> **单文件版仅提供 GUI**。需要命令行（`view` / `convert` / `batch` / `--batch-help`）请使用 **zip 版**。
+
+### zip 版里的三个 exe
+
+| exe | 子系统 | 用途 |
+|---|---|---|
+| `raw-view.exe` | GUI | **launcher**：无参数或 `view [文件…]` → 启动 GUI；`convert` / `batch` / `-h` / `--version` / 任何 CLI 选项 → 转交给命令行 |
+| `raw-view-gui.exe` | GUI | 只启动 GUI（供 launcher 调用，也可直接用） |
+| `raw-view-cli.exe` | Console | 只跑命令行，**绝不弹窗**；缺参数时直接报 usage 并返回 2 |
+
+三个 exe **共享同一份 `_internal/`**（各带一份会让 zip 从约 136 MB 涨到约 383 MB）。
+
+### 命令行用法（zip 版）
+
+```bash
+# 查看帮助 / 版本
+raw-view.exe --batch-help
+raw-view.exe --version
+
+# 解码 RAW/YUV -> PNG
+raw-view.exe view -i input.raw -o out.png --target RAW --raw-type RAW12 --width 1920 --height 1080
+
+# 编码 PNG/JPG -> RAW/YUV
+raw-view.exe convert -i img.png --target YUV --yuv-type NV12 --width 2560 --height 1440
+
+# 批量
+raw-view.exe batch -b spec.json
+```
+
+> **裸文件参数不支持**：`raw-view.exe a.raw` 不会自动变成 `view a.raw`，而是由 argparse
+> 报 usage 并返回 **2**。要用 GUI 打开文件请写 `raw-view.exe view a.raw` 或直接双击拖入窗口。
 
 ## 打包为 EXE
 

@@ -13,7 +13,8 @@
 ```markdown
 ## raw-view <版本号>
 
-Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
+Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态：
+zip 版含 GUI + 命令行三个 exe，单文件版仅 GUI）。
 
 > 来源：Git tag `v<版本号>` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**<N> passed**）。
 ```
@@ -29,14 +30,34 @@ Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供*
 2. …
 
 ### 使用方式
-- **zip 版（推荐）**：下载 `raw-view-<版本号>-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
-- **单文件版**：下载 `raw-view.exe` 双击运行。
-- 命令行示例：`raw-view.exe view -i in.raw -o out.png --width 2560 --height 1440`；`raw-view.exe --batch-help`。
+
+**zip 版（推荐，含命令行）**：下载 `raw-view-<版本号>-windows-x64.zip` 解压，进入 `raw-view/`。
+包里三个 exe 各司其职，且**共用一份 `_internal/`**：
+
+| exe | 用途 |
+|---|---|
+| `raw-view.exe` | 双击启动 GUI；带命令/选项时自动转交命令行 |
+| `raw-view-gui.exe` | 只启动 GUI |
+| `raw-view-cli.exe` | 只跑命令行（不弹窗） |
+
+```bash
+raw-view.exe --batch-help
+raw-view.exe view -i in.raw -o out.png --target RAW --raw-type RAW12 --width 1920 --height 1080
+raw-view.exe convert -i img.png --target YUV --yuv-type NV12 --width 2560 --height 1440
+raw-view.exe batch -b spec.json
+```
+
+> **裸文件参数不支持**：`raw-view.exe a.raw` 不会自动变成 `view a.raw`，会报 usage 并返回 2。
+> 用 GUI 打开文件请写 `raw-view.exe view a.raw`，或直接把文件拖进窗口。
+
+**单文件版（仅 GUI）**：下载 `raw-view.exe` 双击运行。**该形态不提供命令行**，
+需要 `view` / `convert` / `batch` 请使用 zip 版。
+
 - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
 ### 文件
-- **`raw-view-<版本号>-windows-x64.zip`** — zip 压缩包（onedir，解压即用，约 <大小> MB）
-- **`raw-view.exe`** — 单文件 exe（约 <大小> MB）
+- **`raw-view-<版本号>-windows-x64.zip`** — zip 压缩包（解压即用，含 launcher + GUI + CLI 三 exe 与共享 `_internal/`，约 <大小> MB）
+- **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 <大小> MB）
 - 各附 `.sha256` 校验和
 
 ### 系统要求

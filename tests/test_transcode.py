@@ -33,6 +33,7 @@ import numpy as np
 
 from _settings_isolation import (
     ensure_test_settings_file,
+    isolated_env,
     isolated_qt_material_resources,
 )
 
@@ -94,9 +95,16 @@ def _run_cli(*argv: str) -> subprocess.CompletedProcess:
 
 
 def _run_cli_env(extra_env: dict[str, str], *argv: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["PYTHONIOENCODING"] = "utf-8"
-    env.update(extra_env)
+    """Run the CLI in a subprocess with file logging pointed at a temp dir.
+
+    Every CLI subprocess test goes through here.  Without the redirect each one
+    appends to the developer's real log; several running at once then make
+    ``RotatingFileHandler``'s rename fail, and the resulting "--- Logging error
+    ---" tracebacks were what leaked onto the CLI's stderr.  ``isolated_env``
+    sets ``RAW_VIEW_LOG_DIR`` first, so a test that deliberately passes its own
+    value (``LogDirOverrideSafetyTests``) still overrides it.
+    """
+    env = isolated_env(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "raw_view", *argv],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -1174,6 +1182,124 @@ class LogDirOverrideSafetyTests(unittest.TestCase):
                 logger_mod.setup_logger("raw_view.n1_probe", log_dir="/nonexistent/x")
             finally:
                 logger_mod._initialized = True
+
+
+class LogRotationFailureTests(unittest.TestCase):
+    """A locked log file must never put a traceback on the user's terminal.
+
+    ``RotatingFileHandler.doRollover()`` renames ``raw-view.log`` to
+    ``raw-view.log.1``.  On Windows that fails with ``WinError 32`` whenever
+    another process holds the file open -- a second instance, a log viewer, a
+    backup agent.  The exception escaped ``emit()``, Python's
+    ``Handler.handleError`` printed a full ``--- Logging error ---`` traceback to
+    **stderr**, and the CLI's promise of one readable ``Error: ...`` line was
+    broken (several such blocks per command, one per log record).
+
+    These tests drive the real handler and, for the end-to-end case, a real
+    subprocess, so the guarantee is checked at the same level it broke.
+    """
+
+    def _locked_handler(self, log_dir: str):
+        """A handler whose log file is held open by *another* handle."""
+        from raw_view.logger import SafeRotatingFileHandler
+
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "raw-view.log")
+        # Bigger than maxBytes so the very next record tries to roll over.
+        with open(path, "wb") as f:
+            f.write(b"x" * (8 * 1024))
+        holder = open(path, "rb+")  # no delete sharing on Windows -> rename fails
+        handler = SafeRotatingFileHandler(
+            path, maxBytes=1024, backupCount=1, encoding="utf-8"
+        )
+        self.addCleanup(holder.close)
+        self.addCleanup(handler.close)
+        return handler
+
+    def test_rollover_failure_does_not_escape_emit(self):
+        import logging
+
+        log_dir = tempfile.mkdtemp(prefix="rv-rotlock-")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        handler = self._locked_handler(log_dir)
+        record = logging.LogRecord(
+            "raw_view.test", logging.INFO, __file__, 0, "hello", None, None
+        )
+        # Must not raise: the base class lets PermissionError out of emit().
+        handler.emit(record)
+        # The notice is written (and cleared) by the successful append that
+        # follows the failed rollover, so the evidence lives in the file itself:
+        # the record was still written *and* the degradation was recorded.
+        handler.flush()
+        logged = open(handler.baseFilename, "rb").read().decode("utf-8", "replace")
+        self.assertIn("hello", logged, "轮转失败后记录仍应写入当前文件")
+        self.assertIn("log rotation failed", logged, "降级必须可感知，不能静默隐藏")
+        self.assertIsNone(
+            handler._pending_notice, "提示写出后应清空，避免每条记录重复"
+        )
+
+    def test_handler_error_never_writes_to_stderr(self):
+        """``handleError`` is overridden per handler, not globally."""
+        import io as io_mod
+        import logging
+
+        log_dir = tempfile.mkdtemp(prefix="rv-rotlock2-")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        handler = self._locked_handler(log_dir)
+        captured = io_mod.StringIO()
+        original = sys.stderr
+        sys.stderr = captured
+        try:
+            handler.handleError(logging.LogRecord(
+                "raw_view.test", logging.INFO, __file__, 0, "boom", None, None
+            ))
+        finally:
+            sys.stderr = original
+        self.assertEqual(captured.getvalue(), "", "logging 内部错误不得进 stderr")
+
+    def test_global_raise_exceptions_is_not_changed(self):
+        """The fix must be scoped to this handler, not the whole logging module."""
+        import logging
+
+        before = logging.raiseExceptions
+        log_dir = tempfile.mkdtemp(prefix="rv-rotlock3-")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        handler = self._locked_handler(log_dir)
+        handler.emit(logging.LogRecord(
+            "raw_view.test", logging.INFO, __file__, 0, "hi", None, None
+        ))
+        self.assertEqual(logging.raiseExceptions, before)
+
+    def test_cli_stderr_stays_one_line_with_a_locked_log(self):
+        """End-to-end: the exact combination that used to print stack traces."""
+        log_dir = tempfile.mkdtemp(prefix="rv-rotcli-")
+        work = tempfile.mkdtemp(prefix="rv-rotcli-w-")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+
+        path = os.path.join(log_dir, "raw-view.log")
+        with open(path, "wb") as f:
+            f.write(b"x" * (5 * 1024 * 1024 + 1024))  # force a rollover
+        empty = os.path.join(work, "empty.raw")
+        open(empty, "wb").close()
+
+        holder = open(path, "rb+")
+        try:
+            proc = _run_cli_env(
+                {"RAW_VIEW_LOG_DIR": log_dir},
+                "view", "-i", empty, "-o", os.path.join(work, "o.png"),
+                "--width", "64", "--height", "64",
+            )
+        finally:
+            holder.close()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("Logging error", proc.stderr)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+        self.assertIn("Error:", proc.stderr, "程序自己的错误行必须仍在")
+        # ...and the degradation is still observable in the log itself.
+        logged = open(path, "rb").read().decode("utf-8", "replace")
+        self.assertIn("log rotation failed", logged)
 
 
 class BatchConvertLimitTests(unittest.TestCase):
