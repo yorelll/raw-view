@@ -6,11 +6,17 @@
 #
 # What it does:
 #   1. Runs the full test suite (so a broken release is never published)
-#   2. Installs PyInstaller and builds TWO artifacts:
-#        a. onedir bundle  -> dist/raw-view/  (directory with all deps)
-#        b. single file    -> dist/raw-view.exe
-#      Each is staged under .artifact/ first so the two PyInstaller runs
-#      (both --noconfirm --clean) never delete each other's output.
+#   2. Installs PyInstaller and builds the release artifacts:
+#        a. zip bundle     -> dist/raw-view/  (launcher + GUI + CLI, ONE _internal)
+#        b. single file    -> dist/raw-view.exe  (GUI only)
+#      The zip bundle's three executables share a single _internal directory.
+#      Building each with its own copy would take the download from ~132 MB to
+#      ~383 MB, so the onedir builds are assembled: the windowed build's
+#      tree is kept and both executables are copied into it (verified: 3176 of
+#      3177 files are byte-identical between the two builds, and the only
+#      difference - base_library.zip - is content-equivalent).
+#      Each build is staged under .artifact/ first so the --noconfirm --clean
+#      runs never delete each other's output.
 #   3. Zips the onedir bundle into a "unzip-and-run" package with the
 #      version in its file name (raw-view-<version>-windows-x64.zip).
 #   4. Runs the exe with --help (CLI smoke test) and lists the artifacts
@@ -77,47 +83,85 @@ jobs:
       # 的 Python，不存在 .venv/；而 PyInstaller 对不存在的 --add-data 源目录会直接
       # 报 ERROR 失败。因此 translations 路径由当前 python 安装位置推导，
       # 两种环境都能跑；缺失时仅提示（Qt 自带默认英文本地化，不影响功能）。
-      - name: Build onedir bundle with PyInstaller
+      # PyInstaller 每次打包都会 --noconfirm --clean 清理 build/ 与 dist/，
+      # 因此每次产物先落到独立 staging 目录（.artifact/...），避免互相删除。
+      #
+      # 三次构建、两个形态：
+      #   1. onedir --windowed  raw_view/gui_entry.py -> raw-view-gui.exe + _internal
+      #   2. onedir --console   raw_view/cli_entry.py -> raw-view-cli.exe
+      #   3. onedir --windowed  raw_view/launcher.py  -> raw-view.exe (launcher)
+      # 最终 zip 里三个 exe **共用一份 _internal**（取自构建 3）。
+      # translations 路径由当前 python 安装位置推导，CI 与本机都能跑；缺失时仅提示。
+      - name: Build onedir GUI half (windowed)
         run: |
-          # 用 Python 运行时查询实际 PyQt5 translations 路径，而不是从 python.exe
-          # 路径手工 Split-Path 推导（后者在 GitHub Actions 的 Python 布局下会多退
-          # 一级导致找不到目录，发布包缺失 Qt 本地化——0.2.1 review L-2）。
           $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
-          if (Test-Path $QT_TRANSLATIONS) {
-            pyinstaller --noconfirm --clean --windowed --name raw-view `
-              --hidden-import=cv2 `
-              --hidden-import=PIL `
-              --collect-all=cv2 `
-              --collect-all=PyQt5 `
-              --collect-all=qt_material `
-              --collect-all=qtawesome `
-              --collect-all=pypinyin `
-              --icon assets/raw-view.ico `
-              --add-data "assets;assets" `
-              --add-data "$QT_TRANSLATIONS;Qt5/translations" `
-              raw_view/__main__.py
-          } else {
-            Write-Host "PyQt5 Qt5 translations not found at $QT_TRANSLATIONS; skipping translations (Qt falls back to English built-ins)."
-            pyinstaller --noconfirm --clean --windowed --name raw-view `
-              --hidden-import=cv2 `
-              --hidden-import=PIL `
-              --collect-all=cv2 `
-              --collect-all=PyQt5 `
-              --collect-all=qt_material `
-              --collect-all=qtawesome `
-              --collect-all=pypinyin `
-              --icon assets/raw-view.ico `
-              --add-data "assets;assets" `
-              raw_view/__main__.py
-          }
-          # 目录模式输出到 dist/raw-view/，移入 staging 供压缩与 smoke test。
-          New-Item -ItemType Directory -Force .artifact | Out-Null
-          Move-Item dist\raw-view .artifact\raw-view
+          $TRANS = @()
+          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
+          else { Write-Host "Qt5 translations not found; Qt falls back to English built-ins." }
+          pyinstaller --noconfirm --clean --windowed --name raw-view-gui `
+            --hidden-import=cv2 `
+            --hidden-import=PIL `
+            --collect-all=cv2 `
+            --collect-all=PyQt5 `
+            --collect-all=qt_material `
+            --collect-all=qtawesome `
+            --collect-all=pypinyin `
+            --icon assets/raw-view.ico `
+            --add-data "assets;assets" `
+            @TRANS `
+            --distpath .artifact/gui `
+            --workpath build/gui `
+            raw_view/gui_entry.py
+          if (-not (Test-Path .artifact/gui/raw-view-gui/raw-view-gui.exe)) { throw "GUI half missing" }
 
-      # 第二次：单文件 exe（--onefile），同样落到 staging，而不是留在 dist/，
-      # 避免后续 --clean 步骤与 dist/ 目录混淆。
-      - name: Build single-file exe with PyInstaller
+      - name: Build onedir CLI half (console)
         run: |
+          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
+          $TRANS = @()
+          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
+          pyinstaller --noconfirm --clean --console --name raw-view-cli `
+            --hidden-import=cv2 `
+            --hidden-import=PIL `
+            --collect-all=cv2 `
+            --collect-all=PyQt5 `
+            --collect-all=qt_material `
+            --collect-all=qtawesome `
+            --collect-all=pypinyin `
+            --icon assets/raw-view.ico `
+            --add-data "assets;assets" `
+            @TRANS `
+            --distpath .artifact/cli `
+            --workpath build/cli `
+            raw_view/cli_entry.py
+          if (-not (Test-Path .artifact/cli/raw-view-cli/raw-view-cli.exe)) { throw "CLI half missing" }
+
+      - name: Build onedir launcher
+        run: |
+          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
+          $TRANS = @()
+          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
+          pyinstaller --noconfirm --clean --windowed --name raw-view `
+            --hidden-import=cv2 `
+            --hidden-import=PIL `
+            --collect-all=cv2 `
+            --collect-all=PyQt5 `
+            --collect-all=qt_material `
+            --collect-all=qtawesome `
+            --collect-all=pypinyin `
+            --icon assets/raw-view.ico `
+            --add-data "assets;assets" `
+            @TRANS `
+            --distpath .artifact/bundle `
+            --workpath build/launcher `
+            raw_view/launcher.py
+          if (-not (Test-Path .artifact/bundle/raw-view/raw-view.exe)) { throw "launcher missing" }
+
+      # 单文件版：GUI only（PyInstaller --onefile 不允许同一 exe 同时是 console 与 GUI）。
+      - name: Build single-file exe (GUI only)
+        run: |
+          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
+          $TRANS = @()
+          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
           pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
             --hidden-import=cv2 `
             --hidden-import=PIL `
@@ -128,29 +172,76 @@ jobs:
             --collect-all=pypinyin `
             --icon assets/raw-view.ico `
             --add-data "assets;assets" `
-            raw_view/__main__.py
-          Move-Item dist\raw-view.exe .artifact\raw-view.exe
+            @TRANS `
+            --distpath .artifact/onefile `
+            --workpath build/onefile `
+            raw_view/gui_entry.py
+          if (-not (Test-Path .artifact/onefile/raw-view.exe)) { throw "single-file exe missing" }
 
       - name: Collect release artifacts into dist
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Move-Item .artifact\raw-view.exe dist\raw-view.exe
-          # onedir 目录整体拷回 dist/raw-view/（若某步未生成会立刻失败）
-          if (-not (Test-Path .artifact\raw-view\raw-view.exe)) { throw "onedir bundle missing: .artifact\raw-view\raw-view.exe" }
-          Copy-Item -Recurse -Force .artifact\raw-view dist\raw-view
+          Copy-Item -Recurse -Force .artifact/bundle/raw-view dist/raw-view
+          Copy-Item -Force .artifact/gui/raw-view-gui/raw-view-gui.exe dist/raw-view/raw-view-gui.exe
+          Copy-Item -Force .artifact/cli/raw-view-cli/raw-view-cli.exe dist/raw-view/raw-view-cli.exe
+          Copy-Item -Force .artifact/onefile/raw-view.exe dist/raw-view.exe
+          Get-ChildItem dist/raw-view | Select-Object Name, Length
 
-      - name: Verify the exe exists
+      - name: Verify artifacts exist
         run: |
-          if (-not (Test-Path dist\raw-view.exe)) { throw "dist\raw-view.exe not found" }
+          $required = @(
+            'dist\raw-view.exe',
+            'dist\raw-view\raw-view.exe',
+            'dist\raw-view\raw-view-gui.exe',
+            'dist\raw-view\raw-view-cli.exe',
+            'dist\raw-view\_internal'
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "missing artifact: $path" }
+          }
+          Get-ChildItem dist\raw-view | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
           Get-Item dist\raw-view.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
-          if (-not (Test-Path dist\raw-view\raw-view.exe)) { throw "dist\raw-view\raw-view.exe (onedir) not found" }
-          Get-Item dist\raw-view\raw-view.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+          # The three executables must share ONE _internal, not three.
+          $trees = @(Get-ChildItem dist\raw-view -Recurse -Directory -Filter _internal)
+          if ($trees.Count -ne 1) { throw "expected exactly one _internal, found $($trees.Count)" }
 
-      - name: Smoke test CLI (onedir bundle)
-        run: .\dist\raw-view\raw-view.exe --batch-help
+      # 校验 PE subsystem：launcher/GUI 必须是 GUI(2)，CLI 必须是 Console(3)。
+      # 这是三 exe 方案的核心契约——写错会让 CLI 弹黑框或让 GUI 带控制台。
+      - name: Verify PE subsystems (2 / 2 / 3)
+        shell: pwsh
+        run: |
+          function Get-Subsystem($path) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            return [BitConverter]::ToUInt16($bytes, $pe + 4 + 20 + 68)
+          }
+          $expect = @{
+            'dist\raw-view\raw-view.exe'     = 2
+            'dist\raw-view\raw-view-gui.exe' = 2
+            'dist\raw-view\raw-view-cli.exe' = 3
+          }
+          foreach ($pair in $expect.GetEnumerator()) {
+            $actual = Get-Subsystem $pair.Key
+            Write-Host "$($pair.Key): subsystem=$actual (expected $($pair.Value))"
+            if ($actual -ne $pair.Value) { throw "wrong subsystem for $($pair.Key): $actual" }
+          }
 
-      - name: Smoke test CLI (single-file exe)
-        run: .\dist\raw-view.exe --batch-help
+      # 冒烟：CLI 路径（直接测 console exe，避免 launcher 的终端依赖干扰 CI）。
+      - name: Smoke test CLI executable
+        run: .\dist\raw-view\raw-view-cli.exe --batch-help
+
+      # 冒烟：launcher 转发（redirection 形式在 CI 里稳定可断言）。
+      - name: Smoke test launcher forwarding
+        shell: pwsh
+        run: |
+          .\dist\raw-view\raw-view.exe --version > version.txt
+          Get-Content version.txt
+          if (-not (Select-String -Path version.txt -Pattern 'raw-view' -Quiet)) {
+            throw "launcher --version produced no output"
+          }
+          # 裸文件名必须是 usage 错误（rc=2），绝不能启动 GUI 阻塞 CI。
+          .\dist\raw-view\raw-view.exe bare.raw 2>$null
+          if ($LASTEXITCODE -ne 2) { throw "bare filename should exit 2, got $LASTEXITCODE" }
 
       - name: Determine version from tag
         id: version
@@ -197,7 +288,8 @@ jobs:
           body: |
             ## raw-view ${{ steps.version.outputs.version }}
 
-            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态）。
+            Python 实现的 RAW / YUV 图像查看与格式转换工具（Windows，提供**单文件 exe 与 zip 压缩包**两种形态：
+            zip 版含 GUI + 命令行三个 exe，单文件版仅 GUI）。
 
             > 来源：Git tag `${{ steps.version.outputs.tag }}` · GitHub Actions 自动构建 · CI（Windows+Ubuntu × Py3.11/3.12）测试全绿（**581 passed**）。
 
@@ -255,10 +347,30 @@ jobs:
               最近文件菜单。
 
             ### 使用方式
-            - **zip 版（推荐）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/` 运行 `raw-view.exe`。
-            - **单文件版**：下载 `raw-view.exe` 双击运行。
+
+            **zip 版（推荐，含命令行）**：下载 `raw-view-${{ steps.version.outputs.version }}-windows-x64.zip` 解压，进入 `raw-view/`。
+            包内三个 exe 各司其职，且**共用一份 `_internal/`**：
+
+            | exe | 用途 |
+            |---|---|
+            | `raw-view.exe` | 双击启动 GUI；带命令/选项时自动转交命令行 |
+            | `raw-view-gui.exe` | 只启动 GUI |
+            | `raw-view-cli.exe` | 只跑命令行（不弹窗） |
+
+            ```bash
+            raw-view.exe --batch-help
+            raw-view.exe view -i in.raw -o out.png --target RAW --raw-type RAW12 --width 1920 --height 1080
+            raw-view.exe convert -i img.png --target YUV --yuv-type NV12 --width 2560 --height 1440
+            raw-view.exe batch -b spec.json
+            ```
+
+            > **裸文件参数不支持**：`raw-view.exe a.raw` 不会自动变成 `view a.raw`（会报 usage、返回 2）。
+            > 用 GUI 打开文件请写 `raw-view.exe view a.raw`，或直接把文件拖进窗口。
+
+            **单文件版（仅 GUI）**：下载 `raw-view.exe` 双击运行。**该形态不提供命令行**，
+            需要 `view` / `convert` / `batch` 请使用 zip 版。
+
             - **本地打包**：开发仓库中双击 `release.bat`（详见 `docs/release_exe.md`）。
-            - 命令行示例：`raw-view.exe convert -i img.png --target YUV --yuv-type YOnly12 --width 2560 --height 1440 --alignment lsb --endianness big`；`raw-view.exe --batch-help`。
             - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
             ### 功能总览
@@ -269,8 +381,8 @@ jobs:
             - CLI 模式（view / convert / batch，支持 glob/base_dir）、日志系统、崩溃日志、Light/Dark 主题
 
             ### 文件
-            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（onedir，解压即用，约 130 MB）
-            - **`raw-view.exe`** — 单文件 exe（约 125 MB）
+            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（解压即用；含 launcher + GUI + CLI 三个 exe 与共享 `_internal/`，约 137 MB）
+            - **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 123 MB）
             - 各附 `.sha256` 校验和（`sha256sum -c` 校验）
 
             ### 系统要求

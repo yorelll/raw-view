@@ -270,7 +270,18 @@ def _check_decode_args_for(
 # ── View mode (CLI decode + GUI fallback) ─────────────────────────────
 
 def _run_view_mode(args: argparse.Namespace) -> None:
-    """CLI decode (when -i given) or interactive GUI."""
+    """CLI decode (when -i given), or the GUI when that is allowed."""
+    if not args.input and not _gui_allowed():
+        # A pure CLI executable has no GUI to fall back to.  Silently starting
+        # one would block the terminal the user is typing in (and, under a
+        # --console image, do so with no window to close).  Report usage
+        # instead, exactly like argparse does for any other bad invocation.
+        print(
+            "Error: view mode needs --input in the command-line executable; "
+            "run raw-view.exe (the launcher) or raw-view-gui.exe for the GUI",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if args.input:
         _run_view_decode(
             input_path=args.input,
@@ -290,8 +301,27 @@ def _run_view_mode(args: argparse.Namespace) -> None:
         _run_gui(args.files)
 
 
+#: Set by the packaged console executable (``raw-view-cli.exe``) via
+#: ``RAW_VIEW_NO_GUI=1``.  It must never accept an invocation that would need a
+#: window, because it has none -- and because silently starting one would hang
+#: whatever terminal launched it.
+_NO_GUI_ENV = "RAW_VIEW_NO_GUI"
+
+
+def _gui_allowed() -> bool:
+    """Whether this process may start the interactive GUI."""
+    return os.environ.get(_NO_GUI_ENV, "") not in {"1", "true", "yes"}
+
+
 def _run_gui(files: list[str]) -> None:
     """Launch the interactive GUI, optionally opening the given files."""
+    if not _gui_allowed():
+        print(
+            "Error: this executable is command-line only (no GUI). "
+            "Run raw-view.exe or raw-view-gui.exe instead.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     from raw_view.gui.app import run
     run(files)
 
@@ -744,6 +774,18 @@ def main() -> None:
         _run_view_mode(args)
     else:
         _run_gui(args.files)
+
+
+def _cli_main() -> None:
+    """Entry point for ``raw-view-cli.exe``: never starts a GUI.
+
+    ``__main__.main`` treats "no usable mode" as "open the GUI", which is right
+    for a double-clicked launcher and fatal for a console executable (there is
+    no window to close, so the caller just hangs).  Marking the process up front
+    makes both fallbacks report usage instead.
+    """
+    os.environ[_NO_GUI_ENV] = "1"
+    main()
 
 
 if __name__ == "__main__":
