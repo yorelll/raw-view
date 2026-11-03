@@ -1136,7 +1136,11 @@ class LogDirOverrideSafetyTests(unittest.TestCase):
             "--version",
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("0.5.5", proc.stdout)
+        # Compare against the single source of truth, not a literal: a version
+        # bump must not turn this into a false failure.
+        from raw_view.models import APP_VERSION
+
+        self.assertIn(APP_VERSION, proc.stdout)
         self.assertNotIn("Traceback", proc.stderr)
 
     def test_unusable_override_falls_back_to_platform_dir(self):
