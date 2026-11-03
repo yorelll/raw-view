@@ -33,7 +33,11 @@ from raw_view.converter import (
     plan_image_variants,
     resolve_output_path_collision,
 )
-from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
+from raw_view.formats import (
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+    require_decode_size,
+)
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
@@ -72,6 +76,29 @@ class ConvertDialog(QDialog):
             "Path for the RAW or YUV output file."
         )
         self.output_edit.setPlaceholderText("Output path — auto-filled from the template if left blank")
+
+        # ── Input source ──────────────────────────────────────────────
+        # "Image" = historical behaviour (decode PNG/JPG/BMP, resize to the
+        # requested output size).  "YUV" = lossless byte rearrangement inside the
+        # YUV 4:2:2 / 4:2:0 family: width/height become the SOURCE frame
+        # dimensions and nothing is resized.  "RAW" is reserved (no conversion
+        # implemented yet); it is shown greyed so the intent stays visible.
+        self.input_type = QComboBox()
+        self.input_type.addItems(["Image", "YUV", "RAW (coming soon)"])
+        self.input_type.setItemData(
+            2,
+            "RAW input conversion (packed RAW, bit alignment, bit depth) is "
+            "reserved for a future release.",
+            Qt.ToolTipRole,
+        )
+        self.input_type.setAccessibleName("Input type")
+        self.input_type.setAccessibleDescription(
+            "Image: decode a PNG/JPG/BMP and encode it. "
+            "YUV: losslessly rearrange an existing YUV 4:2:2/4:2:0 file."
+        )
+
+        self.input_yuv_type = QComboBox()
+        self.input_yuv_type.addItems(ControlPanel.YUV_FORMATS)
 
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
@@ -196,6 +223,8 @@ class ConvertDialog(QDialog):
         # ── Layout construction ───────────────────────────────────────
         form = QFormLayout()
         form.addRow("Input image", input_row_w)
+        form.addRow("Input type", self.input_type)
+        form.addRow("Input YUV format", self.input_yuv_type)
         form.addRow("Output file", output_row_w)
         form.addRow("Target", self.target_type)
         form.addRow("RAW type", self.raw_type)
@@ -282,6 +311,9 @@ class ConvertDialog(QDialog):
         self.input_edit.textChanged.connect(self._update_preview)
         self.target_type.currentTextChanged.connect(self._sync_controls)
         self.raw_source_mode.currentTextChanged.connect(self._sync_controls)
+        self.input_type.currentTextChanged.connect(self._on_input_type_changed)
+        self.input_yuv_type.currentTextChanged.connect(self._sync_controls)
+        self.input_yuv_type.currentTextChanged.connect(self._update_preview)
         # 切换 YUV 格式（如 YUYV→YOnly）也要重跑条件显隐：YOnly 需显示位深/对齐/端序
         self.yuv_type.currentTextChanged.connect(self._sync_controls)
         self.target_type.currentTextChanged.connect(self._sync_default_output)
@@ -313,6 +345,35 @@ class ConvertDialog(QDialog):
 
     # ── internal slots ───────────────────────────────────────────────
 
+    def _on_input_type_changed(self) -> None:
+        """Switching the input type resets the dimensions and re-syncs controls.
+
+        Width/height mean different things per input type (output size for an
+        image, source frame size for YUV), so carrying a value across would
+        resize the wrong way.  The user confirmed they must be cleared rather
+        than carried over.
+        """
+        if self._is_yuv_input():
+            # The source list starts at YOnly (4:0:0), which converts to
+            # nothing; land on a format that actually has targets so the dialog
+            # does not open in a dead end.
+            from raw_view.transcode import YUV_TRANSCODE_FORMATS
+
+            if self._input_format() not in YUV_TRANSCODE_FORMATS:
+                self.input_yuv_type.setCurrentText(YUV_TRANSCODE_FORMATS[0])
+            # Source frame dimensions: nothing sensible can be inherited from
+            # the image path's default, so drop to the minimum and make the user
+            # enter the real geometry.
+            self.width.setValue(1)
+            self.height.setValue(1)
+        else:
+            # Back to the documented image-convert default.
+            self.width.setValue(DEFAULT_CONVERT_WIDTH)
+            self.height.setValue(DEFAULT_CONVERT_HEIGHT)
+        self._sync_controls()
+        self._sync_default_output()
+        self._update_preview()
+
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Input Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
@@ -328,20 +389,35 @@ class ConvertDialog(QDialog):
             self.output_edit.setText(path)
 
     def _sync_controls(self) -> None:
+        # QComboBox.setItemData() re-emits currentTextChanged in this dialog
+        # (PyQt5 5.15), which would call straight back into _sync_controls and
+        # recurse without bound.  The guard makes the slot idempotent under
+        # re-entry instead of relying on the widget's signal behaviour.
+        if getattr(self, "_syncing_controls", False):
+            return
+        self._syncing_controls = True
+        try:
+            self._sync_controls_locked()
+        finally:
+            self._syncing_controls = False
+
+    def _sync_controls_locked(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
         # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
         is_yonly = self.yuv_type.currentText() == "YOnly"
-        show_raw = is_raw
-        show_bit = (not is_raw) and is_yonly
+        is_yuv_input = self.input_type.currentText() == "YUV"
+        show_raw = is_raw and not is_yuv_input
+        show_bit = (not is_raw) and is_yonly and not is_yuv_input
         show_align_endian = is_raw or show_bit
         self.raw_type.setVisible(show_raw)
         self.bit_depth_combo.setVisible(show_bit)
         self.align.setVisible(show_align_endian)
         self.endian.setVisible(show_align_endian)
-        self.raw_source_mode.setVisible(is_raw)
-        self.bayer_pattern.setVisible(is_raw and is_bayer)
+        self.raw_source_mode.setVisible(show_raw)
+        self.bayer_pattern.setVisible(show_raw and is_bayer)
         self._yuv_note.setVisible(not is_raw)
+        self.input_yuv_type.setVisible(is_yuv_input)
         # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
         # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用
         # （0.2.2 review 发现：初启 Convert 对话框所有高级控件全灰）。
@@ -350,11 +426,84 @@ class ConvertDialog(QDialog):
             (self.bit_depth_combo, show_bit),
             (self.align, show_align_endian),
             (self.endian, show_align_endian),
-            (self.raw_source_mode, is_raw),
-            (self.bayer_pattern, is_raw and is_bayer),
+            (self.raw_source_mode, show_raw),
+            (self.bayer_pattern, show_raw and is_bayer),
+            (self.input_yuv_type, is_yuv_input),
         ):
             w.setEnabled(shown)
-        self.yuv_type.setEnabled(not is_raw)
+        # A YUV input is transcoded into another YUV layout only (RAW is a
+        # different family), so the target is pinned while it is chosen.
+        self.target_type.setEnabled(not is_yuv_input)
+        if is_yuv_input and self.target_type.currentText() != "YUV":
+            self.target_type.setCurrentText("YUV")
+        self.yuv_type.setEnabled(True if is_yuv_input else not is_raw)
+        self._refresh_target_formats()
+        # Width/height mean "source frame size" (parse only) for a YUV input and
+        # "output size" (resize) for an image; say which in the tooltips.
+        self._sync_dimension_hints()
+
+    # ── YUV input helpers ─────────────────────────────────────────────
+
+    def _is_yuv_input(self) -> bool:
+        return self.input_type.currentText() == "YUV"
+
+    def _input_format(self) -> str:
+        """Source YUV sub-format (only meaningful when input type is YUV)."""
+        return self.input_yuv_type.currentText()
+
+    def _refresh_target_formats(self) -> None:
+        """Grey out targets the current source format cannot convert into.
+
+        Non-convertible entries stay in the list (so "this cannot convert" is
+        visible) but are disabled, with :func:`reject_reason` as their tooltip.
+        """
+        from raw_view.transcode import reject_reason
+
+        model = self.yuv_type.model()
+        # Mutating item data/flags re-emits currentTextChanged -> _sync_controls;
+        # block that while rewriting the list (the state written here is exactly
+        # what the re-entrant call would recompute).
+        blocked = self.yuv_type.blockSignals(True)
+        try:
+            if not self._is_yuv_input():
+                for index in range(self.yuv_type.count()):
+                    item = model.item(index)
+                    if item is not None:
+                        item.setEnabled(True)
+                    self.yuv_type.setItemData(index, None, Qt.ToolTipRole)
+                return
+            source = self._input_format()
+            for index in range(self.yuv_type.count()):
+                name = self.yuv_type.itemText(index)
+                reason = reject_reason(source, name)
+                item = model.item(index)
+                if item is not None:
+                    item.setEnabled(reason is None)
+                self.yuv_type.setItemData(index, reason, Qt.ToolTipRole)
+        finally:
+            self.yuv_type.blockSignals(blocked)
+        # Never leave an unselectable entry selected: pick the first convertible
+        # target instead (the list keeps greyed entries visible).
+        if reject_reason(source, self.yuv_type.currentText()) is not None:
+            for index in range(self.yuv_type.count()):
+                if reject_reason(source, self.yuv_type.itemText(index)) is None:
+                    self.yuv_type.setCurrentIndex(index)
+                    break
+
+    def _sync_dimension_hints(self) -> None:
+        """Label width/height as source-frame size for a YUV input (no resize)."""
+        if self._is_yuv_input():
+            self.width.setToolTip(
+                "Source frame width: used to parse the YUV byte layout. "
+                "The frame is not resized."
+            )
+            self.height.setToolTip(
+                "Source frame height: used to parse the YUV byte layout. "
+                "The frame is not resized."
+            )
+        else:
+            self.width.setToolTip("Output width (the image is resized to it).")
+            self.height.setToolTip("Output height (the image is resized to it).")
 
     def _resolve_yuv_fmt(self) -> str:
         """把 UI 的 YOnly + Bit depth 映射为内部有效格式名（YOnly8/10/12/14/16）。
@@ -444,6 +593,10 @@ class ConvertDialog(QDialog):
             self._preview_info.setText("Source: -\nOutput specification: -\nFrame size: -")
             return
 
+        if self._is_yuv_input():
+            self._update_yuv_preview(input_path)
+            return
+
         try:
             bgr = load_bgr_image(input_path)
             src_h, src_w = bgr.shape[:2]
@@ -491,6 +644,41 @@ class ConvertDialog(QDialog):
             self._preview_thumb.setText("(preview unavailable)")
             self._preview_info.setText("Source: -\nOutput specification: -\nFrame size: -")
 
+    def _update_yuv_preview(self, input_path: str) -> None:
+        """Preview for a YUV input: geometry, frame count, frame size.
+
+        There is no decoded thumbnail (the input is raw YUV bytes, not an
+        image), so the panel reports what the transcode will do instead.
+        """
+        from raw_view.transcode import (
+            TranscodeError,
+            TranscodeSpec,
+            frame_count,
+            frame_size,
+        )
+
+        source = self._input_format()
+        target = self.yuv_type.currentText()
+        self._preview_thumb.setText("YUV input\n(no preview)")
+        w, h = self.width.value(), self.height.value()
+        try:
+            spec = TranscodeSpec(source, target, w, h)
+            fsize = frame_size(spec)
+            frames = frame_count(Path(input_path).stat().st_size, spec)
+        except (TranscodeError, OSError) as exc:
+            self._preview_info.setText(
+                f"Source: {Path(input_path).name} (YUV)\n"
+                f"Source spec: {source} {w}x{h}\n"
+                f"Frame size: -\n{exc}"
+            )
+            return
+        self._preview_info.setText(
+            f"Source: {Path(input_path).name} (YUV)\n"
+            f"Source spec: {source} {w}x{h} (no resize)\n"
+            f"Target spec: {target} {w}x{h}\n"
+            f"Frame size: {_format_size(fsize)} ({fsize:,} B) x {frames} frame(s)"
+        )
+
     def _convert(self) -> None:
         # Busy feedback: disable the button and show progress text so the user
         # knows work is happening (conversion is synchronous).
@@ -505,6 +693,7 @@ class ConvertDialog(QDialog):
         try:
             input_path = self.input_edit.text().strip()
             target_type = self.target_type.currentText()
+            yuv_input = self._is_yuv_input()
             output_path = self.output_edit.text().strip()
             if not output_path:
                 template = self._settings.output_template
@@ -516,7 +705,11 @@ class ConvertDialog(QDialog):
                     target_type,
                     output_dir=self._settings.default_output_dirname,
                     raw_type=self.raw_type.currentText(),
-                    yuv_type=self._resolve_yuv_fmt(),
+                    # YUV input: {format} must name the TARGET layout.
+                    yuv_type=(
+                        self.yuv_type.currentText() if yuv_input
+                        else self._resolve_yuv_fmt()
+                    ),
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
@@ -526,6 +719,27 @@ class ConvertDialog(QDialog):
                 raise ValueError("input path is required")
             if not output_path:
                 raise ValueError("output path is required")
+
+            # 无副作用的校验必须排在建目录 / 覆盖询问之前：否则超限参数会先
+            # 让用户回答"要覆盖吗"，再告诉他"帧太大"，并留下空目录（N2）。
+            # 这里只构造 spec 并校验大小，真正的写盘在覆盖确认之后。
+            spec = None
+            if yuv_input:
+                from raw_view.transcode import TranscodeSpec, frame_size
+
+                spec = TranscodeSpec(
+                    source_format=self._input_format(),
+                    target_format=self.yuv_type.currentText(),
+                    width=self.width.value(),
+                    height=self.height.value(),
+                    alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
+                )
+                # Same 512MB single-frame limit the CLI applies: a 16384x16385
+                # NV16 frame used to land on disk through the GUI while the CLI
+                # refused it.
+                require_decode_size(spec.width, spec.height, frame_size(spec))
+
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
             # P1-6 覆盖确认：目标已存在时弹"跳过/覆盖/全部覆盖/重命名"。
@@ -536,7 +750,16 @@ class ConvertDialog(QDialog):
                 return
             output_path = resolved
 
-            if self.target_type.currentText() == "RAW":
+            frame_count = None
+            if yuv_input:
+                from raw_view.transcode import transcode_file
+
+                # ``spec`` was built and size-checked before mkdir/overwrite
+                # prompt above; this is the actual conversion.
+                frame_count, size = transcode_file(
+                    input_path, output_path, spec
+                )
+            elif target_type == "RAW":
                 image_file_to_raw(
                     input_path,
                     output_path,
@@ -564,6 +787,8 @@ class ConvertDialog(QDialog):
                 size_str = f" ({_format_size(size)})"
             except OSError:
                 size_str = ""
+            if frame_count is not None:
+                size_str = f" ({frame_count} frame(s){size_str})"
             QMessageBox.information(
                 self, "Convert",
                 f"\u2705 Converted:\n{output_path}{size_str}",

@@ -37,7 +37,11 @@ from raw_view.converter import (
     load_bgr_image,
     resolve_output_path_collision,
 )
-from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
+from raw_view.formats import (
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+    require_decode_size,
+)
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
@@ -135,6 +139,22 @@ class BatchConvertDialog(QDialog):
         params_layout = QHBoxLayout(params_group)
         params_layout.setContentsMargins(8, 8, 8, 8)
 
+        # Input type mirrors ConvertDialog: Image keeps the historical
+        # decode+resize path, YUV losslessly rearranges an existing YUV file
+        # (width/height become SOURCE frame size, no resize).
+        self.input_type = QComboBox()
+        self.input_type.addItems(["Image", "YUV", "RAW (coming soon)"])
+        self.input_type.setItemData(
+            2,
+            "RAW input conversion (packed RAW, bit alignment, bit depth) is "
+            "reserved for a future release.",
+            Qt.ToolTipRole,
+        )
+        self.input_type.setAccessibleName("Input type")
+
+        self.input_yuv_type = QComboBox()
+        self.input_yuv_type.addItems(ControlPanel.YUV_FORMATS)
+
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
 
@@ -178,6 +198,8 @@ class BatchConvertDialog(QDialog):
         self._same_dir_cb.setChecked(True)
 
         params_form = QFormLayout()
+        params_form.addRow("Input type", self.input_type)
+        params_form.addRow("Input YUV format", self.input_yuv_type)
         params_form.addRow("Target", self.target_type)
         params_form.addRow("RAW type", self.raw_type)
         params_form.addRow("YUV format", self.yuv_type)
@@ -255,6 +277,8 @@ class BatchConvertDialog(QDialog):
         self.input_edit.fileDropped.connect(self._on_files_dropped)
         self.target_type.currentTextChanged.connect(self._sync_controls)
         self.raw_source_mode.currentTextChanged.connect(self._sync_controls)
+        self.input_type.currentTextChanged.connect(self._on_input_type_changed)
+        self.input_yuv_type.currentTextChanged.connect(self._sync_controls)
         # 切换 YUV 格式（如 YUYV→YOnly）也要重跑条件显隐：YOnly 需显示位深/对齐/端序
         self.yuv_type.currentTextChanged.connect(self._sync_controls)
 
@@ -350,19 +374,32 @@ class BatchConvertDialog(QDialog):
         )
 
     def _sync_controls(self) -> None:
+        # QComboBox.setItemData() re-emits currentTextChanged here; without this
+        # guard the target-list refresh below would recurse into itself forever.
+        if getattr(self, "_syncing_controls", False):
+            return
+        self._syncing_controls = True
+        try:
+            self._sync_controls_locked()
+        finally:
+            self._syncing_controls = False
+
+    def _sync_controls_locked(self) -> None:
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
         # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
         is_yonly = self.yuv_type.currentText() == "YOnly"
-        show_raw = is_raw
-        show_bit = (not is_raw) and is_yonly
+        is_yuv_input = self._is_yuv_input()
+        show_raw = is_raw and not is_yuv_input
+        show_bit = (not is_raw) and is_yonly and not is_yuv_input
         show_align_endian = is_raw or show_bit
         self.raw_type.setVisible(show_raw)
         self.bit_depth_combo.setVisible(show_bit)
         self.align.setVisible(show_align_endian)
         self.endian.setVisible(show_align_endian)
-        self.raw_source_mode.setVisible(is_raw)
-        self.bayer_pattern.setVisible(is_raw and is_bayer)
+        self.raw_source_mode.setVisible(show_raw)
+        self.bayer_pattern.setVisible(show_raw and is_bayer)
+        self.input_yuv_type.setVisible(is_yuv_input)
         # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
         # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用。
         for w, shown in (
@@ -370,11 +407,63 @@ class BatchConvertDialog(QDialog):
             (self.bit_depth_combo, show_bit),
             (self.align, show_align_endian),
             (self.endian, show_align_endian),
-            (self.raw_source_mode, is_raw),
-            (self.bayer_pattern, is_raw and is_bayer),
+            (self.raw_source_mode, show_raw),
+            (self.bayer_pattern, show_raw and is_bayer),
+            (self.input_yuv_type, is_yuv_input),
         ):
             w.setEnabled(shown)
-        self.yuv_type.setEnabled(not is_raw)
+        self.target_type.setEnabled(not is_yuv_input)
+        if is_yuv_input and self.target_type.currentText() != "YUV":
+            self.target_type.setCurrentText("YUV")
+        self.yuv_type.setEnabled(True if is_yuv_input else not is_raw)
+        self._refresh_target_formats()
+
+    def _is_yuv_input(self) -> bool:
+        return self.input_type.currentText() == "YUV"
+
+    def _on_input_type_changed(self) -> None:
+        """Clear Width/Height when the input type changes (they change meaning)."""
+        if self._is_yuv_input():
+            from raw_view.transcode import YUV_TRANSCODE_FORMATS
+
+            if self.input_yuv_type.currentText() not in YUV_TRANSCODE_FORMATS:
+                self.input_yuv_type.setCurrentText(YUV_TRANSCODE_FORMATS[0])
+            self.width.setValue(1)
+            self.height.setValue(1)
+        else:
+            self.width.setValue(DEFAULT_CONVERT_WIDTH)
+            self.height.setValue(DEFAULT_CONVERT_HEIGHT)
+        self._sync_controls()
+
+    def _refresh_target_formats(self) -> None:
+        """Grey out targets the source YUV layout cannot reach (same as Convert)."""
+        from raw_view.transcode import reject_reason
+
+        model = self.yuv_type.model()
+        blocked = self.yuv_type.blockSignals(True)
+        try:
+            if not self._is_yuv_input():
+                for index in range(self.yuv_type.count()):
+                    item = model.item(index)
+                    if item is not None:
+                        item.setEnabled(True)
+                    self.yuv_type.setItemData(index, None, Qt.ToolTipRole)
+                return
+            source = self.input_yuv_type.currentText()
+            for index in range(self.yuv_type.count()):
+                reason = reject_reason(source, self.yuv_type.itemText(index))
+                item = model.item(index)
+                if item is not None:
+                    item.setEnabled(reason is None)
+                self.yuv_type.setItemData(index, reason, Qt.ToolTipRole)
+        finally:
+            self.yuv_type.blockSignals(blocked)
+        source = self.input_yuv_type.currentText()
+        if reject_reason(source, self.yuv_type.currentText()) is not None:
+            for index in range(self.yuv_type.count()):
+                if reject_reason(source, self.yuv_type.itemText(index)) is None:
+                    self.yuv_type.setCurrentIndex(index)
+                    break
 
     # ── Batch conversion ───────────────────────────────────────────────
 
@@ -385,6 +474,14 @@ class BatchConvertDialog(QDialog):
             return
 
         target_type = self.target_type.currentText()
+        yuv_input = self._is_yuv_input()
+        if yuv_input and self._variant_selector is not None:
+            QMessageBox.information(
+                self, "Batch Convert",
+                "Multi-variant generation works on images only; it is disabled "
+                "for a YUV input batch.",
+            )
+            return
         fmt = self.raw_type.currentText() if target_type == "RAW" else self._resolve_yuv_fmt()
         out_w = self.width.value()
         out_h = self.height.value()
@@ -412,6 +509,9 @@ class BatchConvertDialog(QDialog):
         # P1-6 覆盖策略：默认 "rename"（不覆盖不丢文件）；用户选过"全部覆盖"
         # 则覆盖。先一次性询问所有冲突文件（会话内记住选择）。
         existing_paths = []
+        template_yuv = (
+            self.yuv_type.currentText() if yuv_input else self._resolve_yuv_fmt()
+        )
         for _row, input_path in files:
             out = format_output_template(
                 template, input_path, out_w, out_h, target_type,
@@ -420,7 +520,7 @@ class BatchConvertDialog(QDialog):
                     self._settings.default_output_dirname,
                 ),
                 raw_type=self.raw_type.currentText(),
-                yuv_type=self._resolve_yuv_fmt(),
+                yuv_type=template_yuv,
                 bayer_pattern=self.bayer_pattern.currentText(),
                 source_mode=self.raw_source_mode.currentText(),
                 alignment=self.align.currentText(),
@@ -513,7 +613,7 @@ class BatchConvertDialog(QDialog):
                         self._settings.default_output_dirname,
                     ),
                     raw_type=self.raw_type.currentText(),
-                    yuv_type=self._resolve_yuv_fmt(),
+                    yuv_type=template_yuv,
                     bayer_pattern=self.bayer_pattern.currentText(),
                     source_mode=self.raw_source_mode.currentText(),
                     alignment=self.align.currentText(),
@@ -531,7 +631,27 @@ class BatchConvertDialog(QDialog):
                 self._file_table.item(row, 3).setText(output_path)
 
                 try:
-                    if target_type == "RAW":
+                    if yuv_input:
+                        from raw_view.transcode import (
+                            TranscodeSpec,
+                            frame_size,
+                            transcode_file,
+                        )
+
+                        spec = TranscodeSpec(
+                            source_format=self.input_yuv_type.currentText(),
+                            target_format=self.yuv_type.currentText(),
+                            width=out_w,
+                            height=out_h,
+                            alignment=self.align.currentText(),
+                            endianness=self.endian.currentText(),
+                        )
+                        # 512MB single-frame limit, checked before writing. A
+                        # batch runs unattended, so an over-limit entry must
+                        # fail visibly instead of filling the disk.
+                        require_decode_size(spec.width, spec.height, frame_size(spec))
+                        transcode_file(input_path, output_path, spec)
+                    elif target_type == "RAW":
                         image_file_to_raw(
                             input_path,
                             output_path,

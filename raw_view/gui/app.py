@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.converter import load_bgr_image
+from raw_view.filetypes import DANGEROUS_EXTENSIONS, is_dangerous_extension
 from raw_view.formats import (
     FormatError,
     ImageSpec,
@@ -336,15 +337,14 @@ def _suffix_of(name: str) -> str:
 
 #: 显式“用户手选”打开时也拒绝的“可执行/脚本”危险后缀：绝不把这类文件按 RAW
 #: 打开。自动扫描场景（_is_supported_file）对这些后缀本就不放行。
-_DANGEROUS_EXTENSIONS = frozenset({
-    ".exe", ".dll", ".sys", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1",
-    ".pif", ".vbs", ".vbe", ".jse", ".wsf", ".cpl", ".ocx",
-})
+#: 列表与判定实现在 :mod:`raw_view.filetypes` —— CLI 的 view/convert/batch 三条
+#: 路径共用同一份，避免两边策略漂移（也避免 CLI 反向 import 本 GUI 模块）。
+_DANGEROUS_EXTENSIONS = DANGEROUS_EXTENSIONS
 
 
 def _is_dangerous_extension(path: str) -> bool:
     """Whether *path* ends with a clearly executable/script suffix."""
-    return Path(path).suffix.lower() in _DANGEROUS_EXTENSIONS
+    return is_dangerous_extension(path)
 
 
 #: 内容嗅探窗口（字节）：NUL / 高控制字符占比的检测范围。4096 足够覆盖常见
