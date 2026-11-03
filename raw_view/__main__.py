@@ -36,7 +36,12 @@ from raw_view.formats import FormatError
 from raw_view.logger import get_logger
 from raw_view.models import BAYER_PATTERNS
 
-logger = get_logger(__name__)
+# The RotatingFileHandler is installed on the ``raw_view`` logger (see
+# raw_view/logger.py), so this module must log *below* it.  Using ``__name__``
+# would resolve to ``"__main__"`` under ``python -m raw_view`` -- a sibling, not
+# a child, of ``raw_view`` -- and every record (including failure tracebacks)
+# would bypass the file handler entirely.
+logger = get_logger("raw_view.__main__")
 
 
 def _log_failure(message: str, *args: object, exc: BaseException) -> None:
@@ -195,8 +200,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="RAW source mode (default: bayer)")
     # D5: validate at parse time (exit 2) instead of silently degrading to gray
     # in view mode while failing with a traceback in convert mode.
-    p.add_argument("--bayer-pattern", choices=tuple(BAYER_PATTERNS), default="RGGB",
-                   help="Bayer pattern (default: RGGB)")
+    # `type=str.upper` keeps the rejection while still accepting the lowercase
+    # spelling that always worked (the codec layer upper()s anyway) -- a case-
+    # sensitive `choices` alone turned `--bayer-pattern rggb` into a hard error.
+    p.add_argument("--bayer-pattern", type=str.upper,
+                   choices=tuple(BAYER_PATTERNS), default="RGGB",
+                   help="Bayer pattern, case-insensitive (default: RGGB)")
 
     # ── Decode options (view mode) ──
     p.add_argument("--preview-mode", choices=("Bayer Color", "Grayscale"), default="Bayer Color",
@@ -568,6 +577,7 @@ def _run_view_decode(
     logger.info(
         "View decode: %s -> %s (%s, %dx%d, %s)",
         input_path, output_path, raw_type if is_raw else yuv_type, width, height,
+        preview_mode if is_raw else "-",
     )
 
     print(f"Input:        {input_path}")
@@ -948,6 +958,30 @@ def _coerce_numeric(container: dict, key: str, label: str) -> None:
         ) from exc
 
 
+def _coerce_bayer_pattern(container: dict, label: str) -> None:
+    """Normalise/validate ``bayer_pattern`` in a batch document (L3).
+
+    The codec layer upper-cases its input, so ``"rggb"`` has always worked; an
+    outright invalid value (``"XYZW"``) silently fell back to RGGB instead of
+    saying so.  Folding case here keeps lowercase working while making a typo a
+    readable batch error -- the same contract ``--bayer-pattern`` now has.
+    """
+    if "bayer_pattern" not in container or container["bayer_pattern"] is None:
+        return
+    value = container["bayer_pattern"]
+    if not isinstance(value, str):
+        raise _BatchSpecError(
+            f"{label}.bayer_pattern must be a string, got {type(value).__name__}"
+        )
+    folded = value.strip().upper()
+    if folded not in BAYER_PATTERNS:
+        raise _BatchSpecError(
+            f"{label}.bayer_pattern {value!r} is invalid: expected one of "
+            f"{', '.join(BAYER_PATTERNS)} (case-insensitive)"
+        )
+    container["bayer_pattern"] = folded
+
+
 def _sheet_check_entry(entry: object, position: int) -> dict:
     """Validate one ``files[]`` item's *shape* (D6).
 
@@ -961,6 +995,7 @@ def _sheet_check_entry(entry: object, position: int) -> dict:
         )
     for key in _BATCH_NUMERIC_KEYS:
         _coerce_numeric(entry, key, f"files[{position}].{key}")
+    _coerce_bayer_pattern(entry, f"files[{position}]")
     return entry
 
 
@@ -980,6 +1015,7 @@ def _validate_batch_spec(spec: object) -> dict:
             _normalize_choice(spec[key], allowed, key)
     for key in _BATCH_NUMERIC_KEYS:
         _coerce_numeric(spec, key, key)
+    _coerce_bayer_pattern(spec, "batch")
     files = spec.get("files", [])
     if files is None:
         files = []
@@ -993,29 +1029,43 @@ def _validate_batch_spec(spec: object) -> dict:
     return spec
 
 
-def _resolve_entry_input_type(params: dict, mode: str) -> str:
-    """Which kind of input this entry declares: ``"image"``, ``"yuv"`` or ``"raw"``.
+def _resolve_entry_input_type(params: dict, mode: str) -> tuple[str, bool]:
+    """Which kind of input this entry declares, and whether the author said so.
 
-    ``input_type`` is per-entry (so one batch may mix image and YUV inputs).  In
-    view mode the historical ``target`` still describes the *input* file, so an
-    entry that leaves ``input_type`` at its ``image`` default keeps meaning "view
-    decodes RAW/YUV" - the same behaviour as before this option existed.
+    Returns ``(kind, explicit)`` where *kind* is ``"image"`` / ``"yuv"`` /
+    ``"raw"`` and *explicit* records whether the entry (or the batch's global
+    defaults) actually contained an ``input_type`` key.
+
+    The two are deliberately separate.  In **view** mode ``target`` has always
+    described the *input* file, so a legacy entry without ``input_type`` must
+    keep decoding RAW/YUV exactly as before (640x480 default included).  Only an
+    entry that *explicitly* asks for the new YUV transcode input has the stricter
+    "source frame dimensions are required" contract -- conflating the two turned
+    every old batch view job into a failure.
     """
+    declared = params.get("input_type")
+    explicit = declared is not None and str(declared).strip() != ""
     input_type = _normalize_choice(
-        params.get("input_type") or "image", _BATCH_INPUT_TYPES, "input_type"
+        declared if explicit else "image", _BATCH_INPUT_TYPES, "input_type"
     )
-    if mode == "view" and input_type == "image":
-        return "yuv" if params.get("target") == "YUV" else "raw"
-    return input_type
+    if mode == "view" and not explicit:
+        # Legacy view entry: target names the file being decoded.
+        return ("yuv" if params.get("target") == "YUV" else "raw"), False
+    return input_type, explicit
 
 
-def _resolve_entry_dimensions(kind: str, width, height) -> tuple[int, int]:
+def _resolve_entry_dimensions(
+    kind: str, width, height, mode: str
+) -> tuple[int, int]:
     """Validate/backfill width & height for the entry's input kind.
 
-    YUV input needs explicit source frame dimensions; every other kind keeps the
-    historical 640x480 default.
+    Source frame dimensions are mandatory only for a YUV **transcode** input
+    (``input_type: "yuv"`` in convert mode), where width/height parse the layout
+    and nothing is resized.  Every other input kind -- including decoding a YUV
+    file in view mode -- keeps the historical 640x480 default.
     """
-    if kind != "yuv":
+    requires_dimensions = kind == "yuv" and mode == "convert"
+    if not requires_dimensions:
         return (
             DEFAULT_WIDTH if width is None else int(width),
             DEFAULT_HEIGHT if height is None else int(height),
@@ -1241,9 +1291,9 @@ def _run_batch(args: argparse.Namespace) -> None:
         try:
             mode = _normalize_choice(params["mode"], _BATCH_MODES, "mode")
             target = _normalize_choice(params["target"], _BATCH_TARGETS, "target")
-            kind = _resolve_entry_input_type(params, mode)
+            kind, _explicit = _resolve_entry_input_type(params, mode)
             width, height = _resolve_entry_dimensions(
-                kind, params["width"], params["height"]
+                kind, params["width"], params["height"], mode
             )
             transcode_spec = (
                 _entry_transcode_spec(params, width, height)

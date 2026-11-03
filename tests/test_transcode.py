@@ -307,6 +307,16 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(reason)
         self.assertIn("reserved", reason)
 
+    def test_reject_reason_is_none_for_every_legal_direction(self):
+        """L1: a supported direction must return ``None``, not a message."""
+        for family in (T.YUV422_FORMATS, T.YUV420_FORMATS):
+            for source, target in itertools.permutations(family, 2):
+                with self.subTest(source=source, target=target):
+                    self.assertIsNone(
+                        T.reject_reason(source, target),
+                        f"{source}->{target} 是合法方向，reject_reason 必须返回 None",
+                    )
+
     def test_unknown_format_rejected(self):
         self.assertTrue(T.reject_reason("YUY2", "NV16"))
         self.assertTrue(T.reject_reason("NV16", "BOGUS"))
@@ -725,6 +735,26 @@ class ConvertDialogYuvConvertTests(_DialogTestBase):
             T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
         )
 
+    def test_over_limit_frame_is_rejected_before_writing(self):
+        """L2: the GUI must enforce the same 512MB limit the CLI does."""
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        dialog = self.make_convert_dialog()
+        out = os.path.join(self._tmp, "huge.yuyv")
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.width.setValue(16384)
+        dialog.height.setValue(16385)
+        dialog.yuv_type.setCurrentText("YUYV")
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(out)
+        with mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical") as critical:
+            dialog._do_convert()
+        self.assertTrue(critical.called, "GUI 也必须拒绝超限帧")
+        self.assertIn("too large", critical.call_args[0][2])
+        self.assertFalse(os.path.exists(out), "超限拒绝不得留下输出文件")
+
     def test_bad_size_reports_clear_error_and_writes_nothing(self):
         import raw_view.gui.dialogs.convert as convert_mod
 
@@ -832,6 +862,124 @@ class BatchConvertDialogInputTypeTests(_DialogTestBase):
 
 
 # ── 8. CLI defects D1-D7 ─────────────────────────────────────────────
+
+class BatchDialogLimitTests(_DialogTestBase):
+    """L2: an unattended GUI batch must also refuse an over-limit YUV frame."""
+
+    def setUp(self):
+        super().setUp()
+        self._tmp = tempfile.mkdtemp(prefix="rv-gui-batch-limit-")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+    def test_over_limit_entry_fails_without_writing(self):
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        app = _ensure_app()
+        dialog = BatchConvertDialog(AppSettings())
+        self._dialogs.append(dialog)
+        dialog._variant_selector = None
+        src = os.path.join(self._tmp, "in.nv16")
+        Path(src).write_bytes(b"\x00" * 64)
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.width.setValue(16384)
+        dialog.height.setValue(16385)
+        dialog.yuv_type.setCurrentText("YUYV")
+        dialog._add_files([src])
+        with mock.patch.object(bc_mod.QMessageBox, "information"):
+            dialog._run_batch()
+        status = dialog._file_table.item(0, 2).text()
+        self.assertIn("Failed", status)
+        self.assertIn("too large", status)
+        written = [p for p in os.listdir(self._tmp) if p != "in.nv16"]
+        self.assertEqual(written, [], f"超限条目不得产出文件: {written}")
+
+
+class BatchLegacyViewSemanticsTests(unittest.TestCase):
+    """M1: a legacy batch view entry must keep its 640x480 default.
+
+    ``input_type`` is new; entries written before it existed have no such key.
+    Mapping those to the new "yuv transcode input" kind made every old
+    batch-view-YUV job fail on the missing source dimensions, which is why the
+    resolver returns ``(kind, explicit)`` and only an explicit declaration gets
+    the stricter contract.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-m1-")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_resolver_marks_legacy_entries_as_not_explicit(self):
+        import raw_view.__main__ as main_mod
+
+        kind, explicit = main_mod._resolve_entry_input_type({"target": "YUV"}, "view")
+        self.assertEqual(kind, "yuv")
+        self.assertFalse(explicit, "旧 JSON 没有 input_type，必须标记为非显式")
+
+        kind, explicit = main_mod._resolve_entry_input_type(
+            {"target": "YUV", "input_type": "yuv"}, "view"
+        )
+        self.assertEqual(kind, "yuv")
+        self.assertTrue(explicit, "显式声明才应获得严格契约")
+
+    def test_view_yuv_without_dimensions_uses_640x480(self):
+        yuv = os.path.join(self._tmp, "y.yuv")
+        Path(yuv).write_bytes(b"\x00" * (640 * 480))
+        spec = {
+            "mode": "view",
+            "target": "YUV",
+            "yuv_type": "YOnly",
+            "files": [{"input": yuv}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1 succeeded", proc.stdout)
+        produced = [n for n in os.listdir(self._tmp) if n.endswith(".png")]
+        self.assertEqual(len(produced), 1, produced)
+        self.assertIn("640x480", produced[0], "必须沿用 640x480 默认")
+
+    def test_view_raw_without_dimensions_uses_640x480(self):
+        raw = os.path.join(self._tmp, "r.raw")
+        Path(raw).write_bytes(b"\x00" * (640 * 480 * 2))
+        spec = {
+            "mode": "view",
+            "target": "RAW",
+            "raw_type": "RAW12",
+            "files": [{"input": raw}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1 succeeded", proc.stdout)
+
+    def test_explicit_yuv_transcode_still_requires_dimensions(self):
+        """The strict contract must survive the M1 fix for the new use case."""
+        yuv = os.path.join(self._tmp, "t.nv16")
+        Path(yuv).write_bytes(b"\x00" * 32)
+        spec = {
+            "mode": "convert",
+            "target": "YUV",
+            "input_type": "yuv",
+            "input_yuv_type": "NV16",
+            "yuv_type": "YUYV",
+            "files": [{"input": yuv}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("width and height is required", proc.stdout + proc.stderr)
+
 
 class BatchConvertLimitTests(unittest.TestCase):
     """D1: batch convert must enforce the same 512MB frame limit as `convert`."""
@@ -1081,33 +1229,80 @@ class CliErrorOutputTests(unittest.TestCase):
         proc = _run_cli("batch", "-b", batch_path)
         self.assertNotIn("Traceback (most recent call last)", proc.stderr)
 
-    def test_log_failure_keeps_the_traceback_for_diagnosis(self):
-        """The detail must not be thrown away - only kept out of the console.
+    def test_main_logger_is_a_child_of_raw_view(self):
+        """D2 root cause: ``__name__`` is ``"__main__"`` under ``python -m``.
 
-        The file handler is at DEBUG while the console handler is at INFO, so a
-        DEBUG record with ``exc_info`` reaches the log file and nothing else:
-        one readable line for the user, full stack for diagnosis.
+        ``"__main__"`` is a sibling of ``raw_view`` and inherits no handlers, so
+        every failure record bypassed the log file.  Asserting on
+        ``get_logger(__name__)`` from inside the test would be vacuous -- the
+        test imports the module, where ``__name__`` is already
+        ``raw_view.__main__``.  The name must therefore be observed in a real
+        ``python -m raw_view`` process, which is the only place the wrong value
+        ever appeared.
         """
-        import raw_view.__main__ as main_mod
+        # A ``-c`` / import helper cannot produce the bug: importing the module
+        # gives it the name ``raw_view.__main__`` either way.  The only place the
+        # wrong name exists is a real ``python -m raw_view`` process, so run one
+        # and inspect the name it actually logged under.
+        log_dir = tempfile.mkdtemp(prefix="rv-loggername-")
+        work = tempfile.mkdtemp(prefix="rv-loggername-work-")
+        try:
+            empty = os.path.join(work, "empty.raw")
+            Path(empty).write_bytes(b"")
+            env = dict(os.environ, PYTHONIOENCODING="utf-8",
+                       RAW_VIEW_LOG_LEVEL="DEBUG", RAW_VIEW_LOG_DIR=log_dir)
+            subprocess.run(
+                [sys.executable, "-m", "raw_view", "view", "-i", empty,
+                 "-o", os.path.join(work, "o.png"),
+                 "--width", "64", "--height", "64"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=env, cwd=str(_PROJECT_ROOT),
+            )
+            text = (Path(log_dir) / "raw-view.log").read_text(encoding="utf-8")
+        finally:
+            shutil.rmtree(log_dir, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
+        # Records are formatted as "<date> <level> <logger name> <message>".
+        self.assertIn(" raw_view.__main__ ", text,
+                      "CLI 记录应挂在 raw_view.__main__ 下")
+        self.assertNotIn(" __main__  ", text,
+                         "__main__ 是 raw_view 的兄弟节点，拿不到文件 handler")
 
-        calls: list[tuple[str, dict]] = []
+    def test_failure_really_lands_in_the_log_file(self):
+        """End-to-end proof that the log file receives the failure + traceback."""
+        import textwrap
 
-        class _Spy:
-            def error(self, *args, **kwargs):
-                calls.append(("error", kwargs))
-
-            def debug(self, *args, **kwargs):
-                calls.append(("debug", kwargs))
-
-        with mock.patch.object(main_mod, "logger", _Spy()):
-            try:
-                raise RuntimeError("boom")
-            except RuntimeError as exc:
-                main_mod._log_failure("failed %s", "x", exc=exc)
-
-        kinds = [kind for kind, _ in calls]
-        self.assertEqual(kinds, ["debug"], "只写 DEBUG（文件 handler），控制台不重复")
-        self.assertIsInstance(calls[0][1].get("exc_info"), BaseException)
+        log_dir = tempfile.mkdtemp(prefix="rv-logfile-")
+        work = tempfile.mkdtemp(prefix="rv-logfile-work-")
+        try:
+            empty = os.path.join(work, "empty.raw")
+            Path(empty).write_bytes(b"")
+            # A genuine ``python -m raw_view`` process: that is the invocation
+            # where ``__name__`` used to be ``"__main__"`` and where the failure
+            # record silently bypassed the log file (a ``-c`` helper would import
+            # the module under its real name and reproduce nothing).
+            # ``RAW_VIEW_LOG_DIR`` redirects the handler to a temp directory so
+            # the developer's own log is untouched.
+            env = dict(os.environ, PYTHONIOENCODING="utf-8",
+                       RAW_VIEW_LOG_LEVEL="DEBUG", RAW_VIEW_LOG_DIR=log_dir)
+            proc = subprocess.run(
+                [sys.executable, "-m", "raw_view", "view", "-i", empty,
+                 "-o", os.path.join(work, "o.png"),
+                 "--width", "64", "--height", "64"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=env, cwd=str(_PROJECT_ROOT),
+            )
+            log_file = Path(log_dir) / "raw-view.log"
+            self.assertTrue(log_file.is_file(), proc.stderr)
+            text = log_file.read_text(encoding="utf-8")
+            self.assertIn("View decode failed", text, "日志文件必须有失败记录")
+            self.assertIn("Traceback (most recent call last)", text, "日志文件要有栈")
+            self.assertIn("raw_view.__main__", text, "记录应来自 CLI logger")
+            # ...while the user-facing stream stays a single line.
+            self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+        finally:
+            shutil.rmtree(log_dir, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 class BatchTargetValidationTests(unittest.TestCase):
@@ -1218,6 +1413,27 @@ class BatchTargetValidationTests(unittest.TestCase):
                 self.assertNotIn("Traceback (most recent call last)", combined)
                 self.assertIn("FAIL", combined)
 
+    def test_invalid_bayer_pattern_in_batch_is_rejected(self):
+        """L3: ``"bayer_pattern": "XYZW"`` used to fall back to RGGB silently."""
+        proc = self._run_spec({
+            "mode": "convert", "target": "RAW", "raw_type": "RAW8",
+            "width": 4, "height": 4, "bayer_pattern": "XYZW",
+            "files": [{"input": self._png}],
+        })
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("bayer_pattern", proc.stderr)
+        self.assertIn("invalid", proc.stderr)
+
+    def test_lowercase_bayer_pattern_in_batch_works(self):
+        out = os.path.join(self._tmp, "lc.raw")
+        proc = self._run_spec({
+            "mode": "convert", "target": "RAW", "raw_type": "RAW8",
+            "width": 4, "height": 4, "bayer_pattern": "rggb",
+            "files": [{"input": self._png, "output": out}],
+        })
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(os.path.getsize(out), 16)
+
     def test_malformed_json_is_a_readable_error(self):
         proc = self._run_spec("{not json")
         self.assertEqual(proc.returncode, 1)
@@ -1267,6 +1483,27 @@ class BayerPatternValidationTests(unittest.TestCase):
                     "--width", "4", "--height", "4", "--bayer-pattern", pattern,
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_lowercase_and_mixed_case_are_accepted(self):
+        """M2: the codec upper()s its input, so ``rggb`` always worked."""
+        for pattern in ("rggb", "Rggb", "rGgB"):
+            with self.subTest(pattern=pattern):
+                proc = _run_cli(
+                    "convert", "-i", self._png, "-o",
+                    os.path.join(self._tmp, f"{pattern}.raw"),
+                    "--width", "4", "--height", "4", "--bayer-pattern", pattern,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_lowercase_accepted_in_view_mode_too(self):
+        raw = os.path.join(self._tmp, "a.raw")
+        Path(raw).write_bytes(b"\x00" * (4 * 4 * 2))
+        proc = _run_cli(
+            "view", "-i", raw, "-o", os.path.join(self._tmp, "o.png"),
+            "--width", "4", "--height", "4", "--raw-type", "RAW12",
+            "--bayer-pattern", "rggb",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 class DangerousSuffixTests(unittest.TestCase):

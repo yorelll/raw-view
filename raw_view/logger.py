@@ -9,8 +9,18 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+#: Environment variable that redirects the log directory.  Used by tests to run
+#: a real ``python -m raw_view`` against a temporary log (mirrors the existing
+#: ``RAW_VIEW_TEST_SETTINGS_FILE`` isolation for QSettings) without writing to
+#: the developer's own log file.
+LOG_DIR_ENV = "RAW_VIEW_LOG_DIR"
+
+
 def _default_log_dir() -> Path:
-    """Platform-appropriate log directory."""
+    """Platform-appropriate log directory (overridable via ``RAW_VIEW_LOG_DIR``)."""
+    override = os.environ.get(LOG_DIR_ENV)
+    if override:
+        return Path(override)
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     elif sys.platform == "darwin":

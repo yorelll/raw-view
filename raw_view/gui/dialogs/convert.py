@@ -33,7 +33,11 @@ from raw_view.converter import (
     plan_image_variants,
     resolve_output_path_collision,
 )
-from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
+from raw_view.formats import (
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+    require_decode_size,
+)
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
@@ -727,19 +731,26 @@ class ConvertDialog(QDialog):
 
             frame_count = None
             if yuv_input:
-                from raw_view.transcode import TranscodeSpec, transcode_file
+                from raw_view.transcode import (
+                    TranscodeSpec,
+                    frame_size,
+                    transcode_file,
+                )
 
+                spec = TranscodeSpec(
+                    source_format=self._input_format(),
+                    target_format=self.yuv_type.currentText(),
+                    width=self.width.value(),
+                    height=self.height.value(),
+                    alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
+                )
+                # Same 512MB single-frame limit the CLI applies, checked before
+                # anything is written: a 16384x16385 NV16 frame used to land on
+                # disk through the GUI while the CLI refused it.
+                require_decode_size(spec.width, spec.height, frame_size(spec))
                 frame_count, size = transcode_file(
-                    input_path,
-                    output_path,
-                    TranscodeSpec(
-                        source_format=self._input_format(),
-                        target_format=self.yuv_type.currentText(),
-                        width=self.width.value(),
-                        height=self.height.value(),
-                        alignment=self.align.currentText(),
-                        endianness=self.endian.currentText(),
-                    ),
+                    input_path, output_path, spec
                 )
             elif target_type == "RAW":
                 image_file_to_raw(

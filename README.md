@@ -36,7 +36,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **状态栏状态点**：Ready/解码成功=绿色、解码中=琥珀色、参数已改未 Apply=琥珀色、错误=红色圆点，一眼感知系统状态；未加载文件时预览区显示空状态引导（图标 + 说明 + Open File 按钮）
 - **转换反馈**：Convert 转换中按钮显示 “Converting…” 并禁用防重复点击，完成后提示 ✅ 输出路径 + 文件大小、失败提示 ❌ 原因；Generate Variants 显示 “Generating n/N…” 进度；批量转换显示逐文件进度与汇总报告
 - **应用图标 / Logo**：内置 indigo/violet 传感器 Bayer 马赛克风格 logo（`assets/logo.svg`），用作窗口/任务栏图标与工具栏品牌标识；打包 exe 使用 `assets/raw-view.ico`
-- **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息
+- **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息。**CLI 失败时终端只显示一行 `Error: ...`，完整 traceback 记入日志文件**（文件 handler 为 DEBUG、控制台 handler 为 INFO）；`RAW_VIEW_LOG_LEVEL` 控制级别，`RAW_VIEW_LOG_DIR` 可重定向日志目录（测试用）
 - **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部 **Preset** 下拉框中选择，即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。主界面只负责选择：右侧漏斗按钮可在 **All / RAW / YUV / Standard images** 四类间切换浏览范围，下拉列表按最近使用优先、其余按名称排序；名称/结构化搜索只在 **Manage presets** 管理对话框中进行。保存与管理通过左侧控制面板的右键菜单进入；管理对话框支持 Rename / Import / Export 与右键操作，双击列表项可就地重命名
 - **RAW Packed 标准布局**：RAW10P / RAW12P / RAW14P 的解码与编码均遵循 MIPI CSI-2 标准布局（B0..Bn-1 = 高 8bit，末字节 = LSBs，MSB-first），与真实 sensor 数据互通
 - **FourCC 查找工具**：Tools → FourCC Lookup，浏览 FourCC ↔ 描述 ↔ MBUS 名称/值的对应关系，支持实时搜索（任意字段）和自定义格式管理（添加/编辑/删除，持久化存储）

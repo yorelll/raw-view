@@ -37,7 +37,11 @@ from raw_view.converter import (
     load_bgr_image,
     resolve_output_path_collision,
 )
-from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
+from raw_view.formats import (
+    expected_frame_size_raw,
+    expected_frame_size_yuv,
+    require_decode_size,
+)
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
@@ -628,20 +632,25 @@ class BatchConvertDialog(QDialog):
 
                 try:
                     if yuv_input:
-                        from raw_view.transcode import TranscodeSpec, transcode_file
-
-                        transcode_file(
-                            input_path,
-                            output_path,
-                            TranscodeSpec(
-                                source_format=self.input_yuv_type.currentText(),
-                                target_format=self.yuv_type.currentText(),
-                                width=out_w,
-                                height=out_h,
-                                alignment=self.align.currentText(),
-                                endianness=self.endian.currentText(),
-                            ),
+                        from raw_view.transcode import (
+                            TranscodeSpec,
+                            frame_size,
+                            transcode_file,
                         )
+
+                        spec = TranscodeSpec(
+                            source_format=self.input_yuv_type.currentText(),
+                            target_format=self.yuv_type.currentText(),
+                            width=out_w,
+                            height=out_h,
+                            alignment=self.align.currentText(),
+                            endianness=self.endian.currentText(),
+                        )
+                        # 512MB single-frame limit, checked before writing. A
+                        # batch runs unattended, so an over-limit entry must
+                        # fail visibly instead of filling the disk.
+                        require_decode_size(spec.width, spec.height, frame_size(spec))
+                        transcode_file(input_path, output_path, spec)
                     elif target_type == "RAW":
                         image_file_to_raw(
                             input_path,
