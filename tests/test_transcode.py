@@ -1,0 +1,1326 @@
+"""YUV transcode + CLI defect-fix regression tests.
+
+Covers two bodies of work:
+
+* **Transcode** (``raw_view/transcode.py``, CLI ``--input-type yuv``, Convert
+  dialog "Input type"): all 42 in-family directions round-trip byte-exactly,
+  known byte layouts per format, multi-frame files, integer-multiple validation,
+  odd-dimension rejection, cross-family rejection, and the CLI/GUI surfaces.
+* **CLI defects D1-D7** found by the CLI review: batch convert limit, traceback-
+  free error paths, cross-entry output collisions, target-aware error wording,
+  ``--bayer-pattern`` validation, batch JSON schema validation and the
+  executable-suffix refusal.
+
+GUI tests use the real dialogs and obey the L3 widget-leak guard
+(``begin/end_widget_leak_check`` + ``destroy_widget``); no ``deleteLater()``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+from _settings_isolation import (
+    ensure_test_settings_file,
+    isolated_qt_material_resources,
+)
+
+ensure_test_settings_file()
+isolated_qt_material_resources()
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+from raw_view import transcode as T  # noqa: E402
+
+#: Process-wide QApplication (see :func:`_ensure_app`).
+_APP = None
+
+
+# ── Layout references ────────────────────────────────────────────────
+# Hand-computed expectations for a 4x2 frame.  A 4x2 4:2:0 frame has 1x2 chroma;
+# a 4x2 4:2:2 frame has 2x2 chroma (U/V per pixel pair).
+
+W, H = 4, 2
+
+Y_PLANE = np.arange(8, dtype=np.uint8).reshape(H, W)
+U_420 = np.array([[100, 101]], dtype=np.uint8)            # h/2 x w/2 = 1x2
+V_420 = np.array([[200, 201]], dtype=np.uint8)
+U_422 = np.array([[100, 101], [110, 111]], dtype=np.uint8)  # h x w/2 = 2x2
+V_422 = np.array([[200, 201], [210, 211]], dtype=np.uint8)
+
+
+def _i420_bytes() -> bytes:
+    return b"".join((Y_PLANE.tobytes(), U_420.tobytes(), V_420.tobytes()))
+
+
+def _nv16_bytes() -> bytes:
+    chroma = np.empty((H, W), dtype=np.uint8)
+    chroma[:, 0::2], chroma[:, 1::2] = U_422, V_422
+    return b"".join((Y_PLANE.tobytes(), chroma.tobytes()))
+
+
+def _spec(source: str, target: str, *, width: int = W, height: int = H) -> T.TranscodeSpec:
+    return T.TranscodeSpec(source, target, width, height)
+
+
+def _ensure_app():
+    """Return the process-wide QApplication, keeping a strong reference.
+
+    Creating the app inside a test method lets it fall out of scope, and Qt then
+    destroys every widget it owns.  The module-level ``_APP`` matches the
+    convention in ``tests/test_ui_interactions.py``.
+    """
+    global _APP
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+
+    _APP = QApplication.instance() or QApplication([])
+    return _APP
+
+
+def _run_cli(*argv: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        [sys.executable, "-m", "raw_view", *argv],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=str(_PROJECT_ROOT),
+    )
+
+
+# ── 1. All 42 directions round-trip ──────────────────────────────────
+
+class RoundTripTests(unittest.TestCase):
+    """A -> B -> A must return the exact original bytes (losslessness proof)."""
+
+    def test_family_sizes_cover_all_42_directions(self):
+        self.assertEqual(len(T.YUV422_FORMATS), 6)
+        self.assertEqual(len(T.YUV420_FORMATS), 4)
+        self.assertEqual(len(list(itertools.permutations(T.YUV422_FORMATS, 2))), 30)
+        self.assertEqual(len(list(itertools.permutations(T.YUV420_FORMATS, 2))), 12)
+
+    def test_all_42_directions_round_trip_byte_exact(self):
+        rng = np.random.default_rng(20240917)
+        checked = 0
+        for family in (T.YUV422_FORMATS, T.YUV420_FORMATS):
+            for source, target in itertools.permutations(family, 2):
+                with self.subTest(source=source, target=target):
+                    size = T.frame_size(_spec(source, target))
+                    original = bytes(rng.integers(0, 256, size, dtype=np.uint8))
+                    there = T.transcode_bytes(original, _spec(source, target))
+                    self.assertEqual(len(there), size, "同一家族内帧大小必须一致")
+                    back = T.transcode_bytes(there, _spec(target, source))
+                    self.assertEqual(
+                        back, original,
+                        f"{source}->{target}->{source} 必须逐字节还原",
+                    )
+                    checked += 1
+        self.assertEqual(checked, 42, "42 个方向都要覆盖")
+
+    def test_transcode_is_not_a_no_op(self):
+        """Conversion must actually change the bytes, or the round-trip is vacuous."""
+        gapped = 0
+        for family in (T.YUV422_FORMATS, T.YUV420_FORMATS):
+            for source, target in itertools.permutations(family, 2):
+                size = T.frame_size(_spec(source, target))
+                data = bytes(range(size % 256)) if size <= 256 else bytes(
+                    (i * 7) % 256 for i in range(size)
+                )
+                if T.transcode_bytes(data, _spec(source, target)) != data:
+                    gapped += 1
+        self.assertEqual(gapped, 42, "每个方向都应真正重排字节（非恒等）")
+
+    def test_u_v_swap_directions_differ(self):
+        """I420 -> YV12 swaps chroma; the reverse must not return the same frame."""
+        data = _i420_bytes()
+        yv12 = T.transcode_bytes(data, _spec("I420", "YV12"))
+        self.assertNotEqual(yv12, data)
+        self.assertEqual(T.transcode_bytes(yv12, _spec("YV12", "I420")), data)
+
+    def test_multi_frame_round_trip_preserves_every_frame(self):
+        rng = np.random.default_rng(7)
+        size = T.frame_size(_spec("I420", "NV12"))
+        frames = [
+            bytes(rng.integers(0, 256, size, dtype=np.uint8)) for _ in range(3)
+        ]
+        out = T.transcode_frames(b"".join(frames), _spec("I420", "NV12"))
+        self.assertEqual(len(out), 3)
+        back = T.transcode_frames(b"".join(out), _spec("NV12", "I420"))
+        self.assertEqual(back, frames)
+
+
+# ── 2. Known byte layouts (hand-computed) ────────────────────────────
+
+class KnownLayoutTests(unittest.TestCase):
+    """Spot-check each format against a hand-built frame, not against itself."""
+
+    def test_i420_plane_order(self):
+        self.assertEqual(_i420_bytes(), bytes(range(8)) + bytes([100, 101, 200, 201]))
+
+    def test_i420_to_yv12_swaps_chroma_planes(self):
+        out = T.transcode_bytes(_i420_bytes(), _spec("I420", "YV12"))
+        self.assertEqual(out, bytes(range(8)) + bytes([200, 201, 100, 101]))
+
+    def test_i420_to_nv12_interleaves_uv_rows(self):
+        out = T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12"))
+        self.assertEqual(out, bytes(range(8)) + bytes([100, 200, 101, 201]))
+
+    def test_i420_to_nv21_interleaves_vu_rows(self):
+        out = T.transcode_bytes(_i420_bytes(), _spec("I420", "NV21"))
+        self.assertEqual(out, bytes(range(8)) + bytes([200, 100, 201, 101]))
+
+    def test_nv16_to_yuyv_macropixel_order(self):
+        # YUYV macropixel = Y0 U Y1 V, row by row.
+        out = T.transcode_bytes(_nv16_bytes(), _spec("NV16", "YUYV"))
+        self.assertEqual(out, bytes([
+            0, 100, 1, 200,  2, 101, 3, 201,
+            4, 110, 5, 210,  6, 111, 7, 211,
+        ]))
+
+    def test_nv16_to_uyvy_macropixel_order(self):
+        out = T.transcode_bytes(_nv16_bytes(), _spec("NV16", "UYVY"))
+        self.assertEqual(out, bytes([
+            100, 0, 200, 1,  101, 2, 201, 3,
+            110, 4, 210, 5,  111, 6, 211, 7,
+        ]))
+
+    def test_nv16_to_yvyu_macropixel_order(self):
+        out = T.transcode_bytes(_nv16_bytes(), _spec("NV16", "YVYU"))
+        self.assertEqual(out, bytes([
+            0, 200, 1, 100,  2, 201, 3, 101,
+            4, 210, 5, 110,  6, 211, 7, 111,
+        ]))
+
+    def test_nv16_to_vyuy_macropixel_order(self):
+        out = T.transcode_bytes(_nv16_bytes(), _spec("NV16", "VYUY"))
+        self.assertEqual(out, bytes([
+            200, 0, 100, 1,  201, 2, 101, 3,
+            210, 4, 110, 5,  211, 6, 111, 7,
+        ]))
+
+    def test_nv16_to_nv61_swaps_chroma_within_pairs(self):
+        out = T.transcode_bytes(_nv16_bytes(), _spec("NV16", "NV61"))
+        self.assertEqual(out, bytes(range(8)) + bytes([
+            200, 100, 201, 101, 210, 110, 211, 111,
+        ]))
+
+    def test_yuyv_back_to_planes(self):
+        """The inverse direction reads macropixels correctly too."""
+        yuyv = bytes([
+            0, 100, 1, 200,  2, 101, 3, 201,
+            4, 110, 5, 210,  6, 111, 7, 211,
+        ])
+        # YUYV is 4:2:2 and cannot reach 4:2:0, so the reference is NV16.
+        self.assertEqual(
+            T.transcode_bytes(yuyv, _spec("YUYV", "NV16")), _nv16_bytes()
+        )
+        # And the packed -> planar direction rebuilds both chroma planes.
+        self.assertEqual(
+            T.transcode_bytes(yuyv, _spec("YUYV", "NV16")),
+            _nv16_bytes(),
+        )
+
+
+# ── 3. Validation / rejection ────────────────────────────────────────
+
+class ValidationTests(unittest.TestCase):
+
+    def test_partial_trailing_frame_is_rejected(self):
+        data = _i420_bytes() + b"x"
+        with self.assertRaises(T.TranscodeError) as caught:
+            T.transcode_frames(data, _spec("I420", "NV12"))
+        message = str(caught.exception)
+        self.assertIn("not an integer multiple", message)
+        self.assertIn("12-byte", message)
+        self.assertIn("1 trailing byte", message)
+
+    def test_empty_after_offset_is_rejected(self):
+        with self.assertRaises(T.TranscodeError) as caught:
+            T.transcode_frames(b"", _spec("I420", "NV12"))
+        self.assertIn("no frame data", str(caught.exception))
+
+    def test_frame_count_reports_whole_frames(self):
+        self.assertEqual(T.frame_count(len(_i420_bytes()) * 3, _spec("I420", "NV12")), 3)
+        with self.assertRaises(T.TranscodeError):
+            T.frame_count(len(_i420_bytes()) * 3 + 1, _spec("I420", "NV12"))
+
+    def test_transcode_bytes_rejects_wrong_length(self):
+        with self.assertRaises(T.TranscodeError) as caught:
+            T.transcode_bytes(_i420_bytes() * 2, _spec("I420", "NV12"))
+        self.assertIn("exactly one", str(caught.exception))
+
+    def test_odd_width_rejected_for_4_2_2(self):
+        for fmt in T.YUV422_FORMATS:
+            with self.subTest(fmt=fmt):
+                with self.assertRaises(T.TranscodeError) as caught:
+                    T.frame_size(T.TranscodeSpec(fmt, "NV16" if fmt != "NV16" else "YUYV", 5, 2))
+                self.assertIn("even width", str(caught.exception))
+
+    def test_odd_width_or_height_rejected_for_4_2_0(self):
+        for fmt in T.YUV420_FORMATS:
+            with self.subTest(fmt=fmt):
+                peer = "NV12" if fmt != "NV12" else "I420"
+                for dims in ((5, 2), (4, 3)):
+                    with self.assertRaises(T.TranscodeError) as caught:
+                        T.frame_size(T.TranscodeSpec(fmt, peer, *dims))
+                    self.assertIn("even width/height", str(caught.exception))
+
+    def test_odd_height_allowed_for_4_2_2(self):
+        # 4:2:2 only requires an even width; a 4x3 frame is legal.
+        self.assertEqual(
+            T.frame_size(T.TranscodeSpec("NV16", "YUYV", 4, 3)), 4 * 3 * 2
+        )
+
+    def test_cross_family_rejected_with_reason(self):
+        for source in T.YUV422_FORMATS:
+            for target in T.YUV420_FORMATS:
+                with self.subTest(source=source, target=target):
+                    reason = T.reject_reason(source, target)
+                    self.assertTrue(reason, "跨家族必须给出拒绝原因")
+                    self.assertIn("lossy", reason)
+                    self.assertFalse(T.can_transcode(source, target))
+                    with self.assertRaises(T.TranscodeError):
+                        T.transcode_bytes(b"\x00" * 64, _spec(source, target))
+
+    def test_same_format_is_not_a_conversion(self):
+        self.assertFalse(T.can_transcode("NV16", "NV16"))
+        self.assertIn("no-op", T.reject_reason("NV16", "NV16"))
+
+    def test_yonly_rejected_with_explanation(self):
+        reason = T.reject_reason("YOnly12", "NV12")
+        self.assertTrue(reason)
+        self.assertIn("4:0:0", reason)
+
+    def test_raw_rejected_as_reserved(self):
+        reason = T.reject_reason("RAW12", "NV12")
+        self.assertTrue(reason)
+        self.assertIn("reserved", reason)
+
+    def test_unknown_format_rejected(self):
+        self.assertTrue(T.reject_reason("YUY2", "NV16"))
+        self.assertTrue(T.reject_reason("NV16", "BOGUS"))
+
+    def test_reject_reason_none_iff_can_transcode(self):
+        formats = T.YUV422_FORMATS + T.YUV420_FORMATS + ("YOnly12", "RAW12", "NOPE")
+        for source in formats:
+            for target in formats:
+                with self.subTest(source=source, target=target):
+                    self.assertEqual(
+                        T.can_transcode(source, target),
+                        T.reject_reason(source, target) is None,
+                    )
+
+    def test_format_names_are_case_insensitive(self):
+        self.assertEqual(
+            T.transcode_bytes(_i420_bytes(), _spec("i420", "nv12")),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+        )
+
+    def test_family_formats(self):
+        self.assertEqual(T.family_formats("NV16"), T.YUV422_FORMATS)
+        self.assertEqual(T.family_formats("NV12"), T.YUV420_FORMATS)
+        self.assertEqual(T.family_formats("YOnly12"), ())
+
+    def test_offset_is_honoured(self):
+        with_header = b"HEADER" + _i420_bytes()
+        self.assertEqual(
+            T.transcode_bytes(
+                with_header, T.TranscodeSpec("I420", "NV12", W, H, offset=6)
+            ),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+        )
+
+
+# ── 4. File-level transcode ──────────────────────────────────────────
+
+class TranscodeFileTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-transcode-")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, name: str, data: bytes) -> str:
+        path = os.path.join(self._tmp, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_multi_frame_file_is_fully_converted(self):
+        src = self._write("in.i420", _i420_bytes() * 2)
+        dst = os.path.join(self._tmp, "out.nv12")
+        count, size = T.transcode_file(src, dst, _spec("I420", "NV12"))
+        self.assertEqual(count, 2)
+        self.assertEqual(size, len(_i420_bytes()) * 2)
+        self.assertEqual(Path(dst).read_bytes(), _i420_bytes().replace(
+            bytes([100, 101, 200, 201]), bytes([100, 200, 101, 201])
+        ) * 2)
+
+    def test_invalid_size_writes_nothing(self):
+        src = self._write("bad.i420", _i420_bytes() + b"x")
+        dst = os.path.join(self._tmp, "never.nv12")
+        with self.assertRaises(T.TranscodeError):
+            T.transcode_file(src, dst, _spec("I420", "NV12"))
+        self.assertFalse(os.path.exists(dst), "校验失败绝不能留下半成品输出")
+
+    def test_cross_family_writes_nothing(self):
+        src = self._write("in.i420", _i420_bytes())
+        dst = os.path.join(self._tmp, "never.yuyv")
+        with self.assertRaises(T.TranscodeError):
+            T.transcode_file(src, dst, _spec("I420", "YUYV"))
+        self.assertFalse(os.path.exists(dst))
+
+
+# ── 5. CLI end-to-end ────────────────────────────────────────────────
+
+class CliTranscodeTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-cli-transcode-")
+        self._src = os.path.join(self._tmp, "in.i420")
+        Path(self._src).write_bytes(_i420_bytes() * 2)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_convert_yuv_end_to_end(self):
+        out = os.path.join(self._tmp, "out.yuv")
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", out,
+            "--input-type", "yuv", "--input-yuv-type", "I420",
+            "--yuv-type", "NV12", "--width", "4", "--height", "2",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("lossless rearrange", proc.stdout)
+        self.assertIn("2 frame(s)", proc.stdout)
+        expected = T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")) * 2
+        self.assertEqual(Path(out).read_bytes(), expected)
+
+    def test_missing_width_height_errors(self):
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", os.path.join(self._tmp, "x.yuv"),
+            "--input-type", "yuv", "--input-yuv-type", "I420", "--yuv-type", "NV12",
+        )
+        self.assertEqual(proc.returncode, 1)
+        combined = proc.stdout + proc.stderr
+        self.assertIn("--width and --height required", combined)
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "x.yuv")))
+
+    def test_only_one_missing_dimension_is_named(self):
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", os.path.join(self._tmp, "x.yuv"),
+            "--input-type", "yuv", "--input-yuv-type", "I420", "--yuv-type", "NV12",
+            "--width", "4",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--height required", proc.stdout + proc.stderr)
+
+    def test_cross_family_exit_code_and_message(self):
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", os.path.join(self._tmp, "x.yuv"),
+            "--input-type", "yuv", "--input-yuv-type", "I420", "--yuv-type", "YUYV",
+            "--width", "4", "--height", "2",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("lossy chroma resampling", proc.stderr)
+
+    def test_partial_frame_is_rejected_without_output(self):
+        bad = os.path.join(self._tmp, "bad.i420")
+        Path(bad).write_bytes(_i420_bytes() + b"x")
+        out = os.path.join(self._tmp, "x.yuv")
+        proc = _run_cli(
+            "convert", "-i", bad, "-o", out,
+            "--input-type", "yuv", "--input-yuv-type", "I420", "--yuv-type", "NV12",
+            "--width", "4", "--height", "2",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("not an integer multiple", proc.stderr)
+        self.assertFalse(os.path.exists(out))
+
+    def test_explicit_raw_target_is_rejected(self):
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", os.path.join(self._tmp, "x.raw"),
+            "--input-type", "yuv", "--input-yuv-type", "I420", "--yuv-type", "NV12",
+            "--width", "4", "--height", "2", "--target", "RAW",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("cannot target RAW", proc.stderr)
+
+    def test_input_type_raw_is_reserved(self):
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", os.path.join(self._tmp, "x.yuv"),
+            "--input-type", "raw", "--width", "4", "--height", "2",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("reserved", proc.stderr)
+
+    def test_yuv_transcode_over_limit_is_rejected_before_writing(self):
+        """D1 for the transcode path: the 512MB guard also covers YUV input."""
+        from raw_view.formats import MAX_DECODE_BYTES
+
+        # 65535x65535 NV16 would be ~8.6GB; the file need not exist that large
+        # because the size limit is evaluated from the requested geometry.
+        out = os.path.join(self._tmp, "big.yuyv")
+        proc = _run_cli(
+            "convert", "-i", self._src, "-o", out,
+            "--input-type", "yuv", "--input-yuv-type", "NV16", "--yuv-type", "YUYV",
+            "--width", "65534", "--height", "65532",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("too large", proc.stderr)
+        self.assertGreater(65534 * 65532 * 2, MAX_DECODE_BYTES)
+        self.assertFalse(os.path.exists(out), "超限拒绝不得留下输出文件")
+
+
+# ── 6. CLI backward compatibility ────────────────────────────────────
+
+class CliBackwardCompatibilityTests(unittest.TestCase):
+    """Pre-existing commands must behave exactly as before this release."""
+
+    def setUp(self):
+        import cv2
+
+        self._tmp = tempfile.mkdtemp(prefix="rv-cli-compat-")
+        self._png = os.path.join(self._tmp, "in.png")
+        cv2.imwrite(self._png, np.zeros((8, 8, 3), dtype=np.uint8))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_convert_image_to_raw_uses_640x480_default(self):
+        out = os.path.join(self._tmp, "a.raw")
+        proc = _run_cli("convert", "-i", self._png, "-o", out)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Dimensions:   640x480", proc.stdout)
+        self.assertIn("Target:       RAW", proc.stdout)
+        self.assertEqual(os.path.getsize(out), 640 * 480 * 2)  # RAW12
+
+    def test_convert_image_to_yuv_explicit_size(self):
+        out = os.path.join(self._tmp, "a.yuv")
+        proc = _run_cli(
+            "convert", "-i", self._png, "-o", out,
+            "--target", "YUV", "--width", "8", "--height", "8",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(os.path.getsize(out), 8 * 8 * 2)
+
+    def test_view_raw_round_trip(self):
+        raw = os.path.join(self._tmp, "a.raw")
+        _run_cli("convert", "-i", self._png, "-o", raw, "--raw-type", "RAW8",
+                 "--width", "8", "--height", "8")
+        png = os.path.join(self._tmp, "v.png")
+        proc = _run_cli(
+            "view", "-i", raw, "-o", png,
+            "--width", "8", "--height", "8", "--raw-type", "RAW8",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.isfile(png))
+
+    def test_view_yuv_round_trip(self):
+        yuv = os.path.join(self._tmp, "a.yuv")
+        _run_cli("convert", "-i", self._png, "-o", yuv, "-t", "YUV",
+                 "--width", "8", "--height", "8")
+        png = os.path.join(self._tmp, "v.png")
+        proc = _run_cli(
+            "view", "-i", yuv, "-o", png, "-t", "YUV",
+            "--width", "8", "--height", "8",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_batch_image_convert_still_works(self):
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 8,
+            "height": 8,
+            "output_dir": self._tmp,
+            "files": [{"input": self._png, "output": os.path.join(self._tmp, "b.raw")}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1 succeeded", proc.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self._tmp, "b.raw")))
+
+    def test_batch_help_still_exits_zero(self):
+        proc = _run_cli("--batch-help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("UTF-8", proc.stdout)
+
+
+# ── 7. GUI: Convert dialog input-type behaviour ──────────────────────
+
+class _DialogTestBase(unittest.TestCase):
+    """Real dialogs, L3 leak guard armed, teardown through destroy_widget."""
+
+    def setUp(self):
+        from _qt_cleanup import begin_widget_leak_check
+
+        self._dialogs: list = []
+        begin_widget_leak_check()
+
+    def tearDown(self):
+        from _qt_cleanup import destroy_widget, end_widget_leak_check
+
+        for widget in getattr(self, "_dialogs", []):
+            destroy_widget(widget)
+        self._dialogs = []
+        end_widget_leak_check(f"{type(self).__name__}.{self._testMethodName}")
+
+    def make_convert_dialog(self):
+        from raw_view.gui.dialogs.convert import ConvertDialog
+        from raw_view.models import AppSettings
+
+        app = _ensure_app()
+        dialog = ConvertDialog(AppSettings())
+        self._dialogs.append(dialog)
+        app.processEvents()
+        return dialog
+
+
+class ConvertDialogInputTypeTests(_DialogTestBase):
+
+    def test_input_type_choices(self):
+        dialog = self.make_convert_dialog()
+        labels = [dialog.input_type.itemText(i) for i in range(dialog.input_type.count())]
+        self.assertEqual(labels[:2], ["Image", "YUV"])
+        self.assertIn("RAW", labels[2], "RAW 预留项应可见（置灰）而非消失")
+
+    def test_image_is_default_and_keeps_output_semantics(self):
+        dialog = self.make_convert_dialog()
+        self.assertEqual(dialog.input_type.currentText(), "Image")
+        self.assertEqual(dialog.width.value(), 2560)
+        self.assertEqual(dialog.height.value(), 1440)
+        self.assertTrue(dialog.target_type.isEnabled())
+        self.assertFalse(dialog.input_yuv_type.isVisibleTo(dialog))
+
+    def test_switching_to_yuv_clears_dimensions(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual(dialog.width.value(), 1)
+        self.assertEqual(dialog.height.value(), 1)
+        dialog.input_type.setCurrentText("Image")
+        self.assertEqual(dialog.width.value(), 2560)
+        self.assertEqual(dialog.height.value(), 1440)
+
+    def test_yuv_input_pins_target_to_yuv_and_enables_format_dropdown(self):
+        dialog = self.make_convert_dialog()
+        dialog.target_type.setCurrentText("RAW")
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual(dialog.target_type.currentText(), "YUV")
+        self.assertFalse(dialog.target_type.isEnabled())
+        self.assertTrue(dialog.yuv_type.isEnabled())
+        self.assertTrue(dialog.input_yuv_type.isVisibleTo(dialog))
+
+    def test_yuv_input_hides_raw_only_controls(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        for widget in (
+            dialog.raw_type, dialog.raw_source_mode, dialog.bayer_pattern,
+            dialog.bit_depth_combo,
+        ):
+            self.assertFalse(widget.isVisibleTo(dialog))
+
+    def test_non_convertible_targets_are_greyed_not_hidden(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        model = dialog.yuv_type.model()
+        enabled = {}
+        for index in range(dialog.yuv_type.count()):
+            enabled[dialog.yuv_type.itemText(index)] = model.item(index).isEnabled()
+        # Same family stays convertible...
+        for name in T.YUV422_FORMATS:
+            if name != "NV16":
+                self.assertTrue(enabled[name], f"{name} 应可转")
+        # ...other families / YOnly / same-format stay listed but disabled.
+        for name in T.YUV420_FORMATS + ("YOnly", "NV16"):
+            self.assertFalse(enabled[name], f"{name} 应置灰")
+        self.assertTrue(
+            any(not flag for flag in enabled.values()),
+            "不可转目标必须仍然出现在列表里（置灰），不是被移除",
+        )
+        self.assertTrue(
+            dialog.yuv_type.itemData(dialog.yuv_type.findText("NV12"), 3),
+            "置灰项应带 reject_reason 作为 tooltip",
+        )
+
+    def test_switch_to_420_source_regreys_targets(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV12")
+        model = dialog.yuv_type.model()
+        for name in T.YUV420_FORMATS:
+            if name != "NV12":
+                self.assertTrue(model.item(dialog.yuv_type.findText(name)).isEnabled())
+        for name in T.YUV422_FORMATS:
+            self.assertFalse(model.item(dialog.yuv_type.findText(name)).isEnabled())
+
+    def test_selected_target_falls_back_to_a_convertible_one(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.yuv_type.setCurrentText("NV12")  # not convertible from NV16
+        dialog.input_yuv_type.setCurrentText("NV61")
+        self.assertTrue(
+            T.can_transcode("NV61", dialog.yuv_type.currentText()),
+            f"选中的目标必须可转，实际 {dialog.yuv_type.currentText()}",
+        )
+
+    def test_back_to_image_reenables_all_targets(self):
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.input_type.setCurrentText("Image")
+        model = dialog.yuv_type.model()
+        self.assertTrue(all(model.item(i).isEnabled() for i in range(dialog.yuv_type.count())))
+        self.assertTrue(dialog.target_type.isEnabled())
+
+
+class ConvertDialogYuvConvertTests(_DialogTestBase):
+    """Drive the actual conversion path (message boxes suppressed)."""
+
+    def setUp(self):
+        super().setUp()
+        self._tmp = tempfile.mkdtemp(prefix="rv-gui-transcode-")
+        self._src = os.path.join(self._tmp, "in.i420")
+        Path(self._src).write_bytes(_i420_bytes())
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+    def test_convert_writes_transcoded_file(self):
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        dialog = self.make_convert_dialog()
+        out = os.path.join(self._tmp, "out.nv12")
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(out)
+        with mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical") as critical:
+            dialog._do_convert()
+        critical.assert_not_called()
+        self.assertEqual(
+            Path(out).read_bytes(),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+        )
+
+    def test_bad_size_reports_clear_error_and_writes_nothing(self):
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        Path(self._src).write_bytes(_i420_bytes() + b"x")
+        dialog = self.make_convert_dialog()
+        out = os.path.join(self._tmp, "out.nv12")
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(out)
+        with mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical") as critical:
+            dialog._do_convert()
+        self.assertTrue(critical.called, "非整帧输入必须报错")
+        message = critical.call_args[0][2]
+        self.assertIn("not an integer multiple", message)
+        self.assertFalse(os.path.exists(out))
+
+
+class BatchConvertDialogInputTypeTests(_DialogTestBase):
+    """The batch dialog must offer the same input-type semantics as Convert."""
+
+    def setUp(self):
+        super().setUp()
+        self._tmp = tempfile.mkdtemp(prefix="rv-gui-batch-transcode-")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+    def _make(self):
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        app = _ensure_app()
+        dialog = BatchConvertDialog(AppSettings())
+        self._dialogs.append(dialog)
+        app.processEvents()
+        return dialog
+
+    def test_input_type_choices_match_convert_dialog(self):
+        dialog = self._make()
+        labels = [dialog.input_type.itemText(i) for i in range(dialog.input_type.count())]
+        self.assertEqual(labels[:2], ["Image", "YUV"])
+
+    def test_switching_to_yuv_clears_dimensions_and_pins_target(self):
+        dialog = self._make()
+        self.assertEqual(dialog.width.value(), 2560)
+        dialog.target_type.setCurrentText("RAW")
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual((dialog.width.value(), dialog.height.value()), (1, 1))
+        self.assertEqual(dialog.target_type.currentText(), "YUV")
+        self.assertFalse(dialog.target_type.isEnabled())
+        self.assertTrue(dialog.input_yuv_type.isVisibleTo(dialog))
+
+    def test_non_convertible_targets_greyed(self):
+        from raw_view import transcode as T
+
+        dialog = self._make()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        model = dialog.yuv_type.model()
+        for name in T.YUV422_FORMATS:
+            if name != "NV16":
+                self.assertTrue(model.item(dialog.yuv_type.findText(name)).isEnabled())
+        for name in T.YUV420_FORMATS:
+            self.assertFalse(model.item(dialog.yuv_type.findText(name)).isEnabled())
+
+    def test_switch_back_to_image_restores_defaults(self):
+        dialog = self._make()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_type.setCurrentText("Image")
+        self.assertEqual(dialog.width.value(), 2560)
+        self.assertEqual(dialog.height.value(), 1440)
+        self.assertTrue(dialog.target_type.isEnabled())
+
+    def test_yuv_batch_writes_transcoded_output(self):
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+
+        dialog = self._make()
+        dialog._variant_selector = None
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        src = os.path.join(self._tmp, "in.i420")
+        Path(src).write_bytes(_i420_bytes())
+        dialog._add_files([src])
+        # "Same directory as input" is on by default, so the auto-derived output
+        # lands next to the source; read the path back from the table.
+        with mock.patch.object(bc_mod.QMessageBox, "information"):
+            dialog._run_batch()
+        self.assertEqual(dialog._file_table.item(0, 2).text(), "OK")
+        out = dialog._file_table.item(0, 3).text()
+        self.assertTrue(os.path.isfile(out), out)
+        self.assertEqual(
+            Path(out).read_bytes(),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+        )
+        self.assertIn("NV12", Path(out).name, "自动输出名应体现目标布局")
+
+
+# ── 8. CLI defects D1-D7 ─────────────────────────────────────────────
+
+class BatchConvertLimitTests(unittest.TestCase):
+    """D1: batch convert must enforce the same 512MB frame limit as `convert`."""
+
+    def setUp(self):
+        import cv2
+
+        self._tmp = tempfile.mkdtemp(prefix="rv-d1-")
+        self._png = os.path.join(self._tmp, "s.png")
+        cv2.imwrite(self._png, np.zeros((4, 4, 3), dtype=np.uint8))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, spec: dict, batch_name: str = "spec.json"):
+        import raw_view.__main__ as main_mod
+
+        batch_path = os.path.join(self._tmp, batch_name)
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        with mock.patch("raw_view.__main__.sys.exit"):
+            return main_mod._run_batch(
+                argparse.Namespace(batch_file=batch_path, batch_help=False)
+            )
+
+    def test_batch_convert_oversize_is_rejected_and_writes_nothing(self):
+        """The exact reproduction: 16384x8193 RAW32 used to write a 513MB file."""
+        out_dir = os.path.join(self._tmp, "out")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW32",
+            "width": 16384,
+            "height": 8193,
+            "output_dir": out_dir,
+            "files": [{"input": self._png}],
+        }
+        with mock.patch("raw_view.converter.image_file_to_raw") as conv:
+            self._run(spec)
+        conv.assert_not_called()
+        self.assertFalse(
+            os.path.isdir(out_dir) and os.listdir(out_dir),
+            "超限条目不得产生任何输出文件",
+        )
+
+    def test_batch_convert_oversize_is_reported_as_failed(self):
+        import raw_view.__main__ as main_mod
+
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW32",
+            "width": 16384,
+            "height": 8193,
+            "output_dir": self._tmp,
+            "files": [{"input": self._png}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        exit_codes: list[int] = []
+        with mock.patch.object(
+            main_mod.sys, "exit", side_effect=lambda code=0: exit_codes.append(code)
+        ), mock.patch("builtins.print") as fake_print:
+            main_mod._run_batch(
+                argparse.Namespace(batch_file=batch_path, batch_help=False)
+            )
+        printed = " ".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("FAIL", printed)
+        self.assertIn("too large", printed)
+        self.assertIn("1 failed", printed)
+        self.assertEqual(exit_codes, [1], "有失败时必须 exit 1")
+
+    def test_batch_convert_within_limit_still_converts(self):
+        out = os.path.join(self._tmp, "ok.raw")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "files": [{"input": self._png, "output": out}],
+        }
+        self._run(spec)
+        self.assertEqual(os.path.getsize(out), 16)
+
+    def test_batch_yuv_transcode_is_size_checked_too(self):
+        import raw_view.__main__ as main_mod
+
+        yuv = os.path.join(self._tmp, "in.nv16")
+        Path(yuv).write_bytes(b"\x00" * 32)
+        spec = {
+            "mode": "convert",
+            "target": "YUV",
+            "input_type": "yuv",
+            "input_yuv_type": "NV16",
+            "yuv_type": "YUYV",
+            "width": 65534,
+            "height": 65532,
+            "files": [{"input": yuv}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        with mock.patch("raw_view.__main__.sys.exit"), \
+             mock.patch("builtins.print") as fake_print:
+            main_mod._run_batch(
+                argparse.Namespace(batch_file=batch_path, batch_help=False)
+            )
+        printed = " ".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("too large", printed)
+
+
+class BatchCrossEntryCollisionTests(unittest.TestCase):
+    """D3: two entries deriving the same auto output name must not collide."""
+
+    def setUp(self):
+        import cv2
+
+        self._tmp = tempfile.mkdtemp(prefix="rv-d3-")
+        for sub in ("a", "b"):
+            os.makedirs(os.path.join(self._tmp, sub))
+            cv2.imwrite(
+                os.path.join(self._tmp, sub, "same.png"),
+                np.full((4, 4, 3), 10 if sub == "a" else 200, dtype=np.uint8),
+            )
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_same_basename_across_entries_gets_unique_output(self):
+        import raw_view.__main__ as main_mod
+
+        out_dir = os.path.join(self._tmp, "out")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "output_dir": out_dir,
+            "files": [
+                {"input": os.path.join(self._tmp, "a", "same.png")},
+                {"input": os.path.join(self._tmp, "b", "same.png")},
+            ],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        with mock.patch("raw_view.__main__.sys.exit"):
+            main_mod._run_batch(
+                argparse.Namespace(batch_file=batch_path, batch_help=False)
+            )
+        produced = sorted(os.listdir(out_dir))
+        self.assertEqual(
+            len(produced), 2,
+            f"两个 entry 必须各写一个文件，实际: {produced}",
+        )
+        self.assertTrue(any(name.endswith("_2.raw") for name in produced), produced)
+
+    def test_two_successes_means_two_files(self):
+        """The failure mode was "2 succeeded" with 1 file on disk."""
+        out_dir = os.path.join(self._tmp, "out2")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "output_dir": out_dir,
+            "files": [
+                {"input": os.path.join(self._tmp, "a", "same.png")},
+                {"input": os.path.join(self._tmp, "b", "same.png")},
+            ],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("2 succeeded", proc.stdout)
+        self.assertEqual(len(os.listdir(out_dir)), 2, proc.stdout)
+
+    def test_explicit_output_is_still_honoured_verbatim(self):
+        """De-duplication must never rewrite a user-chosen output name."""
+        import raw_view.__main__ as main_mod
+
+        explicit = os.path.join(self._tmp, "chosen.raw")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "files": [
+                {"input": os.path.join(self._tmp, "a", "same.png"), "output": explicit},
+            ],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        with mock.patch("raw_view.__main__.sys.exit"):
+            main_mod._run_batch(
+                argparse.Namespace(batch_file=batch_path, batch_help=False)
+            )
+        self.assertTrue(os.path.isfile(explicit))
+
+
+class CliErrorOutputTests(unittest.TestCase):
+    """D2: a failed decode/convert must print one line, not a full traceback."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-d2-")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_view_failure_has_no_traceback_on_stderr(self):
+        short = os.path.join(self._tmp, "short.raw")
+        Path(short).write_bytes(b"\x00" * 8)
+        proc = _run_cli(
+            "view", "-i", short, "-o", os.path.join(self._tmp, "o.png"),
+            "--width", "64", "--height", "64", "--raw-type", "RAW12",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+        self.assertIn("Error:", proc.stderr)
+
+    def test_convert_failure_has_no_traceback_on_stderr(self):
+        bad_png = os.path.join(self._tmp, "bad.png")
+        Path(bad_png).write_bytes(b"not a png")
+        proc = _run_cli(
+            "convert", "-i", bad_png, "-o", os.path.join(self._tmp, "o.raw"),
+            "--width", "8", "--height", "8",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+        self.assertIn("Error:", proc.stderr)
+
+    def test_batch_failure_has_no_traceback_on_stderr(self):
+        bad_png = os.path.join(self._tmp, "bad.png")
+        Path(bad_png).write_bytes(b"not a png")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 8,
+            "height": 8,
+            "files": [{"input": bad_png}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+
+    def test_log_failure_keeps_the_traceback_for_diagnosis(self):
+        """The detail must not be thrown away - only kept out of the console.
+
+        The file handler is at DEBUG while the console handler is at INFO, so a
+        DEBUG record with ``exc_info`` reaches the log file and nothing else:
+        one readable line for the user, full stack for diagnosis.
+        """
+        import raw_view.__main__ as main_mod
+
+        calls: list[tuple[str, dict]] = []
+
+        class _Spy:
+            def error(self, *args, **kwargs):
+                calls.append(("error", kwargs))
+
+            def debug(self, *args, **kwargs):
+                calls.append(("debug", kwargs))
+
+        with mock.patch.object(main_mod, "logger", _Spy()):
+            try:
+                raise RuntimeError("boom")
+            except RuntimeError as exc:
+                main_mod._log_failure("failed %s", "x", exc=exc)
+
+        kinds = [kind for kind, _ in calls]
+        self.assertEqual(kinds, ["debug"], "只写 DEBUG（文件 handler），控制台不重复")
+        self.assertIsInstance(calls[0][1].get("exc_info"), BaseException)
+
+
+class BatchTargetValidationTests(unittest.TestCase):
+    """D4 (message wording) and D6 (JSON/schema validation)."""
+
+    def setUp(self):
+        import cv2
+
+        self._tmp = tempfile.mkdtemp(prefix="rv-d4-")
+        self._png = os.path.join(self._tmp, "in.png")
+        cv2.imwrite(self._png, np.zeros((4, 4, 3), dtype=np.uint8))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run_spec(self, payload) -> subprocess.CompletedProcess:
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(
+            payload if isinstance(payload, str) else json.dumps(payload),
+            encoding="utf-8",
+        )
+        return _run_cli("batch", "-b", batch_path)
+
+    def test_invalid_raw_type_is_reported_as_raw(self):
+        """D4: `--target RAW --raw-type BOGUS` must not say "YUV subformat"."""
+        proc = _run_cli(
+            "convert", "-i", self._png, "-o", os.path.join(self._tmp, "o.raw"),
+            "--target", "RAW", "--raw-type", "BOGUS", "--width", "4", "--height", "4",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("RAW", proc.stderr)
+        self.assertNotIn("YUV subformat", proc.stderr)
+
+    def test_invalid_yuv_type_is_reported_as_yuv(self):
+        proc = _run_cli(
+            "convert", "-i", self._png, "-o", os.path.join(self._tmp, "o.yuv"),
+            "--target", "YUV", "--yuv-type", "BOGUS", "--width", "4", "--height", "4",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("YUV subformat", proc.stderr)
+
+    def test_files_as_string_is_a_readable_error(self):
+        proc = self._run_spec({"mode": "convert", "files": "abc"})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("invalid batch file", proc.stderr)
+        self.assertIn("files", proc.stderr)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+
+    def test_non_numeric_width_is_a_readable_error(self):
+        proc = self._run_spec({"mode": "convert", "width": "abc", "files": []})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("width", proc.stderr)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+
+    def test_unknown_mode_is_rejected(self):
+        proc = self._run_spec({"mode": "FROBNICATE", "files": []})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("invalid mode", proc.stderr)
+
+    def test_lowercase_target_is_normalised_not_misrouted(self):
+        """`"target": "raw"` used to silently take the YUV branch."""
+        out = os.path.join(self._tmp, "o.raw")
+        proc = self._run_spec({
+            "mode": "convert",
+            "target": "raw",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "files": [{"input": self._png, "output": out}],
+        })
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(os.path.getsize(out), 16, "小写 target 必须仍按 RAW 编码")
+
+    def test_invalid_target_is_rejected(self):
+        proc = self._run_spec({"mode": "convert", "target": "PNG", "files": []})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("invalid target", proc.stderr)
+
+    def test_non_object_entry_is_rejected(self):
+        proc = self._run_spec({"mode": "convert", "files": ["a.png"]})
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("must be a JSON object", proc.stderr)
+
+    def test_nan_is_rejected(self):
+        proc = self._run_spec('{"mode": "convert", "width": NaN, "files": []}')
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("NaN", proc.stderr)
+
+    def test_malformed_json_is_a_readable_error(self):
+        proc = self._run_spec("{not json")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("invalid batch JSON", proc.stderr)
+        self.assertNotIn("Traceback (most recent call last)", proc.stderr)
+
+
+class BayerPatternValidationTests(unittest.TestCase):
+    """D5: `--bayer-pattern` is validated by argparse (exit 2), not degraded."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-d5-")
+        import cv2
+
+        self._png = os.path.join(self._tmp, "in.png")
+        cv2.imwrite(self._png, np.zeros((4, 4, 3), dtype=np.uint8))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_invalid_bayer_pattern_exits_2(self):
+        proc = _run_cli(
+            "convert", "-i", self._png, "-o", os.path.join(self._tmp, "o.raw"),
+            "--width", "4", "--height", "4", "--bayer-pattern", "WRONG",
+        )
+        self.assertEqual(proc.returncode, 2, "argparse 应在解析期拒绝")
+        self.assertIn("invalid choice", proc.stderr)
+
+    def test_invalid_bayer_pattern_in_view_is_rejected_the_same_way(self):
+        raw = os.path.join(self._tmp, "a.raw")
+        Path(raw).write_bytes(b"\x00" * 16)
+        proc = _run_cli(
+            "view", "-i", raw, "-o", os.path.join(self._tmp, "o.png"),
+            "--width", "4", "--height", "4", "--raw-type", "RAW8",
+            "--bayer-pattern", "WRONG",
+        )
+        self.assertEqual(proc.returncode, 2)
+
+    def test_valid_patterns_are_accepted(self):
+        from raw_view.models import BAYER_PATTERNS
+
+        for pattern in BAYER_PATTERNS:
+            with self.subTest(pattern=pattern):
+                proc = _run_cli(
+                    "convert", "-i", self._png, "-o",
+                    os.path.join(self._tmp, f"{pattern}.raw"),
+                    "--width", "4", "--height", "4", "--bayer-pattern", pattern,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class DangerousSuffixTests(unittest.TestCase):
+    """D7: the CLI refuses executable/script inputs, like the GUI always did."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rv-d7-")
+        self._exe = os.path.join(self._tmp, "notepad.exe")
+        Path(self._exe).write_bytes(b"MZ\x90\x00" + b"\x00" * 60)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_shared_module_is_the_single_source(self):
+        from raw_view import filetypes
+        from raw_view.gui import app as app_mod
+
+        self.assertIs(app_mod.is_dangerous_extension, filetypes.is_dangerous_extension)
+        self.assertEqual(app_mod._DANGEROUS_EXTENSIONS, filetypes.DANGEROUS_EXTENSIONS)
+
+    def test_view_refuses_executable(self):
+        proc = _run_cli(
+            "view", "-i", self._exe, "-o", os.path.join(self._tmp, "o.png"),
+            "--width", "4", "--height", "4",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("executable", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "o.png")))
+
+    def test_convert_refuses_executable(self):
+        proc = _run_cli(
+            "convert", "-i", self._exe, "-o", os.path.join(self._tmp, "o.raw"),
+            "--width", "4", "--height", "4",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("executable", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "o.raw")))
+
+    def test_batch_refuses_executable_entry(self):
+        out = os.path.join(self._tmp, "o.raw")
+        spec = {
+            "mode": "convert",
+            "target": "RAW",
+            "raw_type": "RAW8",
+            "width": 4,
+            "height": 4,
+            "files": [{"input": self._exe, "output": out}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("executable", proc.stdout)
+        self.assertFalse(os.path.exists(out))
+
+    def test_suffixless_and_unknown_suffixes_are_not_affected(self):
+        from raw_view.filetypes import is_dangerous_extension
+
+        for name in ("frame", "frame.dat", "frame.bin", "frame.raw", "a.raw"):
+            self.assertFalse(is_dangerous_extension(name), name)
+
+    def test_case_insensitive(self):
+        from raw_view.filetypes import is_dangerous_extension
+
+        self.assertTrue(is_dangerous_extension("a.EXE"))
+        self.assertTrue(is_dangerous_extension("a.Ps1"))
+
+    def test_suffixless_raw_file_still_converts(self):
+        src = os.path.join(self._tmp, "rawframe")
+        Path(src).write_bytes(b"\x00" * 16)
+        proc = _run_cli(
+            "view", "-i", src, "-o", os.path.join(self._tmp, "o.png"),
+            "--width", "4", "--height", "4", "--raw-type", "RAW8",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

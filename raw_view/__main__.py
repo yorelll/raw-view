@@ -31,10 +31,33 @@ import re
 import sys
 from pathlib import Path
 
+from raw_view.filetypes import is_dangerous_extension
 from raw_view.formats import FormatError
 from raw_view.logger import get_logger
+from raw_view.models import BAYER_PATTERNS
 
 logger = get_logger(__name__)
+
+
+def _log_failure(message: str, *args: object, exc: BaseException) -> None:
+    """Record a failed operation in the log file only (D2).
+
+    The console handler shares this logger with the rotating file handler and
+    emits at INFO, so ``logger.exception(...)`` printed the full Python stack on
+    the user's terminal *in addition to* the CLI's own ``Error: ...`` line.  The
+    CLI's user-facing contract is one readable line; the diagnosis stays in the
+    log file (the file handler is at DEBUG, the console handler at INFO), so no
+    debugging capability is lost.
+    """
+    logger.debug(message, *args, exc_info=exc)
+
+
+# Historical CLI defaults for --width/--height (image -> RAW/YUV encode, and
+# RAW/YUV -> image decode).  The parser leaves them as None so this release can
+# tell "user did not pass it" from "user passed it" (a YUV transcode must reject
+# a guessed 640x480); every pre-existing command backfills exactly these.
+DEFAULT_WIDTH = 640
+DEFAULT_HEIGHT = 480
 
 
 # Windows 文件名非法字符（含不可见控制字符）。glob 展开 + 显式 output 派生输出
@@ -121,13 +144,45 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Shared I/O ──
     p.add_argument("-i", "--input", help="Input file path")
     p.add_argument("-o", "--output", help="Output file path")
-    p.add_argument("--width", type=int, default=640, help="Output width (default: 640)")
-    p.add_argument("--height", type=int, default=480, help="Output height (default: 480)")
+    # 默认值仍是 640x480（既有命令行为不变），但 parser 层留 None + 下方回填：
+    # ``--input-type yuv`` 必须能区分"用户显式给了 --width/--height"与"走默认"，
+    # 否则缺省会静默按 640x480 解析布局、产出错误结果。
+    p.add_argument("--width", type=int, default=None,
+                   help="Output width (image source) / source frame width "
+                        "(YUV source). Default: 640 for image input; required "
+                        "for --input-type yuv")
+    p.add_argument("--height", type=int, default=None,
+                   help="Output height (image source) / source frame height "
+                        "(YUV source). Default: 480 for image input; required "
+                        "for --input-type yuv")
     p.add_argument("--offset", type=int, default=0, help="Data offset in bytes (default: 0)")
 
+    # ── Input source (convert mode) ──
+    # 默认 image = 既有行为（解码 PNG/JPG/BMP 再编码）。yuv = YUV 家族内部
+    # 无损字节重排（不 resize，width/height 是源帧尺寸）。raw 预留。
+    p.add_argument("--input-type", choices=("image", "yuv", "raw"), default="image",
+                   help="Convert-mode input source: image (decode PNG/JPG/BMP, "
+                        "default), yuv (lossless YUV 4:2:2/4:2:0 rearrange) or "
+                        "raw (reserved; not implemented yet)")
+    p.add_argument("--input-yuv-type",
+                   help="Input YUV sub-format for --input-type yuv "
+                        "(e.g. NV16). Defaults to --yuv-type")
+    p.add_argument("--input-alignment", choices=("lsb", "msb"),
+                   help="Input RAW/YOnly bit alignment (reserved for future "
+                        "input types). Defaults to --alignment")
+    p.add_argument("--input-endianness", choices=("little", "big"),
+                   help="Input RAW/YOnly byte order (reserved for future input "
+                        "types). Defaults to --endianness")
+    p.add_argument("--input-raw-type",
+                   help="Input RAW sub-format for --input-type raw "
+                        "(reserved; parsed but not converted yet)")
+
     # ── Encode options (convert mode) ──
-    p.add_argument("-t", "--target", choices=("RAW", "YUV"), default="RAW",
-                   help="Target/input type — RAW or YUV (default: RAW)")
+    # default=None so a YUV source can default to YUV without hiding an explicit
+    # "-t RAW" (which must stay an error); _apply_arg_defaults() backfills RAW.
+    p.add_argument("-t", "--target", choices=("RAW", "YUV"), default=None,
+                   help="Target/input type — RAW or YUV (default: RAW, or YUV "
+                        "when --input-type yuv)")
     p.add_argument("--raw-type", default="RAW12",
                    help="RAW sub-format (default: RAW12)")
     p.add_argument("--yuv-type", default="YUYV",
@@ -138,7 +193,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="RAW endianness (default: little)")
     p.add_argument("--source-mode", choices=("bayer", "gray"), default="bayer",
                    help="RAW source mode (default: bayer)")
-    p.add_argument("--bayer-pattern", default="RGGB",
+    # D5: validate at parse time (exit 2) instead of silently degrading to gray
+    # in view mode while failing with a traceback in convert mode.
+    p.add_argument("--bayer-pattern", choices=tuple(BAYER_PATTERNS), default="RGGB",
                    help="Bayer pattern (default: RGGB)")
 
     # ── Decode options (view mode) ──
@@ -163,16 +220,24 @@ def _show_batch_help() -> None:
 
 {
   // ── Global defaults (applied to every file) ──
-  "mode": "convert",              // "convert" (image→RAW/YUV) or "view" (RAW/YUV→image)
-  "target": "RAW",
+  "mode": "convert",              // "convert" (encode/transcode) or "view" (decode)
+  "target": "RAW",                // "RAW" or "YUV" (case-insensitive)
+  "input_type": "image",          // "image" (PNG/JPG/BMP), "yuv" (lossless YUV
+                                  // 4:2:2/4:2:0 rearrange) or "raw" (reserved).
+                                  // Per-entry: one batch may mix image and yuv.
+  "input_yuv_type": "NV16",       // source YUV layout for input_type="yuv"
+                                  // (defaults to yuv_type)
+  "input_alignment": "msb",       // reserved for raw/YOnly inputs
+  "input_endianness": "little",   // reserved for raw/YOnly inputs
+  "input_raw_type": "RAW12",      // reserved for input_type="raw"
   "raw_type": "RAW12",
-  "yuv_type": "YUYV",
+  "yuv_type": "YUYV",             // output YUV layout (transcode target)
   "width": 640,
   "height": 480,
   "alignment": "lsb",
   "endianness": "little",
   "source_mode": "bayer",
-  "bayer_pattern": "RGGB",
+  "bayer_pattern": "RGGB",        // RGGB / GRBG / GBRG / BGGR
   "preview_mode": "Bayer Color",  // only for mode="view"
   "offset": 0,
   "output_dir": null,             // optional. 若指定（全局或单条）则输出到该目录；
@@ -196,9 +261,25 @@ def _show_batch_help() -> None:
       "mode": "view",
       "width": 1920, "height": 1080,
       "bayer_pattern": "BGGR"
+    },
+    {
+      "input": "path/to/frame.nv16",   // YUV -> YUV lossless rearrange
+      "input_type": "yuv",
+      "input_yuv_type": "NV16",
+      "yuv_type": "NV12",              // must stay in the same chroma family
+      "width": 1920, "height": 1080    // SOURCE frame size — required, no resize
     }
   ]
 }
+
+"mode" / "target" / "input_type" are validated: an unknown or misspelled value
+is rejected with a one-line error instead of silently running a different
+operation.
+
+Limits: one frame may not exceed 512 MB, for view (decoded frame), convert
+(encoded output frame) and YUV transcode (both source and target layouts). The
+check runs before anything is written, so an over-limit entry never leaves a
+partial or gigantic file behind.
 
 Glob expansion (P2-3): any "input" containing * ? []  is expanded via glob,
 e.g. "frames/*.raw" turns each match into its own entry (per-file overrides
@@ -207,6 +288,9 @@ still apply). With "base_dir" set, relative "input" paths resolve from it
 
 If "output" is omitted, the path is auto-generated from the input name
 + resolution into the "output_dir" (or a default dir next to the input).
+Auto-generated paths are unique across the WHOLE batch: when two inputs derive
+the same name (e.g. a/same.png and b/same.png), the later one is written as
+"..._2" instead of overwriting the earlier result.
 
 Explicit "output" + glob magic in the same entry (0.3.0-M-1): each expansion
 gets a UNIQUE output name derived as "<stem>_<given output name>" in the same
@@ -223,6 +307,10 @@ _RESOLVE_KEYS = (
     "mode", "target", "raw_type", "yuv_type", "width", "height",
     "alignment", "endianness", "source_mode", "bayer_pattern",
     "preview_mode", "offset", "output_dir",
+    # Input-source keys: each entry interprets its own input_type, so a batch
+    # can mix image and yuv inputs.
+    "input_type", "input_yuv_type", "input_alignment", "input_endianness",
+    "input_raw_type",
 )
 
 
@@ -245,20 +333,71 @@ def _default_out_dir(mode: str) -> str:
     return VIEW_OUT_DIR if mode == "view" else CONVERT_OUT_DIR
 
 
+def _dedupe_output_path(
+    output_path: str, used: dict[str, str], *, owner: str = "auto output"
+) -> str:
+    """Make an auto-generated *batch* output path unique across the batch (D3).
+
+    ``_unique_output`` inside the glob expander already de-duplicated matches of
+    one entry, but nothing coordinated *different* entries: ``a/same.png`` and
+    ``b/same.png`` both auto-derive ``same_..._RAW.raw`` in the same output
+    directory, the second overwrote the first, and the report claimed two
+    successes.  Auto paths are only generated when the author did not name an
+    output, so rewriting one cannot destroy a user-chosen filename - unlike an
+    explicit ``output``, which is left exactly as written.
+
+    *used* maps the already-taken (normalised) path to the input that took it, so
+    the message can name both inputs.
+    """
+    key = os.path.normcase(os.path.abspath(output_path))
+    if key not in used:
+        used[key] = owner
+        return output_path
+    stem, ext = os.path.splitext(output_path)
+    suffix = 2
+    while True:
+        candidate = f"{stem}_{suffix}{ext}"
+        candidate_key = os.path.normcase(os.path.abspath(candidate))
+        if candidate_key not in used:
+            used[candidate_key] = owner
+            print(
+                f"  Note: auto output {os.path.basename(output_path)} is already "
+                f"taken by {used[key]}; writing this entry to "
+                f"{os.path.basename(candidate)} instead"
+            )
+            return candidate
+        suffix += 1
+
+
 # ── 解码尺寸上限保护 ─────────────────────────────────────────────────
 
 def _check_decode_args_for(
-    type_name: str, width: int, height: int, alignment: str = "msb", endianness: str = "little"
+    type_name: str,
+    width: int,
+    height: int,
+    alignment: str = "msb",
+    endianness: str = "little",
+    *,
+    target: str | None = None,
 ) -> None:
     """根据 target/raw/yuv 类型计算单帧字节并做上限校验（CLI 入口统一走这里）。
 
     复用 ``formats.require_decode_size``（MAX_DECODE_BYTES = 512MB）保证
     GUI / CLI / batch 共用同一上限。
+
+    ``target``（``"RAW"`` / ``"YUV"``）决定用哪个 registry 解释 *type_name*。
+    不给时按前缀猜（``RAW*`` → RAW，其余 → YUV），仅用于历史上只有一种类型
+    的调用点；前缀猜测会把 ``--target RAW --raw-type BOGUS`` 报成"unsupported
+    YUV subformat"（D4），因此新调用点一律显式传 ``target``。
     """
     from raw_view.formats import require_decode_size
     from raw_view.formats import expected_frame_size_raw, expected_frame_size_yuv
 
-    if type_name.startswith("RAW"):
+    is_raw = (
+        target == "RAW" if target in ("RAW", "YUV") else type_name.startswith("RAW")
+    )
+
+    if is_raw:
         frame_size = expected_frame_size_raw(type_name, width, height)
     else:
         frame_size = expected_frame_size_yuv(
@@ -267,21 +406,87 @@ def _check_decode_args_for(
     require_decode_size(width, height, frame_size)
 
 
+def _check_convert_args_for(
+    target: str,
+    raw_type: str,
+    yuv_type: str,
+    width: int,
+    height: int,
+    alignment: str = "msb",
+    endianness: str = "little",
+) -> None:
+    """512MB frame-size guard for the *encode* direction (D1).
+
+    ``convert`` used to skip the limit entirely: ``batch`` happily wrote a
+    513MB ``RAW32`` frame (and could be asked for ~17GB at 65535x65535) while the
+    single-file ``convert`` rejected the same parameters.  The frame size here is
+    the **output** format's, because that is what gets written - the input is a
+    decoded image and has no byte size of its own.
+    """
+    _check_decode_args_for(
+        raw_type if target == "RAW" else yuv_type,
+        width, height,
+        alignment=alignment, endianness=endianness,
+        target=target,
+    )
+
+
+def _check_transcode_args_for(spec, target: str = "YUV") -> None:
+    """512MB guard for a YUV transcode, applied to *both* sides.
+
+    Source and target frames are byte-identical in size inside one chroma family
+    (that is what makes the rearrangement lossless), so one check would suffice
+    today.  Checking both is deliberate: it keeps the guard correct if a future
+    layer (unpacking, bit-depth conversion) changes the sizes, and it costs one
+    integer comparison.  Sizes are computed through
+    :func:`_check_decode_args_for`, i.e. the very same registry the rest of the
+    CLI uses, so the limit cannot drift.
+    """
+    _check_decode_args_for(
+        spec.source_format, spec.width, spec.height, target=target,
+        alignment=spec.alignment, endianness=spec.endianness,
+    )
+    _check_decode_args_for(
+        spec.target_format, spec.width, spec.height, target=target,
+        alignment=spec.alignment, endianness=spec.endianness,
+    )
+
+
 # ── View mode (CLI decode + GUI fallback) ─────────────────────────────
+
+def _apply_arg_defaults(args: argparse.Namespace) -> None:
+    """Backfill the historical defaults of ``--width``/``--height``/``--target``.
+
+    Those three flags default to ``None`` in the parser so this release can tell
+    "user did not pass it" from "user passed it".  A YUV transcode needs that
+    distinction (a guessed 640x480 would parse the layout wrong, and an explicit
+    ``-t RAW`` must stay an error); every pre-existing command funnels through
+    here and keeps its documented defaults.
+    """
+    if getattr(args, "width", None) is None:
+        args.width = DEFAULT_WIDTH
+    if getattr(args, "height", None) is None:
+        args.height = DEFAULT_HEIGHT
+    if getattr(args, "target", None) is None:
+        args.target = "RAW"
+
 
 def _run_view_mode(args: argparse.Namespace) -> None:
     """CLI decode (when -i given) or interactive GUI."""
+    _apply_arg_defaults(args)
     if args.input:
+        raw_type = args.input_raw_type or args.raw_type
+        yuv_type = args.input_yuv_type or args.yuv_type
         _run_view_decode(
             input_path=args.input,
             output_path=args.output,
             width=args.width,
             height=args.height,
             target=args.target,  # describes input type (RAW or YUV)
-            raw_type=args.raw_type,
-            yuv_type=args.yuv_type,
-            alignment=args.alignment,
-            endianness=args.endianness,
+            raw_type=raw_type,
+            yuv_type=yuv_type,
+            alignment=args.input_alignment or args.alignment,
+            endianness=args.input_endianness or args.endianness,
             preview_mode=args.preview_mode,
             bayer_pattern=args.bayer_pattern,
             offset=args.offset,
@@ -317,12 +522,22 @@ def _run_view_decode(
         logger.error("Input file not found: %s", input_path)
         print(f"Error: input file not found: {input_path}", file=sys.stderr)
         sys.exit(1)
+    # D7: an executable/script must never be decoded as image data.
+    if is_dangerous_extension(input_path):
+        msg = (
+            f"refusing to decode executable/script file as image data: "
+            f"{os.path.basename(input_path)}"
+        )
+        logger.error("Decode rejected: %s", msg)
+        print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
 
     # 解码前上限校验：单帧字节超过 512MB 直接拒绝
     try:
         _check_decode_args_for(
             raw_type if target == "RAW" else yuv_type, width, height,
             alignment=alignment, endianness=endianness,
+            target="RAW" if target == "RAW" else "YUV",
         )
     except FormatError as exc:
         logger.error("Decode rejected: %s", exc)
@@ -387,12 +602,30 @@ def _run_view_decode(
         logger.info("View decode OK: %s -> %s (%d bytes)", input_path, output_path, size)
         print(f"Decoded: {input_path} -> {output_path} ({size} bytes)")
     except Exception as exc:
-        logger.exception("View decode failed: %s -> %s", input_path, output_path)
+        _log_failure("View decode failed: %s -> %s", input_path, output_path, exc=exc)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 # ── Convert mode (image → RAW/YUV) ───────────────────────────────────
+
+def _reject_input_file(input_path: str) -> None:
+    """Refuse an executable/script input for every convert/batch entry (D7).
+
+    The GUI already refused these; the CLI decoded ``notepad.exe`` into a PNG and
+    exited 0.  A suffix-less or unknown-suffix file (``.dat``/``.bin``/none) is
+    *not* affected: those are legitimate RAW inputs.
+    """
+    if not is_dangerous_extension(input_path):
+        return
+    msg = (
+        f"refusing to convert executable/script file as image data: "
+        f"{os.path.basename(input_path)}"
+    )
+    logger.error("Convert rejected: %s", msg)
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
 
 def _run_convert(args: argparse.Namespace) -> None:
     """Single-file encode and print all parameters."""
@@ -406,11 +639,23 @@ def _run_convert(args: argparse.Namespace) -> None:
         print(f"Error: input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
+    input_type = getattr(args, "input_type", "image") or "image"
+    if input_type == "yuv":
+        _run_convert_yuv(args)
+        return
+    if input_type == "raw":
+        # 预留入口：参数可解析，但本轮不实现 RAW 家族转换（packed/unpacked、
+        # 位对齐、位深）——明确报错，绝不静默按 image 处理。
+        _print_input_type_unavailable("raw")
+        sys.exit(1)
+
+    _reject_input_file(args.input)
+    _apply_arg_defaults(args)
+
     # 编码前上限校验：输出单帧字节超过 512MB 直接拒绝
     try:
-        _check_decode_args_for(
-            args.raw_type if args.target == "RAW" else args.yuv_type,
-            args.width, args.height,
+        _check_convert_args_for(
+            args.target, args.raw_type, args.yuv_type, args.width, args.height,
             alignment=args.alignment, endianness=args.endianness,
         )
     except FormatError as exc:
@@ -474,12 +719,351 @@ def _run_convert(args: argparse.Namespace) -> None:
         logger.info("Convert OK: %s -> %s (%d bytes)", args.input, output_path, size)
         print(f"Converted: {args.input} -> {output_path} ({size} bytes)")
     except Exception as exc:
-        logger.exception("Convert failed: %s -> %s", args.input, output_path)
+        _log_failure("Convert failed: %s -> %s", args.input, output_path, exc=exc)
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Convert mode: YUV family lossless transcode ──────────────────────
+#
+# Semantics differ deliberately from the image path above: --width/--height are
+# the *source frame* dimensions used to parse the byte layout, there is no
+# resize, and multi-frame files are transcoded frame by frame.  Everything that
+# decides which directions exist lives in raw_view.transcode (the GUI greys out
+# targets using the same reject_reason()).
+
+def _print_input_type_unavailable(input_type: str) -> None:
+    """Explain a reserved --input-type instead of guessing at it."""
+    if input_type == "raw":
+        msg = (
+            "--input-type raw is reserved for a future release: RAW <-> YUV / "
+            "packed RAW conversion (bit unpacking, bit alignment, bit depth) is "
+            "not implemented yet. This build only re-arranges YUV 4:2:2 / 4:2:0 "
+            "frames losslessly (--input-type yuv)."
+        )
+    else:  # pragma: no cover - argparse restricts the choices
+        msg = f"--input-type {input_type} is not supported"
+    logger.error("Convert rejected: %s", msg)
+    print(f"Error: {msg}", file=sys.stderr)
+
+
+def _require_source_dimensions(args: argparse.Namespace) -> tuple[int, int]:
+    """Return (width, height) for a YUV input, failing if they were not given.
+
+    The image path treats width/height as an *output* size and has a 640x480
+    default.  For a YUV transcode they are the source frame geometry: assuming a
+    default would parse the bytes at the wrong stride and emit silently corrupt
+    output, so the CLI demands them explicitly.
+    """
+    missing = [
+        flag for flag, value in (("--width", args.width), ("--height", args.height))
+        if value is None
+    ]
+    if missing:
+        msg = (
+            f"{' and '.join(missing)} required with --input-type yuv: "
+            "width/height describe the SOURCE frame layout (no resize is "
+            "performed), so they cannot be defaulted"
+        )
+        logger.error("Convert rejected: %s", msg)
+        print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+    if args.width <= 0 or args.height <= 0:
+        msg = f"invalid source dimensions: {args.width}x{args.height} (must be > 0)"
+        logger.error("Convert rejected: %s", msg)
+        print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+    return args.width, args.height
+
+
+def _run_convert_yuv(args: argparse.Namespace) -> None:
+    """Losslessly transcode a YUV 4:2:2 / 4:2:0 file into another layout."""
+    from raw_view.models import format_output_template
+    from raw_view.transcode import (
+        TranscodeError,
+        TranscodeSpec,
+        frame_count,
+        reject_reason,
+        transcode_file,
+    )
+
+    width, height = _require_source_dimensions(args)
+
+    source_format = args.input_yuv_type or args.yuv_type
+    target_format = args.yuv_type
+
+    # -t defaults to None meaning "unspecified"; for a YUV source the only
+    # meaningful target is YUV, so backfill it there and reject an explicit
+    # non-YUV target (which the user really did ask for).
+    if args.target is None:
+        args.target = "YUV"
+    if args.target != "YUV":
+        msg = (
+            f"--input-type yuv cannot target {args.target}: a YUV source is "
+            "transcoded into another YUV layout; use --target YUV (and "
+            "--yuv-type for the output format)"
+        )
+        logger.error("Convert rejected: %s", msg)
+        print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    reason = reject_reason(source_format, target_format)
+    if reason:
+        logger.error("Convert rejected: %s", reason)
+        print(f"Error: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+    spec = TranscodeSpec(
+        source_format=source_format,
+        target_format=target_format,
+        width=width,
+        height=height,
+        alignment=args.input_alignment or args.alignment,
+        endianness=args.input_endianness or args.endianness,
+        offset=args.offset,
+    )
+
+    # 上限校验（源帧尺寸 / 目标格式两侧都查）——在产出任何输出之前。
+    try:
+        _check_transcode_args_for(spec)
+    except FormatError as exc:
+        logger.error("Convert rejected: %s", exc)
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # 先按文件大小验证帧数/整帧倍数，再产出输出路径与文件——非整帧输入
+    # 绝不留下半成品（也没有"只转第一帧"的静默截断）。
+    try:
+        count = frame_count(os.path.getsize(args.input), spec)
+    except TranscodeError as exc:
+        logger.error("Convert rejected: %s", exc)
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = args.output
+    if not output_path:
+        # {format} 渲染为目标布局；尺寸仍是源帧尺寸（本轮不改变几何）。
+        output_path = format_output_template(
+            "{input_stem}_{width}x{height}_{format}{ext}",
+            args.input, width, height, "YUV",
+            output_dir=CONVERT_OUT_DIR,
+            yuv_type=target_format,
+        )
+
+    logger.info(
+        "Convert (YUV rearrange): %s -> %s (%s -> %s, %dx%d, %d frame(s))",
+        args.input, output_path, source_format, target_format, width, height, count,
+    )
+
+    print(f"Input:        {args.input}")
+    print(f"Output:       {output_path}")
+    print(f"Mode:         convert (YUV lossless rearrange)")
+    print(f"Input type:   YUV")
+    print(f"Source fmt:   {source_format}")
+    print(f"YUV type:     {target_format}")
+    print(f"Dimensions:   {width}x{height} (source frame, no resize)")
+    print(f"Frames:       {count}")
+    if args.offset:
+        print(f"Offset:       {args.offset}")
+    print()
+
+    try:
+        count, size = transcode_file(args.input, output_path, spec)
+        logger.info(
+            "Convert OK: %s -> %s (%d bytes, %d frame(s))",
+            args.input, output_path, size, count,
+        )
+        print(
+            f"Converted: {args.input} -> {output_path} "
+            f"({size} bytes, {count} frame(s))"
+        )
+    except Exception as exc:
+        _log_failure("Convert failed: %s -> %s", args.input, output_path, exc=exc)
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 # ── Batch mode ────────────────────────────────────────────────────────
+
+class _BatchSpecError(ValueError):
+    """The batch JSON as a whole is unusable (bad shape / unknown enum values)."""
+
+
+_BATCH_MODES = ("convert", "view")
+_BATCH_TARGETS = ("RAW", "YUV")
+_BATCH_INPUT_TYPES = ("image", "yuv", "raw")
+# ints and numeric strings are both accepted (JSON authors write either); bool
+# is rejected explicitly because ``True`` is an int subclass but never a size.
+_BATCH_NUMERIC_KEYS = ("width", "height", "offset")
+
+
+def _reject_json_constant(token: str):
+    """Reject the non-standard ``NaN``/``Infinity`` JSON scalars explicitly.
+
+    ``json.load`` accepts them by default and would then fail deep inside the
+    converter with a bare ``TypeError``/``OverflowError`` traceback (D6).
+    """
+    raise _BatchSpecError(
+        f"invalid JSON value {token!r}: use plain numbers (NaN/Infinity are not "
+        "valid JSON)"
+    )
+
+
+def _normalize_choice(value: object, allowed: tuple[str, ...], what: str) -> str:
+    """Validate an enum-like batch field, case-insensitively (D6).
+
+    ``"target": "raw"`` used to fall through to the YUV branch and silently
+    convert to the wrong format; an unknown ``"mode"`` silently ran as ``view``.
+    Both are hard errors now.  Matching is case-insensitive; the canonical
+    spelling from *allowed* is returned.
+    """
+    text = str(value).strip()
+    for candidate in allowed:
+        if text.upper() == candidate.upper():
+            return candidate
+    raise _BatchSpecError(
+        f"invalid {what} {text!r}: expected one of {', '.join(allowed)}"
+    )
+
+
+def _coerce_numeric(container: dict, key: str, label: str) -> None:
+    """Turn ``container[key]`` into an int in place, or raise ``_BatchSpecError``.
+
+    JSON authors write ``"width": 1920`` or ``"width": "1920"``; both are fine.
+    ``"abc"``, ``True`` and containers are not, and used to survive far enough to
+    raise ``TypeError``/``AttributeError`` mid-conversion (D6).
+    """
+    if key not in container or container[key] is None:
+        return
+    value = container[key]
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise _BatchSpecError(
+            f"{label} must be a number, got {type(value).__name__}"
+        )
+    try:
+        container[key] = int(value)
+    except ValueError as exc:
+        raise _BatchSpecError(
+            f"{label} must be an integer, got {value!r}"
+        ) from exc
+
+
+def _sheet_check_entry(entry: object, position: int) -> dict:
+    """Validate one ``files[]`` item's *shape* (D6).
+
+    Reported per entry so the author sees which item is broken, instead of an
+    ``AttributeError`` on ``{"files": "abc"}`` or a ``TypeError`` on
+    ``{"width": "abc"}``.
+    """
+    if not isinstance(entry, dict):
+        raise _BatchSpecError(
+            f"files[{position}] must be a JSON object, got {type(entry).__name__}"
+        )
+    for key in _BATCH_NUMERIC_KEYS:
+        _coerce_numeric(entry, key, f"files[{position}].{key}")
+    return entry
+
+
+def _validate_batch_spec(spec: object) -> dict:
+    """Validate the top-level batch document, returning it for use (D6)."""
+    if not isinstance(spec, dict):
+        raise _BatchSpecError(
+            f"batch JSON must be an object, got {type(spec).__name__}"
+        )
+    for key in ("mode", "target", "input_type"):
+        if spec.get(key) is not None:
+            allowed = {
+                "mode": _BATCH_MODES,
+                "target": _BATCH_TARGETS,
+                "input_type": _BATCH_INPUT_TYPES,
+            }[key]
+            _normalize_choice(spec[key], allowed, key)
+    for key in _BATCH_NUMERIC_KEYS:
+        _coerce_numeric(spec, key, key)
+    files = spec.get("files", [])
+    if files is None:
+        files = []
+    if not isinstance(files, list):
+        raise _BatchSpecError(
+            f'"files" must be a JSON array of objects, got {type(files).__name__}'
+        )
+    spec["files"] = [
+        _sheet_check_entry(entry, index) for index, entry in enumerate(files)
+    ]
+    return spec
+
+
+def _resolve_entry_input_type(params: dict, mode: str) -> str:
+    """Which kind of input this entry declares: ``"image"``, ``"yuv"`` or ``"raw"``.
+
+    ``input_type`` is per-entry (so one batch may mix image and YUV inputs).  In
+    view mode the historical ``target`` still describes the *input* file, so an
+    entry that leaves ``input_type`` at its ``image`` default keeps meaning "view
+    decodes RAW/YUV" - the same behaviour as before this option existed.
+    """
+    input_type = _normalize_choice(
+        params.get("input_type") or "image", _BATCH_INPUT_TYPES, "input_type"
+    )
+    if mode == "view" and input_type == "image":
+        return "yuv" if params.get("target") == "YUV" else "raw"
+    return input_type
+
+
+def _resolve_entry_dimensions(kind: str, width, height) -> tuple[int, int]:
+    """Validate/backfill width & height for the entry's input kind.
+
+    YUV input needs explicit source frame dimensions; every other kind keeps the
+    historical 640x480 default.
+    """
+    if kind != "yuv":
+        return (
+            DEFAULT_WIDTH if width is None else int(width),
+            DEFAULT_HEIGHT if height is None else int(height),
+        )
+    if width is None or height is None:
+        missing = " and ".join(
+            name for name, value in (("width", width), ("height", height))
+            if value is None
+        )
+        raise _BatchSpecError(
+            f"{missing} is required for input_type yuv: it describes the SOURCE "
+            "frame layout (no resize is performed) and cannot be defaulted"
+        )
+    return int(width), int(height)
+
+
+def _entry_transcode_spec(params: dict, width: int, height: int):
+    """Build and pre-validate the TranscodeSpec for one YUV batch entry."""
+    from raw_view.transcode import TranscodeError, TranscodeSpec, reject_reason
+
+    if params.get("mode") != "convert":
+        raise _BatchSpecError(
+            "input_type yuv is only supported with mode=convert (a YUV source "
+            "is transcoded into another YUV layout, not decoded to an image)"
+        )
+    if params.get("target") != "YUV":
+        raise _BatchSpecError(
+            f"input_type yuv cannot target {params.get('target')}: use "
+            'target "YUV" and yuv_type for the output layout'
+        )
+    source_format = params.get("input_yuv_type") or params.get("yuv_type") or "YUYV"
+    target_format = params.get("yuv_type") or "YUYV"
+    reason = reject_reason(source_format, target_format)
+    if reason:
+        raise _BatchSpecError(reason)
+    try:
+        return TranscodeSpec(
+            source_format=source_format,
+            target_format=target_format,
+            width=width,
+            height=height,
+            alignment=params.get("input_alignment") or params.get("alignment", "msb"),
+            endianness=params.get("input_endianness") or params.get("endianness", "little"),
+            offset=int(params.get("offset") or 0),
+        )
+    except TranscodeError as exc:  # pragma: no cover - defensive
+        raise _BatchSpecError(str(exc)) from exc
+
 
 def _run_batch(args: argparse.Namespace) -> None:
     """Batch encode/decode from a JSON file."""
@@ -494,18 +1078,38 @@ def _run_batch(args: argparse.Namespace) -> None:
         print(f"Error: batch file not found: {args.batch_file}", file=sys.stderr)
         sys.exit(1)
 
-    # 显式 UTF-8 读取，避免中文路径/注释在 GBK/cp936 等 locale 下解码失败
-    with open(args.batch_file, encoding="utf-8") as f:
-        spec = json.load(f)
+    # 显式 UTF-8 读取，避免中文路径/注释在 GBK/cp936 等 locale 下解码失败。
+    # JSON/schema 错误一律给一行可读提示（D6），不再抛 AttributeError/TypeError
+    # 的完整栈；未知 mode/target 明确拒绝，绝不静默换语义。
+    try:
+        with open(args.batch_file, encoding="utf-8") as f:
+            spec = json.load(f, parse_constant=_reject_json_constant)
+        spec = _validate_batch_spec(spec)
+    except _BatchSpecError as exc:
+        print(f"Error: invalid batch file: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        print(f"Error: invalid batch JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except UnicodeDecodeError as exc:
+        print(
+            f"Error: batch file must be UTF-8 encoded: {exc}", file=sys.stderr
+        )
+        sys.exit(1)
 
     # ── Global defaults ──
+    # Unknown enum values were rejected above, so the fallbacks here are only
+    # reached when a key is absent.
     defaults = {
-        "mode": spec.get("mode", "convert"),
-        "target": spec.get("target", "RAW"),
+        "mode": _normalize_choice(spec.get("mode", "convert"), _BATCH_MODES, "mode"),
+        "target": _normalize_choice(spec.get("target", "RAW"), _BATCH_TARGETS, "target"),
         "raw_type": spec.get("raw_type", "RAW12"),
         "yuv_type": spec.get("yuv_type", "YUYV"),
-        "width": spec.get("width", 640),
-        "height": spec.get("height", 480),
+        # width/height stay None unless given: the image path backfills its
+        # historical 640x480, but a YUV transcode must reject a missing value
+        # instead of parsing the layout at a guessed size.
+        "width": spec.get("width"),
+        "height": spec.get("height"),
         "alignment": spec.get("alignment", "msb"),
         "endianness": spec.get("endianness", "little"),
         "source_mode": spec.get("source_mode", "bayer"),
@@ -513,6 +1117,13 @@ def _run_batch(args: argparse.Namespace) -> None:
         "preview_mode": spec.get("preview_mode", "Bayer Color"),
         "offset": spec.get("offset", 0),
         "output_dir": spec.get("output_dir"),
+        # New in this release: per-entry input source. Entries may mix image and
+        # yuv inputs; each is interpreted by its own input_type.
+        "input_type": spec.get("input_type", "image"),
+        "input_yuv_type": spec.get("input_yuv_type", ""),
+        "input_alignment": spec.get("input_alignment", ""),
+        "input_endianness": spec.get("input_endianness", ""),
+        "input_raw_type": spec.get("input_raw_type", ""),
     }
 
     from raw_view.converter import (
@@ -565,7 +1176,7 @@ def _run_batch(args: argparse.Namespace) -> None:
                     # （同 stem 不同扩展名，如 a.png/a.jpg → 都派生 a_sink.raw）
                     # ——若不做去重，后一个会静默覆盖前一个（M-1 同类问题）。
                     # 碰撞时对后来者追加序号，保证本入口内输出路径两两不同。
-                    _used_outputs: set[str] = set()
+                    _used_outputs: dict[str, str] = {}
 
                     # 输入 stem 可能含 Windows 非法字符（'a:b.png' 等）；直接拼进
                     # 输出名会创建失败或写错位置，这里把它消毒成合法文件名字符，
@@ -576,21 +1187,7 @@ def _run_batch(args: argparse.Namespace) -> None:
                             _out_dir,
                             f"{stem}_{_out_path.stem}{_out_suffix}",
                         )
-                        if base not in _used_outputs:
-                            _used_outputs.add(base)
-                            return base
-                        # 同 stem 碰撞（如 a.png / a.jpg）：追加序号保证唯一，绝不
-                        # 让两个输入共享同一输出路径。
-                        n = 2
-                        while True:
-                            cand = os.path.join(
-                                _out_dir,
-                                f"{stem}_{_out_path.stem}_{n}{_out_suffix}",
-                            )
-                            if cand not in _used_outputs:
-                                _used_outputs.add(cand)
-                                return cand
-                            n += 1
+                        return _dedupe_output_path(base, _used_outputs, owner=match)
 
                     for m in matches:
                         e = {**entry, "input": m}
@@ -610,6 +1207,11 @@ def _run_batch(args: argparse.Namespace) -> None:
 
     success = 0
     failed = 0
+    # D3: auto-generated output paths must be unique across the WHOLE batch, not
+    # only inside one entry's glob expansion.  Two inputs with the same basename
+    # (a/same.png + b/same.png) otherwise derive the same auto output name; the
+    # second silently overwrote the first while both were reported OK.
+    auto_outputs: dict[str, str] = {}
 
     for entry in files:
         input_path = entry.get("input", "")
@@ -621,27 +1223,59 @@ def _run_batch(args: argparse.Namespace) -> None:
             print(f"  Skipping (not found): {input_path}")
             failed += 1
             continue
+        if is_dangerous_extension(input_path):
+            print(
+                f"  FAIL: {input_path} -> refusing to convert executable/script "
+                "file as image data"
+            )
+            failed += 1
+            continue
 
         params = _resolve_entry_params(entry, defaults)
-        mode = params["mode"]
-        target = params["target"]
-        width = params["width"]
-        height = params["height"]
+        mode = _normalize_choice(params["mode"], _BATCH_MODES, "mode")
+        target = _normalize_choice(params["target"], _BATCH_TARGETS, "target")
         output_dir = params.pop("output_dir") or _default_out_dir(mode)
 
-        # ── 解码前上限校验（防超大宽高导致 OOM/崩溃）──
-        if mode == "view":
-            view_type = params["raw_type"] if target == "RAW" else params["yuv_type"]
-            try:
+        # ── Input source for this entry (each entry carries its own) ──
+        try:
+            kind = _resolve_entry_input_type(params, mode)
+            width, height = _resolve_entry_dimensions(
+                kind, params["width"], params["height"]
+            )
+            transcode_spec = (
+                _entry_transcode_spec(params, width, height)
+                if kind == "yuv" and mode == "convert" else None
+            )
+        except _BatchSpecError as exc:
+            print(f"  FAIL: {input_path} -> {exc}")
+            failed += 1
+            continue
+
+        # ── 单帧字节上限校验（防超大宽高导致 OOM/崩溃/写出巨型文件）──
+        # D1: convert 分支此前完全没有校验（batch 能真的写出 513MB 的 RAW32、
+        # 理论上 17GB）。view 用「解码目标格式」，convert 用「编码输出格式」；
+        # YUV 转码两侧都查（见 _check_transcode_args_for）。全部在写盘之前。
+        try:
+            if transcode_spec is not None:
+                _check_transcode_args_for(transcode_spec)
+            elif mode == "view":
                 _check_decode_args_for(
-                    view_type, width, height,
+                    params["raw_type"] if target == "RAW" else params["yuv_type"],
+                    width, height,
+                    alignment=params.get("input_alignment") or params.get("alignment", "msb"),
+                    endianness=params.get("input_endianness") or params.get("endianness", "little"),
+                    target=target,
+                )
+            else:
+                _check_convert_args_for(
+                    target, params["raw_type"], params["yuv_type"], width, height,
                     alignment=params.get("alignment", "msb"),
                     endianness=params.get("endianness", "little"),
                 )
-            except FormatError as exc:
-                print(f"  FAIL: {input_path} -> {exc}")
-                failed += 1
-                continue
+        except FormatError as exc:
+            print(f"  FAIL: {input_path} -> {exc}")
+            failed += 1
+            continue
 
         output_path = entry.get("output")
         if not output_path:
@@ -649,13 +1283,21 @@ def _run_batch(args: argparse.Namespace) -> None:
                 out_ext = None
             else:
                 out_ext = ".png"
+            # YUV transcode: {format} is the TARGET layout; width/height remain
+            # the source frame dimensions because nothing is resized.
+            template_target = "YUV" if transcode_spec is not None else target
+            template_yuv = (
+                transcode_spec.target_format
+                if transcode_spec is not None
+                else (params.get("yuv_type", "") if target == "YUV" else "")
+            )
             output_path = format_output_template(
                 "{input_stem}_{width}x{height}_{format}{ext}",
-                input_path, width, height, target,
+                input_path, width, height, template_target,
                 output_dir=output_dir,
                 output_ext=out_ext,
                 raw_type=params.get("raw_type", "") if target == "RAW" else "",
-                yuv_type=params.get("yuv_type", "") if target == "YUV" else "",
+                yuv_type=template_yuv,
                 bayer_pattern=params.get("bayer_pattern", "") if target == "RAW" else "",
                 source_mode=params.get("source_mode", ""),
                 alignment=params.get("alignment", ""),
@@ -671,10 +1313,29 @@ def _run_batch(args: argparse.Namespace) -> None:
             )
             if not has_explicit_dir:
                 output_path = str(Path(input_path).parent / Path(output_path).name)
+            # D3：跨 entry 去重（见 auto_outputs 的注释）。已占用的自动输出名
+            # 追加 _2/_3…，绝不报告成功却让后一个条目覆盖前一个。
+            output_path = _dedupe_output_path(output_path, auto_outputs, owner=input_path)
 
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
         try:
+            if transcode_spec is not None:
+                # YUV family lossless rearrange (no resize; every frame kept).
+                from raw_view.transcode import transcode_file
+
+                frame_total, size = transcode_file(input_path, output_path, transcode_spec)
+                logger.info(
+                    "Batch OK: %s -> %s (%d bytes, %d frame(s), %s -> %s)",
+                    input_path, output_path, size, frame_total,
+                    transcode_spec.source_format, transcode_spec.target_format,
+                )
+                print(
+                    f"  OK: {input_path} -> {output_path} "
+                    f"({size} bytes, {frame_total} frame(s))"
+                )
+                success += 1
+                continue
             if mode == "convert":
                 if target == "RAW":
                     size = image_file_to_raw(
@@ -716,7 +1377,7 @@ def _run_batch(args: argparse.Namespace) -> None:
             print(f"  OK: {input_path} -> {output_path} ({size} bytes)")
             success += 1
         except Exception as exc:
-            logger.exception("Batch FAIL: %s -> %s", input_path, output_path)
+            _log_failure("Batch FAIL: %s -> %s", input_path, output_path, exc=exc)
             print(f"  FAIL: {input_path} -> {exc}")
             failed += 1
 

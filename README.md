@@ -11,6 +11,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - YUV 查看：**YOnly**（YUV 4:0:0 灰度，单个格式 + Bit depth 配置 8/10/12/14/16——8 为 1 字节/像素，10/12/14/16 为 16-bit 存储，支持 LSB/MSB 对齐与大小端）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
+- **YUV 家族无损互转**：Convert 对话框新增 **Input type** 下拉（Image / YUV / RAW 占位置灰）。选 **YUV** 时把已有 YUV 文件在同家族内只重排字节地转换成另一种布局（4:2:2：YUYV/UYVY/YVYU/VYUY/NV16/NV61；4:2:0：I420/YV12/NV12/NV21，42 个方向全部逐字节可还原），**不 resize**：Width/Height 变为**源帧尺寸**。目标格式按源格式家族过滤，**不可转的目标置灰并显示原因**；切换 Input type 会清空 Width/Height（两种输入下语义不同）。文件字节数不是整帧倍数时给出明确错误，多帧文件逐帧保留
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
 - **多变体一键生成**：可在 Settings 中开启 *Enable multi-variant generation*，之后 Convert / Batch Convert 对话框会出现勾选面板——一张图片一次生成多种 **format**（RAW8/10/12/… + YUV）× **bayer pattern**（RGGB/GRBG/GBRG/BGGR）× **size**（预设常用分辨率 + 自定义）的组合。YUV 无 Bayer，因此每个尺寸只出一个文件；RAW 灰度源（`source_mode=gray`）同样不按 Bayer 展开。默认关闭，即每次只生成一个文件
 - **转换预览**：Convert 对话框中显示原图缩略图及目标格式帧大小信息
@@ -121,6 +122,45 @@ python -m raw_view convert -i image.jpg --target RAW --width 1920 --height 1080
 python -m raw_view convert -i image.png --target RAW --source-mode gray --endianness big
 ```
 
+### YUV 家族无损互转（`--input-type yuv`）
+
+YUV 4:2:2 / 4:2:0 家族内部**只重排字节、不重新采样、不 resize**，因此可逐字节
+还原；源帧尺寸仅用于解析文件布局。
+
+```bash
+# 4:2:2 家族：NV16 -> YUYV（4x2 源帧，2 帧文件全部保留）
+python -m raw_view convert -i frame.nv16 --input-type yuv \
+    --input-yuv-type NV16 --yuv-type YUYV \
+    --width 4 --height 4 -o frame.yuyv
+
+# 4:2:0 家族：I420 -> NV12
+python -m raw_view convert -i frame.i420 --input-type yuv \
+    --input-yuv-type I420 --yuv-type NV12 \
+    --width 1920 --height 1080
+```
+
+支持的方向共 **42 个**（同家族内两两互转）：
+
+| 家族 | 格式 | 方向数 |
+|---|---|---|
+| 4:2:2 | YUYV / UYVY / YVYU / VYUY / NV16 / NV61 | 6 × 5 = 30 |
+| 4:2:0 | I420 / YV12 / NV12 / NV21 | 4 × 3 = 12 |
+
+- `--width` / `--height` 在 `--input-type yuv` 下**必填**，表示**源帧尺寸**（不会
+  被 resize）。缺省时直接报错，绝不按 640×480 猜测解析布局。
+- 4:2:2 家族要求宽为偶数；4:2:0 家族要求宽高均为偶数。
+- 文件字节数必须是单帧字节数的**整数倍**，否则整份文件拒绝（不静默截断、不做
+  “只转第一帧”）；多帧文件逐帧转换并保留全部帧。
+- **拒绝**的方向会给出明确原因：4:2:2 ↔ 4:2:0（色度重采样，有损）、YUV ↔ RAW
+  （预留）、YOnly/4:0:0（无 U/V 平面）。
+- `--target` 可省略（自动为 YUV）；显式 `--target RAW` 会报错。
+- 单帧超过 512MB 在写盘前拒绝（源/目标两侧都查）。
+
+新参数：`--input-type {image,yuv,raw}`（默认 `image`）、`--input-yuv-type`、
+`--input-alignment`、`--input-endianness`、`--input-raw-type`（`raw` 为预留占位，
+本轮明确报错而非静默按 image 处理）。不带这些参数时所有既有命令行为、输出文案与
+退出码**完全不变**。
+
 ### CLI 批量模式（支持 view + convert 混合，每文件独立参数）
 
 ```bash
@@ -183,6 +223,11 @@ python -m raw_view --batch-help   # 查看 JSON 格式说明
 - `files[].output` 可选，省略时自动生成
 - 每文件可通过 `"mode": "view"` 或 `"mode": "convert"` 指定操作
 - 每文件可覆盖任意字段（`target`, `width`, `height`, `raw_type`, `yuv_type`, `alignment`, `endianness`, `source_mode`, `bayer_pattern`, `preview_mode`, `offset`）
+- **YUV 输入**：条目可加 `"input_type": "yuv"` + `"input_yuv_type"`（可选 `input_alignment` / `input_endianness`），与 `yuv_type` 目标布局做无损重排；`width`/`height` 此时是**源帧尺寸且必填**。一条 batch 可以混排 image 与 yuv 条目，各自按自己的 `input_type` 解释。
+- **校验**：`mode` / `target` / `input_type` 取值非法（含拼写错误）会一行报错并退出，不再静默按别的语义执行；JSON 结构错误（`"files": "abc"`、`"width": "abc"`、`NaN`）同样一行提示，不打印栈。
+- **单帧上限**：view（解码帧）、convert（编码输出帧）、YUV 转码（源/目标两侧）统一 512MB 上限，且**在写盘前**校验，超限条目不会留下部分或巨型文件。
+- **自动输出名跨条目唯一**：两个条目若派生出同一自动输出名（如 `a/same.png` + `b/same.png`），后者写为 `..._2` 并在输出中提示，绝不“报 2 succeeded 但磁盘只剩 1 个文件”。显式 `output` 不受影响，按原样使用。
+- **危险后缀**：`.exe` / `.dll` / `.bat` / `.ps1` 等可执行/脚本后缀在 view / convert / batch 三条路径都被拒绝；无后缀与普通未知后缀（`.dat` / `.bin`）不受影响。
 
 ## 设置（Settings）
 
