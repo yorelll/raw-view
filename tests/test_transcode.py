@@ -90,8 +90,13 @@ def _ensure_app():
 
 
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
+    return _run_cli_env({}, *argv)
+
+
+def _run_cli_env(extra_env: dict[str, str], *argv: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "raw_view", *argv],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -755,6 +760,60 @@ class ConvertDialogYuvConvertTests(_DialogTestBase):
         self.assertIn("too large", critical.call_args[0][2])
         self.assertFalse(os.path.exists(out), "超限拒绝不得留下输出文件")
 
+    def test_limit_is_checked_before_overwrite_prompt_and_mkdir(self):
+        """N2: an over-limit frame must be refused *first*.
+
+        The sequence used to be "ask to overwrite, then report too large" and it
+        left empty parent directories behind.  Both are observable side effects
+        of an operation that can never succeed.
+        """
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        dialog = self.make_convert_dialog()
+        nested_out = os.path.join(self._tmp, "a", "b", "c", "huge.yuyv")
+        Path(nested_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(nested_out).write_bytes(b"existing")  # triggers the overwrite prompt
+        order: list[str] = []
+
+        def _spy_collision(path):
+            order.append("collision_prompt")
+            return path
+
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.width.setValue(16384)
+        dialog.height.setValue(16385)
+        dialog.yuv_type.setCurrentText("YUYV")
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(nested_out)
+        with mock.patch.object(dialog, "_confirm_output_collision", _spy_collision), \
+             mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical") as critical:
+            dialog._do_convert()
+        self.assertTrue(critical.called)
+        self.assertEqual(order, [], "超限必须早于覆盖询问")
+        self.assertEqual(Path(nested_out).read_bytes(), b"existing", "不得覆盖已有文件")
+
+    def test_limit_rejection_creates_no_directories(self):
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        dialog = self.make_convert_dialog()
+        deep = os.path.join(self._tmp, "x", "y", "z", "huge.yuyv")
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("NV16")
+        dialog.width.setValue(16384)
+        dialog.height.setValue(16385)
+        dialog.yuv_type.setCurrentText("YUYV")
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(deep)
+        with mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical"):
+            dialog._do_convert()
+        self.assertFalse(
+            os.path.exists(os.path.join(self._tmp, "x")),
+            "超限拒绝不得留下空目录",
+        )
+
     def test_bad_size_reports_clear_error_and_writes_nothing(self):
         import raw_view.gui.dialogs.convert as convert_mod
 
@@ -916,18 +975,42 @@ class BatchLegacyViewSemanticsTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def test_resolver_marks_legacy_entries_as_not_explicit(self):
+    def test_dimension_requirement_is_keyed_on_mode_not_input_type(self):
+        """N3: the M1 defence is ``mode == "convert"``, and a test must say so.
+
+        The earlier version of this fix carried an ``explicit`` flag that no
+        longer drove the decision; the reviewer proved it was dead by mutating
+        it with no behaviour change.  The real mechanism is the mode check in
+        ``_resolve_entry_dimensions``, so that is what is pinned here.
+        """
         import raw_view.__main__ as main_mod
 
-        kind, explicit = main_mod._resolve_entry_input_type({"target": "YUV"}, "view")
-        self.assertEqual(kind, "yuv")
-        self.assertFalse(explicit, "旧 JSON 没有 input_type，必须标记为非显式")
-
-        kind, explicit = main_mod._resolve_entry_input_type(
-            {"target": "YUV", "input_type": "yuv"}, "view"
+        # A YUV input being *decoded* never requires source dimensions...
+        self.assertEqual(
+            main_mod._resolve_entry_dimensions("yuv", None, None, "view"),
+            (main_mod.DEFAULT_WIDTH, main_mod.DEFAULT_HEIGHT),
         )
-        self.assertEqual(kind, "yuv")
-        self.assertTrue(explicit, "显式声明才应获得严格契约")
+        # ...while a YUV input being *transcoded* always does.
+        with self.assertRaises(main_mod._BatchSpecError):
+            main_mod._resolve_entry_dimensions("yuv", None, None, "convert")
+
+    def test_view_mode_takes_its_input_kind_from_target(self):
+        """View historically encodes the file kind in ``target``."""
+        import raw_view.__main__ as main_mod
+
+        self.assertEqual(
+            main_mod._resolve_entry_input_type({"target": "YUV"}, "view"), "yuv"
+        )
+        self.assertEqual(
+            main_mod._resolve_entry_input_type({"target": "RAW"}, "view"), "raw"
+        )
+        # A stray input_type must not change what view decodes.
+        self.assertEqual(
+            main_mod._resolve_entry_input_type(
+                {"target": "YUV", "input_type": "raw"}, "view"
+            ),
+            "yuv",
+        )
 
     def test_view_yuv_without_dimensions_uses_640x480(self):
         yuv = os.path.join(self._tmp, "y.yuv")
@@ -962,6 +1045,56 @@ class BatchLegacyViewSemanticsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("1 succeeded", proc.stdout)
 
+    def test_batch_view_honours_input_yuv_type(self):
+        """N4: a declared input layout must be the one that is decoded."""
+        import cv2  # noqa: F401  (converter availability)
+
+        yuv = os.path.join(self._tmp, "f.nv16")
+        # 4x4 NV16 = 16 Y bytes + 16 interleaved chroma bytes.
+        Path(yuv).write_bytes(bytes([10] * 16) + bytes([20, 30] * 8))
+        spec = {
+            "mode": "view",
+            "target": "YUV",
+            "yuv_type": "YUYV",
+            "input_type": "yuv",
+            "input_yuv_type": "NV16",
+            "width": 4,
+            "height": 4,
+            "files": [{"input": yuv}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1 succeeded", proc.stdout)
+        produced = [n for n in os.listdir(self._tmp) if n.endswith(".png")]
+        self.assertEqual(len(produced), 1, produced)
+        self.assertIn(
+            "NV16", produced[0],
+            "自动输出名应体现实际解码的输入布局",
+        )
+
+    def test_batch_view_input_yuv_type_drives_size_validation(self):
+        """Negative control: the declared layout is what gets validated."""
+        yuv = os.path.join(self._tmp, "g.nv16")
+        Path(yuv).write_bytes(bytes(32))
+        spec = {
+            "mode": "view",
+            "target": "YUV",
+            "yuv_type": "YUYV",          # 4:2:2 forgiving of odd height
+            "input_type": "yuv",
+            "input_yuv_type": "I420",    # 4:2:0 forbids odd height
+            "width": 4,
+            "height": 5,
+            "files": [{"input": yuv}],
+        }
+        batch_path = os.path.join(self._tmp, "spec.json")
+        Path(batch_path).write_text(json.dumps(spec), encoding="utf-8")
+        proc = _run_cli("batch", "-b", batch_path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("I420", proc.stdout + proc.stderr)
+        self.assertIn("even width/height", proc.stdout + proc.stderr)
+
     def test_explicit_yuv_transcode_still_requires_dimensions(self):
         """The strict contract must survive the M1 fix for the new use case."""
         yuv = os.path.join(self._tmp, "t.nv16")
@@ -979,6 +1112,68 @@ class BatchLegacyViewSemanticsTests(unittest.TestCase):
         proc = _run_cli("batch", "-b", batch_path)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("width and height is required", proc.stdout + proc.stderr)
+
+
+class LogDirOverrideSafetyTests(unittest.TestCase):
+    """N1: ``RAW_VIEW_LOG_DIR`` must never be able to break the CLI.
+
+    ``--version`` has nothing to do with logging, yet an unusable override used
+    to raise ``PermissionError`` from the package import -- a fake crash on the
+    exact command a user runs to diagnose a real one.
+    """
+
+    def test_unusable_absolute_override_does_not_break_version(self):
+        proc = _run_cli_env(
+            {"RAW_VIEW_LOG_DIR": os.path.join(os.sep, "nope-does-not-exist", "xyz")},
+            "--version",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("0.5.5", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_unusable_override_falls_back_to_platform_dir(self):
+        from raw_view import logger as logger_mod
+
+        with mock.patch.dict(
+            os.environ,
+            {"RAW_VIEW_LOG_DIR": os.path.join(os.sep, "nope-does-not-exist", "xyz")},
+        ):
+            self.assertEqual(
+                logger_mod._default_log_dir(), logger_mod._platform_log_dir()
+            )
+
+    def test_relative_override_is_ignored(self):
+        """A relative value would move the log into whatever the CWD is."""
+        from raw_view import logger as logger_mod
+
+        with mock.patch.dict(os.environ, {"RAW_VIEW_LOG_DIR": "logs_here"}):
+            self.assertEqual(
+                logger_mod._default_log_dir(), logger_mod._platform_log_dir()
+            )
+
+    def test_valid_absolute_override_is_used(self):
+        from raw_view import logger as logger_mod
+
+        target = tempfile.mkdtemp(prefix="rv-log-override-")
+        try:
+            with mock.patch.dict(os.environ, {"RAW_VIEW_LOG_DIR": target}):
+                self.assertEqual(logger_mod._default_log_dir(), Path(target))
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_unwritable_log_path_does_not_stop_the_cli(self):
+        """Even the platform directory failing must only degrade file logging."""
+        from raw_view import logger as logger_mod
+
+        self.assertTrue(callable(logger_mod.setup_logger))
+        # setup_logger must swallow an OSError from mkdir (see its try/except);
+        # simulate it rather than depending on a real unwritable path.
+        with mock.patch("raw_view.logger.Path.mkdir", side_effect=OSError("nope")):
+            logger_mod._initialized = False
+            try:
+                logger_mod.setup_logger("raw_view.n1_probe", log_dir="/nonexistent/x")
+            finally:
+                logger_mod._initialized = True
 
 
 class BatchConvertLimitTests(unittest.TestCase):

@@ -16,11 +16,8 @@ from pathlib import Path
 LOG_DIR_ENV = "RAW_VIEW_LOG_DIR"
 
 
-def _default_log_dir() -> Path:
-    """Platform-appropriate log directory (overridable via ``RAW_VIEW_LOG_DIR``)."""
-    override = os.environ.get(LOG_DIR_ENV)
-    if override:
-        return Path(override)
+def _platform_log_dir() -> Path:
+    """The platform's conventional log directory (no override applied)."""
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     elif sys.platform == "darwin":
@@ -28,6 +25,45 @@ def _default_log_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     return base / "raw-view" / "logs"
+
+
+def _usable_override(raw: str | None) -> Path | None:
+    """Validate ``RAW_VIEW_LOG_DIR``; ``None`` means "ignore it".
+
+    An environment variable must never be able to stop the program from
+    starting.  ``python -m raw_view --version`` does not need logging at all, so
+    a typo'd or unwritable ``RAW_VIEW_LOG_DIR`` previously produced a
+    ``PermissionError`` traceback out of the package import -- a fake crash on
+    the very command a user runs to diagnose a real one.
+
+    Rules (mirroring ``models._explicit_test_settings_file``):
+    * a relative path is ignored -- otherwise the log location silently follows
+      whatever working directory the process happens to have;
+    * the parent directory must already exist;
+    * the directory must be creatable and writable, verified up front instead of
+      failing later inside ``RotatingFileHandler``.
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        return None
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    if not os.access(candidate, os.W_OK):
+        return None
+    return candidate
+
+
+def _default_log_dir() -> Path:
+    """Platform-appropriate log directory (overridable via ``RAW_VIEW_LOG_DIR``).
+
+    Falls back to the platform default whenever the override is unusable, so the
+    CLI always starts; file logging degrades, never the command.
+    """
+    return _usable_override(os.environ.get(LOG_DIR_ENV)) or _platform_log_dir()
 
 
 _LOG_DIR = _default_log_dir()
@@ -103,10 +139,15 @@ def setup_logger(
     logger.setLevel(level)
     logger.propagate = False
 
-    # Determine log directory
+    # Determine log directory.  Creating it must never raise: an unwritable
+    # location means "no file log", not "the program cannot start".  Console
+    # logging (installed below) keeps working either way.
     log_path = _LOG_DIR if log_dir is None else Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
     log_file = log_path / "raw-view.log"
+    try:
+        log_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.debug("Cannot create log directory %s; file logging disabled", log_path)
 
     # -- File handler (loglevel 级别的文件过滤) --
     # 文件 handler 固定不高于全局级别，避免低级别日志写满磁盘。

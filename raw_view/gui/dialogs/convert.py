@@ -719,6 +719,27 @@ class ConvertDialog(QDialog):
                 raise ValueError("input path is required")
             if not output_path:
                 raise ValueError("output path is required")
+
+            # 无副作用的校验必须排在建目录 / 覆盖询问之前：否则超限参数会先
+            # 让用户回答"要覆盖吗"，再告诉他"帧太大"，并留下空目录（N2）。
+            # 这里只构造 spec 并校验大小，真正的写盘在覆盖确认之后。
+            spec = None
+            if yuv_input:
+                from raw_view.transcode import TranscodeSpec, frame_size
+
+                spec = TranscodeSpec(
+                    source_format=self._input_format(),
+                    target_format=self.yuv_type.currentText(),
+                    width=self.width.value(),
+                    height=self.height.value(),
+                    alignment=self.align.currentText(),
+                    endianness=self.endian.currentText(),
+                )
+                # Same 512MB single-frame limit the CLI applies: a 16384x16385
+                # NV16 frame used to land on disk through the GUI while the CLI
+                # refused it.
+                require_decode_size(spec.width, spec.height, frame_size(spec))
+
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
             # P1-6 覆盖确认：目标已存在时弹"跳过/覆盖/全部覆盖/重命名"。
@@ -731,24 +752,10 @@ class ConvertDialog(QDialog):
 
             frame_count = None
             if yuv_input:
-                from raw_view.transcode import (
-                    TranscodeSpec,
-                    frame_size,
-                    transcode_file,
-                )
+                from raw_view.transcode import transcode_file
 
-                spec = TranscodeSpec(
-                    source_format=self._input_format(),
-                    target_format=self.yuv_type.currentText(),
-                    width=self.width.value(),
-                    height=self.height.value(),
-                    alignment=self.align.currentText(),
-                    endianness=self.endian.currentText(),
-                )
-                # Same 512MB single-frame limit the CLI applies, checked before
-                # anything is written: a 16384x16385 NV16 frame used to land on
-                # disk through the GUI while the CLI refused it.
-                require_decode_size(spec.width, spec.height, frame_size(spec))
+                # ``spec`` was built and size-checked before mkdir/overwrite
+                # prompt above; this is the actual conversion.
                 frame_count, size = transcode_file(
                     input_path, output_path, spec
                 )

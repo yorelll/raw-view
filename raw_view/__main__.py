@@ -234,11 +234,20 @@ def _show_batch_help() -> None:
   "input_type": "image",          // "image" (PNG/JPG/BMP), "yuv" (lossless YUV
                                   // 4:2:2/4:2:0 rearrange) or "raw" (reserved).
                                   // Per-entry: one batch may mix image and yuv.
-  "input_yuv_type": "NV16",       // source YUV layout for input_type="yuv"
-                                  // (defaults to yuv_type)
-  "input_alignment": "msb",       // reserved for raw/YOnly inputs
-  "input_endianness": "little",   // reserved for raw/YOnly inputs
-  "input_raw_type": "RAW12",      // reserved for input_type="raw"
+                                  // Only meaningful for mode="convert"; see the
+                                  // note below for mode="view".
+  "input_yuv_type": "NV16",       // layout of the file being read.
+                                  //   mode="convert" + input_type="yuv" -> the
+                                  //     source layout (defaults to yuv_type)
+                                  //   mode="view" -> the layout to DECODE
+                                  //     (defaults to yuv_type; the same value the
+                                  //     single-file `view --input-yuv-type` uses)
+  "input_alignment": "msb",       // input bit alignment (raw/YOnly); also used by
+                                  // mode="view" when decoding
+  "input_endianness": "little",   // input byte order (raw/YOnly); also used by
+                                  // mode="view" when decoding
+  "input_raw_type": "RAW12",      // input RAW layout; mode="view" decodes with it
+                                  // (defaults to raw_type), reserved otherwise
   "raw_type": "RAW12",
   "yuv_type": "YUYV",             // output YUV layout (transcode target)
   "width": 640,
@@ -284,6 +293,19 @@ def _show_batch_help() -> None:
 "mode" / "target" / "input_type" are validated: an unknown or misspelled value
 is rejected with a one-line error instead of silently running a different
 operation.
+
+mode="view" semantics -- what plain, pre-existing batch files always relied on:
+
+  * "target" names the kind of file being DECODED (RAW or YUV), exactly as it
+    always has; width/height default to 640x480 when omitted.
+  * The input_* fields are optional overrides for that decode: input_yuv_type /
+    input_raw_type pick the layout (defaulting to yuv_type / raw_type) and
+    input_alignment / input_endianness override the decode alignment/byte order.
+    They are read-only with respect to "target": setting input_type in a view
+    entry does NOT switch it to transcoding.
+  * Transcoding (and its "source frame dimensions are required" contract) only
+    exists for mode="convert"; a convert entry that omits width/height therefore
+    falls back to 640x480 as well, while input_type="yuv" + convert requires them.
 
 Limits: one frame may not exceed 512 MB, for view (decoded frame), convert
 (encoded output frame) and YUV transcode (both source and target layouts). The
@@ -1029,29 +1051,23 @@ def _validate_batch_spec(spec: object) -> dict:
     return spec
 
 
-def _resolve_entry_input_type(params: dict, mode: str) -> tuple[str, bool]:
-    """Which kind of input this entry declares, and whether the author said so.
+def _resolve_entry_input_type(params: dict, mode: str) -> str:
+    """Which kind of input this entry names: ``"image"``, ``"yuv"`` or ``"raw"``.
 
-    Returns ``(kind, explicit)`` where *kind* is ``"image"`` / ``"yuv"`` /
-    ``"raw"`` and *explicit* records whether the entry (or the batch's global
-    defaults) actually contained an ``input_type`` key.
-
-    The two are deliberately separate.  In **view** mode ``target`` has always
-    described the *input* file, so a legacy entry without ``input_type`` must
-    keep decoding RAW/YUV exactly as before (640x480 default included).  Only an
-    entry that *explicitly* asks for the new YUV transcode input has the stricter
-    "source frame dimensions are required" contract -- conflating the two turned
-    every old batch view job into a failure.
+    In **view** mode ``target`` has always described the *input* file, so an
+    entry's own ``input_type`` is not consulted there: view decodes whatever
+    ``target`` says.  That keeps every pre-existing batch view job working
+    exactly as before.  The strict "source frame dimensions are required"
+    contract is *not* keyed on this function -- it is keyed on
+    ``mode == "convert"`` in :func:`_resolve_entry_dimensions`, because
+    transcoding (unlike decoding) never gets to guess a layout.  See the note in
+    that function.
     """
-    declared = params.get("input_type")
-    explicit = declared is not None and str(declared).strip() != ""
-    input_type = _normalize_choice(
-        declared if explicit else "image", _BATCH_INPUT_TYPES, "input_type"
+    if mode == "view":
+        return "yuv" if params.get("target") == "YUV" else "raw"
+    return _normalize_choice(
+        params.get("input_type") or "image", _BATCH_INPUT_TYPES, "input_type"
     )
-    if mode == "view" and not explicit:
-        # Legacy view entry: target names the file being decoded.
-        return ("yuv" if params.get("target") == "YUV" else "raw"), False
-    return input_type, explicit
 
 
 def _resolve_entry_dimensions(
@@ -1059,10 +1075,15 @@ def _resolve_entry_dimensions(
 ) -> tuple[int, int]:
     """Validate/backfill width & height for the entry's input kind.
 
-    Source frame dimensions are mandatory only for a YUV **transcode** input
-    (``input_type: "yuv"`` in convert mode), where width/height parse the layout
-    and nothing is resized.  Every other input kind -- including decoding a YUV
-    file in view mode -- keeps the historical 640x480 default.
+    Source frame dimensions are mandatory only for a YUV transcode: that is, a
+    YUV input in **convert** mode, where width/height describe the byte layout
+    and nothing is resized.  A wrong guess there would emit silently corrupt
+    output, so it is refused instead of defaulted.
+
+    Everything else -- including decoding a YUV file in view mode, which is the
+    long-standing behaviour -- keeps the historical 640x480 default.  The
+    ``mode == "convert"`` half of the condition is the actual defence for M1;
+    ``kind`` alone would break every legacy batch view job.
     """
     requires_dimensions = kind == "yuv" and mode == "convert"
     if not requires_dimensions:
@@ -1169,7 +1190,10 @@ def _run_batch(args: argparse.Namespace) -> None:
         "output_dir": spec.get("output_dir"),
         # New in this release: per-entry input source. Entries may mix image and
         # yuv inputs; each is interpreted by its own input_type.
-        "input_type": spec.get("input_type", "image"),
+        # None (not "image") when the document never mentions it: "declared
+        # image" and "did not say" are different things in view mode, where a
+        # legacy entry must keep the historical target-based inference.
+        "input_type": spec.get("input_type"),
         "input_yuv_type": spec.get("input_yuv_type", ""),
         "input_alignment": spec.get("input_alignment", ""),
         "input_endianness": spec.get("input_endianness", ""),
@@ -1291,7 +1315,7 @@ def _run_batch(args: argparse.Namespace) -> None:
         try:
             mode = _normalize_choice(params["mode"], _BATCH_MODES, "mode")
             target = _normalize_choice(params["target"], _BATCH_TARGETS, "target")
-            kind, _explicit = _resolve_entry_input_type(params, mode)
+            kind = _resolve_entry_input_type(params, mode)
             width, height = _resolve_entry_dimensions(
                 kind, params["width"], params["height"], mode
             )
@@ -1299,6 +1323,12 @@ def _run_batch(args: argparse.Namespace) -> None:
                 _entry_transcode_spec(params, width, height)
                 if kind == "yuv" and mode == "convert" else None
             )
+            # N4: a batch view entry honours input_raw_type / input_yuv_type the
+            # same way single-file `view` does; otherwise the declared input
+            # format was silently ignored and the file was decoded as the
+            # *output* format instead.
+            view_raw_type = params.get("input_raw_type") or params["raw_type"]
+            view_yuv_type = params.get("input_yuv_type") or params["yuv_type"]
         except _BatchSpecError as exc:
             print(f"  FAIL: {input_path} -> {exc}")
             failed += 1
@@ -1314,7 +1344,7 @@ def _run_batch(args: argparse.Namespace) -> None:
                 _check_transcode_args_for(transcode_spec)
             elif mode == "view":
                 _check_decode_args_for(
-                    params["raw_type"] if target == "RAW" else params["yuv_type"],
+                    view_raw_type if target == "RAW" else view_yuv_type,
                     width, height,
                     alignment=params.get("input_alignment") or params.get("alignment", "msb"),
                     endianness=params.get("input_endianness") or params.get("endianness", "little"),
@@ -1340,17 +1370,26 @@ def _run_batch(args: argparse.Namespace) -> None:
             # YUV transcode: {format} is the TARGET layout; width/height remain
             # the source frame dimensions because nothing is resized.
             template_target = "YUV" if transcode_spec is not None else target
-            template_yuv = (
-                transcode_spec.target_format
-                if transcode_spec is not None
-                else (params.get("yuv_type", "") if target == "YUV" else "")
-            )
+            if transcode_spec is not None:
+                template_yuv = transcode_spec.target_format
+            elif target != "YUV":
+                template_yuv = ""
+            elif mode == "view":
+                # View decodes the *input* layout, which may come from
+                # input_yuv_type (N4); naming the file after the ignored
+                # yuv_type would mislabel the result.
+                template_yuv = view_yuv_type
+            else:
+                template_yuv = params.get("yuv_type", "")
             output_path = format_output_template(
                 "{input_stem}_{width}x{height}_{format}{ext}",
                 input_path, width, height, template_target,
                 output_dir=output_dir,
                 output_ext=out_ext,
-                raw_type=params.get("raw_type", "") if target == "RAW" else "",
+                raw_type=(
+                    (view_raw_type if mode == "view" else params.get("raw_type", ""))
+                    if target == "RAW" else ""
+                ),
                 yuv_type=template_yuv,
                 bayer_pattern=params.get("bayer_pattern", "") if target == "RAW" else "",
                 source_mode=params.get("source_mode", ""),
@@ -1412,9 +1451,11 @@ def _run_batch(args: argparse.Namespace) -> None:
                 if is_raw:
                     size = raw_file_to_image(
                         input_path, output_path,
-                        params["raw_type"], width, height,
-                        alignment=params["alignment"],
-                        endianness=params["endianness"],
+                        view_raw_type, width, height,
+                        alignment=params["input_alignment"]
+                        or params["alignment"],
+                        endianness=params["input_endianness"]
+                        or params["endianness"],
                         preview_mode=params["preview_mode"],
                         bayer_pattern=params["bayer_pattern"],
                         offset=params["offset"],
@@ -1422,10 +1463,12 @@ def _run_batch(args: argparse.Namespace) -> None:
                 else:
                     size = yuv_file_to_image(
                         input_path, output_path,
-                        params["yuv_type"], width, height,
+                        view_yuv_type, width, height,
                         offset=params["offset"],
-                        alignment=params["alignment"],
-                        endianness=params["endianness"],
+                        alignment=params["input_alignment"]
+                        or params["alignment"],
+                        endianness=params["input_endianness"]
+                        or params["endianness"],
                     )
             logger.info("Batch OK: %s -> %s (%d bytes)", input_path, output_path, size)
             print(f"  OK: {input_path} -> {output_path} ({size} bytes)")
