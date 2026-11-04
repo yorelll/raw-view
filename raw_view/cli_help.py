@@ -32,6 +32,9 @@ import os
 
 __all__ = [
     "BATCH_EXAMPLES",
+    "IMAGE_OUTPUT_SUFFIXES",
+    "batch_help",
+    "convert_help",
     "image_read_guidance",
     "image_read_hint_short",
     "looks_like_binary",
@@ -42,8 +45,6 @@ __all__ = [
     "show_view_help",
     "suggested_prog",
     "view_help",
-    "convert_help",
-    "batch_help",
 ]
 
 # ── Copy-pasteable batch examples ─────────────────────────────────────
@@ -120,11 +121,34 @@ _BINARY_SUFFIXES = frozenset({
     ".nv16", ".nv61", ".yuyv", ".uyvy", ".yvyu", ".vyuy", ".yonly",
 })
 
-#: Suffixes that claim to be a decodable image.  A file with one of these that
-#: OpenCV rejects is a corrupted/mislabelled image, *not* a RAW/YUV binary, so
-#: it must not be sent to the binary guidance.
-_IMAGE_SUFFIXES = frozenset({
+#: Suffixes that mean "the output should be a viewable image".  This is the
+#: single definition used by both questions that depend on it:
+#:
+#: * does this input name claim to be a decodable image (``looks_like_binary``),
+#:   and
+#: * does this output name ask for a decode rather than a byte rearrangement
+#:   (``__main__._wants_image_output``).
+#:
+#: Two copies of this set had already drifted (6 vs 9 entries) and ``.webp``/``.jpe``
+#: fell through to the transcode branch with an error unrelated to what the user
+#: asked for.  One constant, one meaning.
+#:
+#: ``.gif``/``.webp`` are here because OpenCV decodes them as input; they are
+#: *not* in :data:`IMAGE_OUTPUT_SUFFIXES` because ``cv2.imencode`` cannot write
+#: them reliably (see that constant).
+IMAGE_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".jpe", ".bmp", ".tif", ".tiff", ".gif", ".webp",
+})
+
+#: Suffixes this tool can actually *write* as an image.  A deliberate subset of
+#: :data:`IMAGE_SUFFIXES`: ``cv2.imencode`` is only driven for the formats in
+#: :data:`raw_view.converter._IMWRITE_EXT_ALIASES` plus png/jpg/bmp/tiff, so
+#: naming ``-o out.webp`` must not silently produce PNG bytes (which is exactly
+#: what ``view`` does today -- see ``image_output_advice``).  Kept in sync with
+#: :func:`raw_view.converter._imwrite_extension` by
+#: ``tests/test_cli_help.py::ImageOutputSuffixTests``.
+IMAGE_OUTPUT_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
 })
 
 #: Leading bytes of the formats ``load_bgr_image`` (OpenCV) can decode.
@@ -160,7 +184,7 @@ def looks_like_binary(path: str) -> bool:
     suffix = Path(path).suffix.lower()
     if suffix in _BINARY_SUFFIXES:
         return True
-    if suffix in _IMAGE_SUFFIXES:
+    if suffix in IMAGE_SUFFIXES:
         return False
     try:
         with open(path, "rb") as handle:
@@ -197,6 +221,47 @@ def suggested_prog() -> str:
     return name or "raw-view"
 
 
+def _other_yuv_target(source: str) -> str | None:
+    """A YUV layout ``source`` can be losslessly re-arranged into, or ``None``.
+
+    The guidance used to print ``--input-yuv-type X --yuv-type X`` (one variable
+    filled both holes), which ``reject_reason()`` refuses as a no-op -- a
+    command that could never work.
+
+    ``None`` is the honest answer for a format with no transcode at all: the
+    YOnly (4:0:0) family has no chroma planes, so *every* rearrangement involving
+    it is refused, and printing a "try this" command would repeat the original
+    bug in a different shape.  The caller drops the section in that case.
+    """
+    from raw_view.transcode import family_formats
+
+    name = str(source or "").strip()
+    for candidate in family_formats(name):
+        if candidate.upper() != name.upper():
+            return candidate
+    return None
+
+
+def image_output_advice(output_path: str | None) -> str:
+    """Explain what to do when ``--input-type yuv`` names a non-image output.
+
+    ``convert`` decides "decode vs re-arrange" from the output suffix alone.
+    That is a heuristic: ``-o out.webp`` or ``-o out`` is a perfectly reasonable
+    request to a user but reads as "re-arrange" here, and the resulting error
+    ("no-op" / "changes chroma sampling") talks about the wrong problem.  This
+    turns it into a sentence that names the fix.
+    """
+    from pathlib import Path
+
+    suffix = Path(output_path or "").suffix.lower()
+    return (
+        f"'{output_path}' does not end in a writable image extension "
+        f"({', '.join(sorted(IMAGE_OUTPUT_SUFFIXES))}), so this is treated as a "
+        f"YUV -> YUV re-arrangement, not a decode. To decode to an image, name "
+        f"the output .png/.jpg/.bmp/.tif."
+    )
+
+
 def image_read_guidance(
     input_path: str,
     output_path: str | None,
@@ -215,6 +280,12 @@ def image_read_guidance(
     RAW/YUV binary handed to the default ``--input-type image`` path, so the
     block names that cause and prints runnable commands, with the user's own
     paths, dimensions and format names already filled in.
+
+    **Every command printed here must run as-is.** The transcode example once
+    used the same value for ``--input-yuv-type`` and ``--yuv-type``, which is
+    rejected as a no-op; see :func:`_other_yuv_target` and
+    ``test_guidance_offers_a_command_that_actually_works``, which now executes
+    every suggestion instead of just the first.
     """
     prog = prog or suggested_prog()
     out = output_path or "out.png"
@@ -249,22 +320,26 @@ def image_read_guidance(
             f'    {prog} view -i "{input_path}" -o "{out}" '
             f"-t RAW --raw-type {raw_type} --width {width} --height {height}"
         ),
+    ])
+    # Only offer the re-arrangement when a legal target exists.  YOnly has none
+    # (see _other_yuv_target), and suggesting one is how this block shipped a
+    # command that always failed.
+    transcode_target = _other_yuv_target(yuv_type)
+    if transcode_target is not None:
+        lines.extend([
+            "",
+            "  YUV binary -> another YUV layout (lossless byte rearrangement):",
+            (
+                f'    {prog} convert -i "{input_path}" -o out.yuv '
+                f"--input-type yuv --input-yuv-type {yuv_type} "
+                f"--yuv-type {transcode_target} "
+                f"--width {width} --height {height}"
+            ),
+        ])
+    lines.extend([
         "",
-        "  YUV binary -> another YUV layout (lossless byte rearrangement):",
-        (
-            f'    {prog} convert -i "{input_path}" -o out.yuv '
-            f"--input-type yuv --input-yuv-type {yuv_type} --yuv-type YUYV "
-            f"--width {width} --height {height}"
-        ),
-        "",
-        "The format names above are the ones you passed (--yuv-type /",
-        "--raw-type); correct them to the file's real layout, and --width /",
-        "--height to its real frame size (they default to 640x480).",
-        f"  RAW formats: {_RAW_FORMATS}",
-        f"  YUV formats: {_YUV_YONLY}",
-        f"               {_YUV_422}",
-        f"               {_YUV_420}",
-        "Full reference: --help-view, --help-convert, docs/cli.md",
+        "Use the file's real layout and frame size; the names above are the ones",
+        "you passed. Formats: --help-view / --help-convert. Manual: docs/cli.md",
     ])
     return "\n".join(lines)
 
@@ -290,7 +365,11 @@ USAGE
   raw-view.exe {{view|convert|batch}} [options] [file ...]   launcher
   raw-view-cli.exe {{view|convert|batch}} [options]          console-only build
   python -m raw_view  {{view|convert|batch}} [options]       from a source tree
-  python -m raw_view -h | --help-view | --help-convert | --help-batch
+  raw-view {{view|convert|batch}} --help                     that mode's own page
+
+  A mode word is REQUIRED for every command-line operation: raw-view --width 800
+  is rejected with exit 2 instead of opening a window. A completely bare
+  `raw-view` (no options at all) still opens the GUI.
 
 MODES
   view       Decode a RAW/YUV binary into PNG/JPEG. With no -i, opens the GUI.
@@ -299,26 +378,32 @@ MODES
   batch      Run many view/convert jobs described by a JSON file.
 
 QUICK EXAMPLES
-  raw-view view -i frame.bin -o frame.png -t YUV --yuv-type YOnly10 --width 1296 --height 736
-  raw-view convert -i photo.png -o photo.raw -t RAW --raw-type RAW12 --width 1920 --height 1080
-  raw-view convert -i photo.png -o photo.yuv -t YUV --yuv-type NV12 --width 1280 --height 720
+  raw-view view -i frame.bin -o frame.png -t YUV --yuv-type YOnly10 \\
+           --width 1296 --height 736
+  raw-view convert -i photo.png -o photo.raw -t RAW --raw-type RAW12 \\
+           --width 1920 --height 1080
+  raw-view convert -i photo.png -o photo.yuv -t YUV --yuv-type NV12 \\
+           --width 1280 --height 720
   raw-view batch -b jobs.json
   raw-view view file1.raw file2.png          (opens the GUI on these files)
 
-CORE OPTIONS (accepted by every mode)
-  -i, --input PATH     Input file
-  -o, --output PATH    Output file; omitted -> auto-named, see the mode page
-  --width N            Frame width
-  --height N           Frame height
-  --offset N           Bytes to skip before the frame data (default: 0)
+CORE OPTIONS
+  -i, --input PATH     Input file                      (view, convert)
+  -o, --output PATH    Output file; omitted -> auto-named (view, convert)
+  --width N            Frame width                     (view, convert)
+  --height N           Frame height                    (view, convert)
+  --offset N           Bytes skipped before the frame  (view, convert)
 
-MODE PAGES -- every other option belongs to exactly one mode and is documented
-on that mode's page:
+  batch ignores these five; it takes every parameter from the JSON file.
+  See --help-batch for how to set width/height/offset there.
+
+MODE PAGES -- the remaining options belong to one mode each:
   --help-view       view:    all RAW/YUV formats, alignment/endianness, Bayer,
                              preview modes, worked examples
   --help-convert    convert: image->RAW/YUV, YUV->YUV lossless rearrangement,
                              YUV->image, which options apply in which direction
-  --help-batch      batch:   JSON schema plus three ready-to-run examples
+  --help-batch      batch:   -b/--batch-file, the JSON schema, three
+                             copy-pasteable examples
                              (--batch-help is kept as an alias)
 
   -h, --help        This page
@@ -326,10 +411,10 @@ on that mode's page:
 
 Which option do I need?
   "the input is a .raw/.bin/.yuv file"                 -> view  (--help-view)
-  "turn this PNG into RAW/YUV"                         -> convert --help-convert
-  "this .bin decode fails with 'failed to read image'" -> convert --help-convert
-                                                          ("YUV -> image")
-  "convert a whole folder"                             -> batch --help-batch
+  "turn this PNG into RAW/YUV"                         -> convert (--help-convert)
+  "this .bin decode fails with 'failed to read image'" -> convert (--help-convert,
+                                                          "YUV -> image")
+  "convert a whole folder"                             -> batch (--help-batch)
 
 Full manual (Chinese, with every example): docs/cli.md
 """
@@ -343,10 +428,10 @@ def view_help() -> str:
 raw-view view -- decode a RAW/YUV binary into a PNG/JPEG image
 
 USAGE
-  raw-view view -i INPUT -o OUTPUT.jpg --target {{RAW|YUV}} [format options]
+  raw-view view -i INPUT -o OUTPUT.png -t {{RAW|YUV}} [format options]
   raw-view view [file ...]        (no -i: opens the GUI and loads these files)
 
-REQUIRED / OPTIONAL
+CORE OPTIONS
   -i, --input PATH    the binary to decode
   -o, --output PATH   image to write (.png/.jpg/.bmp/.tif)
                       omitted -> <input dir>/view_out/<stem>_<W>x<H>_<fmt>.png
@@ -354,11 +439,13 @@ REQUIRED / OPTIONAL
                       file, or the decode reads the wrong stride
   --offset N          bytes to skip before the frame (file header), default 0
 
-TWO INPUT FAMILIES -- pick one with --target (default: RAW)
+TWO INPUT FAMILIES -- pick one with -t/--target (default: RAW)
+  In view mode -t names what the INPUT is (in convert it names the OUTPUT;
+  same flag, opposite direction -- see --help-convert).
 
-  --target RAW -> --raw-type, --alignment, --endianness, --bayer-pattern,
-                  --preview-mode
-  --target YUV -> --yuv-type
+  -t RAW -> --raw-type, --alignment, --endianness, --bayer-pattern,
+            --preview-mode
+  -t YUV -> --yuv-type  (--input-yuv-type works too, same meaning)
 
 RAW OPTIONS
   --raw-type       {_RAW_FORMATS}
@@ -379,43 +466,51 @@ YUV OPTIONS
   Geometry rules: 4:2:2 needs an even width; 4:2:0 needs even width AND height;
   YOnly accepts any positive size.
 
-EXAMPLES (each one is a complete command -- change only what you need)
+EXAMPLES -- each is a complete command; change only what you need
 
-  1. RAW12, MSB-aligned, little endian, RGGB:
-     raw-view view -i sensor.raw -o sensor.png -t RAW --raw-type RAW12 --width 1920 --height 1080 --alignment msb --endianness little --bayer-pattern RGGB
-     Same file stored LSB-aligned and big endian: change just those two words
-     (--alignment lsb --endianness big); everything else stays identical.
+  Example 1: RAW12, MSB-aligned, little endian, RGGB
+    raw-view view -i sensor.raw -o sensor.png -t RAW \\
+             --raw-type RAW12 --width 1920 --height 1080 \\
+             --alignment msb --endianness little --bayer-pattern RGGB
+    Try next: LSB-aligned big endian -> change those two flags only
+    (--alignment lsb --endianness big); everything else is identical.
 
-  2. RAW10 Packed (MIPI: 4 pixels in 5 bytes, width must be divisible by 4):
-     raw-view view -i sensor_packed.raw -o packed.png -t RAW --raw-type "RAW10 Packed" --width 1920 --height 1080
-     Generalise: "RAW12 Packed" (2 px / 3 bytes, width % 2) and
-     "RAW14 Packed" (4 px / 7 bytes, width % 4) are the same command shape --
-     only --raw-type changes. Unpacked RAW10/RAW12/RAW16 are also identical,
-     except that alignment and endianness become meaningful.
+  Example 2: RAW10 Packed (MIPI: 4 pixels in 5 bytes, width % 4 == 0)
+    raw-view view -i packed.raw -o packed.png -t RAW \\
+             --raw-type "RAW10 Packed" --width 1920 --height 1080
+    Try next: "RAW12 Packed" (2 px / 3 bytes, width % 2) and
+    "RAW14 Packed" (4 px / 7 bytes, width % 4) are the same command shape --
+    only --raw-type changes. Unpacked RAW10/RAW12/RAW16 are also identical,
+    except that alignment and endianness become meaningful.
 
-  3. YUYV (4:2:2, packed 2 pixels per 4 bytes):
-     raw-view view -i frame.yuv -o frame.png -t YUV --yuv-type YUYV --width 1920 --height 1080
-     Generalise: YVYU / UYVY / VYUY are the same four bytes per macropixel in a
-     different order -- swap --yuv-type and nothing else. NV16 / NV61 store a Y
-     plane plus one interleaved chroma plane, same total size, so the same
-     command works with --yuv-type NV16.
+  Example 3: YUYV (4:2:2, packed 2 pixels per 4 bytes)
+    raw-view view -i frame.yuv -o frame.png -t YUV \\
+             --yuv-type YUYV --width 1920 --height 1080
+    Try next: YVYU / UYVY / VYUY are the same four bytes per macropixel in a
+    different order -- swap --yuv-type and nothing else. NV16 / NV61 store a Y
+    plane plus one interleaved chroma plane, same total size, so the same
+    command works with --yuv-type NV16.
 
-  4. YOnly10 (YUV 4:0:0, 10 bits left-aligned in 16-bit words, 2 bytes/pixel):
-     raw-view view -i grey.bin -o grey.png -t YUV --yuv-type YOnly10 --width 1296 --height 736
-     Generalise: YOnly12 / YOnly14 / YOnly16 use the same command (bit depth
-     only, still 2 bytes/pixel). YOnly8 is 1 byte/pixel and ignores
-     alignment/endianness, so drop them:
-     raw-view view -i grey8.bin -o grey8.png -t YUV --yuv-type YOnly8 --width 1296 --height 736
-     If the values look wrong (too bright / banded), the file is probably
-     LSB-aligned: add --alignment lsb (or --endianness big).
+  Example 4: YOnly10 (4:0:0, 10 bits left-aligned in 16-bit words, 2 B/pixel)
+    raw-view view -i grey.bin -o grey.png -t YUV \\
+             --yuv-type YOnly10 --width 1296 --height 736
+    Try next: YOnly12 / YOnly14 / YOnly16 use the same command (bit depth
+    only, still 2 bytes/pixel). YOnly8 is 1 byte/pixel and ignores
+    alignment/endianness, so drop them:
+    raw-view view -i grey8.bin -o grey8.png -t YUV \\
+             --yuv-type YOnly8 --width 1296 --height 736
+    If the values look wrong (too bright / banded), the file is probably
+    LSB-aligned: add --alignment lsb (or --endianness big).
 
-  5. NV12 (4:2:0, semi-planar; width and height must both be even):
-     raw-view view -i frame.nv12 -o frame.png -t YUV --yuv-type NV12 --width 1280 --height 720
-     Same command for I420, YV12, NV21 -- the four 4:2:0 layouts differ only in
-     plane order.
+  Example 5: NV12 (4:2:0, semi-planar; width and height must both be even)
+    raw-view view -i frame.nv12 -o frame.png -t YUV \\
+             --yuv-type NV12 --width 1280 --height 720
+    Try next: I420, YV12, NV21 -- the four 4:2:0 layouts differ only in plane
+    order, so only --yuv-type changes.
 
-  6. Skip a 128-byte header and preview grayscale:
-     raw-view view -i a.raw -o a.png -t RAW --raw-type RAW12 --width 640 --height 480 --offset 128 --preview-mode Grayscale
+  Example 6: skip a 128-byte header and preview grayscale
+    raw-view view -i a.raw -o a.png -t RAW --raw-type RAW12 \\
+             --width 640 --height 480 --offset 128 --preview-mode Grayscale
 
 AUTO OUTPUT NAME
   Without -o the file is written next to the input under view_out/ using the
@@ -437,7 +532,8 @@ def convert_help() -> str:
 raw-view convert -- encode, transcode, or decode -- one command, three jobs
 
 USAGE
-  raw-view convert -i INPUT -o OUTPUT [options]
+  raw-view convert -i INPUT -o OUTPUT [-t {{RAW|YUV}}] [options]
+  In convert, -t/--target names what you WRITE (in view it names what you READ).
 
 WHICH JOB RUNS (decided by --input-type and by the output file extension)
   1. image -> RAW/YUV   --input-type image (default)
@@ -446,9 +542,13 @@ WHICH JOB RUNS (decided by --input-type and by the output file extension)
   2. YUV -> YUV         --input-type yuv, output is not an image extension
        Lossless byte rearrangement inside one chroma family. No resize.
        --width/--height are the SOURCE frame size and are REQUIRED.
-  3. YUV -> image       --input-type yuv, output ends in .png/.jpg/.bmp/.tif
-       Decodes the first frame of the YUV file to that image. Same parameters
-       as job 2 (source frame size), plus optional --offset.
+  3. YUV -> image       --input-type yuv, output ends in
+                       .png/.jpg/.jpeg/.bmp/.tif/.tiff
+       Decodes ONE frame of the YUV file to that image. Same parameters as
+       job 2 (source frame size), plus optional --offset.
+       Unlike job 2 this tolerates trailing bytes: it reports how many whole
+       frames the file holds, decodes the first, and warns if the tail is not
+       a whole frame (job 2 rejects the whole file instead).
 
   --input-type raw is reserved (RAW <-> YUV bit unpacking is not implemented).
 
@@ -460,17 +560,22 @@ WHICH OPTIONS APPLY TO WHICH JOB
                  [--offset] [--input-alignment] [--input-endianness]
   job 3       : -i -o --input-type yuv --input-yuv-type --width --height
                  [--offset] [--input-alignment] [--input-endianness]
+                 (--yuv-type is not consulted: job 3 has no target layout)
 
-DEFAULTS AND FALLBACKS
+DEFAULTS AND FALLBACKS -- there is NO format auto-detection
   --input-type         image (jobs 1) | yuv (jobs 2 and 3)
   --target             RAW, except with --input-type yuv where it defaults to
                        YUV; an explicit "-t RAW" with a YUV source is an error
-  --input-yuv-type     falls back to --yuv-type
+  --input-yuv-type     falls back to --yuv-type (so an omitted input layout is
+                       decoded as YUYV, not guessed from the file)
   --input-alignment    falls back to --alignment
   --input-endianness   falls back to --endianness
+  --input-raw-type     reserved; parsed but not used yet (--input-type raw is
+                       not implemented)
 
 JOB 1 DETAILS
-  --raw-type       {_RAW_FORMATS}  (default RAW12)
+  --raw-type       {_RAW_FORMATS}
+                   (default RAW12)
   --alignment      msb | lsb (default msb) -- RAW10/12/16 in 16-bit words
   --endianness     little | big (default little) -- RAW10/12/16/32
   --source-mode    bayer (default) | gray -- gray writes one luma sample/pixel
@@ -495,43 +600,58 @@ JOB 2 DETAILS -- the YUV families
   The file size must be an exact multiple of one frame; every frame is converted
   and kept.
 
-EXAMPLES (each is a complete command)
+EXAMPLES -- each is a complete command
 
-  1. PNG -> RAW12, MSB-aligned, little endian, RGGB, as a Bayer mosaic:
-     raw-view convert -i photo.png -o photo.raw -t RAW --raw-type RAW12 --width 1920 --height 1080 --alignment msb --endianness little --source-mode bayer --bayer-pattern RGGB
-     Generalise: LSB-aligned big endian is the same command with
-     (--alignment lsb --endianness big); a grayscale RAW is the same command with
-     (--source-mode gray), which also makes --bayer-pattern irrelevant.
+  Example 1: PNG -> RAW12, MSB-aligned, little endian, RGGB Bayer mosaic
+    raw-view convert -i photo.png -o photo.raw -t RAW \\
+             --raw-type RAW12 --width 1920 --height 1080 \\
+             --alignment msb --endianness little \\
+             --source-mode bayer --bayer-pattern RGGB
+    Try next: LSB-aligned big endian is the same command with
+    (--alignment lsb --endianness big); a grayscale RAW is the same command with
+    (--source-mode gray), which also makes --bayer-pattern irrelevant.
 
-  2. PNG -> RAW10 Packed (4 pixels in 5 bytes, width must be divisible by 4):
-     raw-view convert -i photo.png -o photo.raw -t RAW --raw-type "RAW10 Packed" --width 1920 --height 1080
-     Generalise: "RAW12 Packed" (width % 2) and "RAW14 Packed" (width % 4) are
-     the same command with a different --raw-type.
+  Example 2: PNG -> RAW10 Packed (4 pixels in 5 bytes, width % 4 == 0)
+    raw-view convert -i photo.png -o photo.raw -t RAW \\
+             --raw-type "RAW10 Packed" --width 1920 --height 1080
+    Try next: "RAW12 Packed" (width % 2) and "RAW14 Packed" (width % 4) are
+    the same command with a different --raw-type.
 
-  3. PNG -> YUYV, resized to 1280x720:
-     raw-view convert -i photo.png -o photo.yuv -t YUV --yuv-type YUYV --width 1280 --height 720
-     Generalise: every other 4:2:2 / 4:2:0 layout is the same command with
-     --yuv-type swapped (NV12, I420, NV16, ...). For YOnly10 add the storage
-     flags: --yuv-type YOnly10 --alignment msb --endianness little
+  Example 3: PNG -> YUYV, resized to 1280x720
+    raw-view convert -i photo.png -o photo.yuv -t YUV \\
+             --yuv-type YUYV --width 1280 --height 720
+    Try next: every other 4:2:2 / 4:2:0 layout is the same command with
+    --yuv-type swapped (NV12, I420, NV16, ...). For YOnly10 add the storage
+    flags: --yuv-type YOnly10 --alignment msb --endianness little
 
-  4. NV16 -> YUYV (4:2:2 family, lossless, no resize; 1920x1080 source):
-     raw-view convert -i frame.nv16 -o frame.yuyv --input-type yuv --input-yuv-type NV16 --yuv-type YUYV --width 1920 --height 1080
-     Generalise: YVYU / UYVY / VYUY / NV61 are the same command with --yuv-type
-     changed; any 4:2:2 source works by changing --input-yuv-type. Both knobs
-     are independent, so all 30 directions are reachable this way.
+  Example 4: NV16 -> YUYV (4:2:2 family, lossless, no resize; 1920x1080 source)
+    raw-view convert -i frame.nv16 -o frame.yuyv --input-type yuv \\
+             --input-yuv-type NV16 --yuv-type YUYV \\
+             --width 1920 --height 1080
+    Try next: YVYU / UYVY / VYUY / NV61 are the same command with --yuv-type
+    changed; any 4:2:2 source works by changing --input-yuv-type. Both knobs
+    are independent, so all 30 directions are reachable this way.
 
-  5. I420 -> NV12 (4:2:0 family, lossless; width and height must be even):
-     raw-view convert -i frame.i420 -o frame.nv12 --input-type yuv --input-yuv-type I420 --yuv-type NV12 --width 1920 --height 1080
-     Generalise: YV12 and NV21 are the same command with --yuv-type YV12/NV21.
+  Example 5: I420 -> NV12 (4:2:0 family, lossless; width and height must be even)
+    raw-view convert -i frame.i420 -o frame.nv12 --input-type yuv \\
+             --input-yuv-type I420 --yuv-type NV12 \\
+             --width 1920 --height 1080
+    Try next: YV12 and NV21 are the same command with --yuv-type YV12/NV21.
 
-  6. YUV binary -> PNG (decode; this is the fix for
-     "Error: failed to read image: x.bin" from a plain convert):
-     raw-view convert -i grey.bin -o grey.png --input-type yuv --input-yuv-type YOnly10 --width 1296 --height 736
-     The same decode is available as `raw-view view -i grey.bin -o grey.png -t
-     YUV --yuv-type YOnly10 --width 1296 --height 736`; both are equivalent.
+  Example 6: YUV binary -> PNG (decode; this is the fix for
+             "Error: failed to read image: x.bin" from a plain convert)
+    raw-view convert -i grey.bin -o grey.png --input-type yuv \\
+             --input-yuv-type YOnly10 --width 1296 --height 736
+    The same decode is available as
+    raw-view view -i grey.bin -o grey.png -t YUV --yuv-type YOnly10 \\
+             --width 1296 --height 736 ; both are equivalent.
+    NOTE: the output extension must be one of
+    .png/.jpg/.jpeg/.bmp/.tif/.tiff -- that is how the decode is recognised.
 
-  7. Skip a 128-byte file header while transcoding:
-     raw-view convert -i frame.nv16 -o frame.yuyv --input-type yuv --input-yuv-type NV16 --yuv-type YUYV --width 1920 --height 1080 --offset 128
+  Example 7: skip a 128-byte file header while transcoding
+    raw-view convert -i frame.nv16 -o frame.yuyv --input-type yuv \\
+             --input-yuv-type NV16 --yuv-type YUYV \\
+             --width 1920 --height 1080 --offset 128
 
 REJECTED ON PURPOSE
   -t RAW with --input-type yuv, --input-type raw, a source and target in
@@ -551,14 +671,24 @@ def batch_help() -> str:
 raw-view batch -- run many view/convert jobs described by a JSON file
 
 USAGE
-  raw-view batch -b jobs.json
-  (also: raw-view --help-batch   ;   --batch-help is kept as an alias)
+  raw-view batch -b, --batch-file PATH
+  raw-view --help-batch        (--batch-help is kept as an alias)
+
+REQUIRED OPTION
+  -b, --batch-file PATH   the JSON job file. Nothing else is needed on the
+                          command line: every per-file parameter lives in it.
+  Options --width/--height/--offset/-i/-o are NOT read in batch mode; set
+  width/height/offset inside the JSON instead.
 
 Batch JSON format
 -----------------
 The file must be strict JSON encoded as UTF-8. Comments (// and /* */) and
 trailing commas are NOT allowed -- they make json.load fail. Each example below
 is valid JSON exactly as printed: copy one, save it, and run it.
+
+Use batch when the jobs differ, share a shape, or are many; a shell loop calling
+`raw-view convert` once per file is simpler when there is exactly one fixed
+command and no per-file variation.
 
 GLOBAL KEYS -- defaults for every entry; any entry may override any of them
   mode             "convert" (default) | "view"
@@ -572,9 +702,8 @@ GLOBAL KEYS -- defaults for every entry; any entry may override any of them
   input_raw_type   RAW layout of the input (default: raw_type)
   input_alignment  input bit alignment (default: alignment)
   input_endianness input byte order   (default: endianness)
-  raw_type         RAW12 (default);  {_RAW_FORMATS}
-  yuv_type         YUYV (default);   {_YUV_YONLY}
-                   {_YUV_422}; {_YUV_420}
+  raw_type         RAW12 (default)
+  yuv_type         YUYV (default)
   width, height    default 640x480 (source frame size when input_type is yuv)
   alignment        lsb | msb (default msb)
   endianness       little | big (default little)
@@ -585,6 +714,11 @@ GLOBAL KEYS -- defaults for every entry; any entry may override any of them
   output_dir       optional; where auto-named outputs go
   base_dir         optional; relative files[].input paths resolve from here
   files            REQUIRED: array of entries
+
+  RAW formats:  {_RAW_FORMATS}
+  YUV formats:  {_YUV_YONLY}
+                {_YUV_422}
+                {_YUV_420}
 
 PER-ENTRY KEYS (inside files[])
   input            required; * ? [ ] trigger glob expansion (one entry per match)
@@ -624,11 +758,6 @@ EXAMPLE 3 -- YUV family rearrangement: every .nv16 -> YUYV (lossless), with one
 ------------------------------------------------------------------------------
 {BATCH_EXAMPLE_YUV}
 ------------------------------------------------------------------------------
-
-WHY THIS SHAPE
-  Global keys are the "same for everything" settings; entries only carry what
-  differs. Example 2 is one file with five outcomes because mode/target/format
-  are all per-entry overridable -- there is no need to split it into five runs.
 
 SEE ALSO
   --help-view, --help-convert, docs/cli.md

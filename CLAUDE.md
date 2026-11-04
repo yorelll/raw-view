@@ -61,6 +61,16 @@ docs/review/
   2. **打 tag 前填好**：发布者把当前版本的修复/新功能清单按模板填入 `.github/workflows/build-release.yml` 的 `body:`（Workflow 的 `Create or update GitHub Release` 步骤），连同版本号/文件名占位符一并更新。这样打 tag 后 Release **直接生成即最终版**，**不依赖事后 `gh release edit`**。
   3. **确需事后修改时**：`gh release edit <tag> --notes-file - <<'EOF' ... EOF` 覆盖整个 body，内容仍必须与 `docs/release-template.md` 格式一致。
   4. body 中版本号、zip 文件名、`name:` 中的版本号必须与 tag 一致（可用 `${{ steps.version.outputs.version }}` 动态占位符）。
+  5. **body 只描述本版本，绝不堆叠历史版本内容（必守）**。发布说明里出现**任何其它版本号**的标题或条目都要删掉——历史版本各自在各自的 Release 里，重复堆叠会让读者分不清哪个版本改了什么。
+     - 打 tag 前先看 body 里出现了哪些版本号：
+       ```bash
+       sed -n '/body: |/,/files: |/p' .github/workflows/build-release.yml \
+         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u
+       ```
+       **正确结果只有当前版本一个**（如发布 0.5.7 就只该出现 `0.5.7`）。多出来的都是上版残留，逐一删掉。
+       （占位符 `${{ steps.version.outputs.version }}` 不是字面版本号，不会被这条命令匹配到。）
+     - **典型事故（v0.5.6 已发生）**：改 body 时只在上方插入了新版本段落，忘了删下方的旧版本段落，导致 0.5.5 的内容整块留在 0.5.6 的发布说明里，其中一段还被误标成「🆕 新功能」却全是修复条目。
+     - 已经发错的补救：删除远端 tag 与 Release → 修正 body → 重打同一 tag 触发重建（`git tag -d <tag>` / `git push origin :refs/tags/<tag>` / `gh release delete <tag> --yes`）。**重打前先确认 HEAD 只含本次修正**，别把未完成的工作一起发出去。
 - **远程监控一律用 `gh.exe`（必守）**：监控远端状态（CI / Build & Release 运行、Release 资产与 body、tag/远程 ref）时，统一使用 GitHub CLI 完整路径：
   ```powershell
   "D:\Program Files\GitHub CLI\gh.exe" run list --limit N

@@ -133,6 +133,67 @@ def _make_utf8_stdio() -> None:
                 pass
 
 
+#: Options whose value is a separate argv token.  Used to skip option *values*
+#: when locating the mode word -- without this, ``-i view`` looks like the
+#: ``view`` sub-command and ``--width 64 ... view`` looks like no mode at all.
+_VALUE_TAKING_OPTIONS = frozenset({
+    "-i", "--input", "-o", "--output", "--width", "--height", "--offset",
+    "-t", "--target", "--raw-type", "--yuv-type", "--alignment", "--endianness",
+    "--source-mode", "--bayer-pattern", "--preview-mode",
+    "--input-type", "--input-yuv-type", "--input-alignment",
+    "--input-endianness", "--input-raw-type", "-b", "--batch-file",
+})
+
+
+def _mode_word_from_argv(argv: list[str]) -> str | None:
+    """The sub-command named in *argv*, if any.
+
+    A bare ``--width 800`` has no mode word and must keep its historical meaning
+    (see :func:`_enforce_mode_word` and the launcher's docstring), so this only
+    reports an explicit ``view`` / ``convert`` / ``batch`` in the first
+    positional slot.
+
+    Option values are skipped: ``-i view`` names an *input file* called ``view``,
+    and ``--width 64 ... view`` still has the mode word at the end, because
+    argparse accepts options before the sub-command.
+    """
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _VALUE_TAKING_OPTIONS:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        return token if token in ("view", "convert", "batch") else None
+    return None
+
+
+def _print_help_for_mode(
+    main, view, convert, batch, argv: list[str] | None = None
+) -> int:
+    """Print the page the user asked for and return the exit code.
+
+    ``<mode> --help`` prints that mode's page; a bare ``-h`` / ``--help`` prints
+    the overview.  Kept as a plain function (rather than logic inside the action)
+    so ``tests/test_cli_help.py`` can drive it without capturing argv.
+    """
+    import sys
+
+    mode = _mode_word_from_argv(list(sys.argv[1:] if argv is None else argv))
+    if mode == "view":
+        view()
+    elif mode == "convert":
+        convert()
+    elif mode == "batch":
+        batch()
+    else:
+        main(get_app_version())
+    return 0
+
+
 class _OverviewHelpAction(argparse.Action):
     """``-h``/``--help``: print the level-1 page instead of argparse's table.
 
@@ -146,10 +207,19 @@ class _OverviewHelpAction(argparse.Action):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
-        from raw_view.cli_help import show_main_help
+        # ``convert --help`` means "I want the convert page", not "show me the
+        # menu again".  argparse hands us every argv token, so the mode word is
+        # already known here -- printing the overview would make the user type a
+        # second command to reach the page they just asked for.
+        from raw_view.cli_help import (
+            show_batch_help,
+            show_convert_help,
+            show_main_help,
+            show_view_help,
+        )
 
-        show_main_help(get_app_version())
-        parser.exit(0)
+        parser.exit(_print_help_for_mode(show_main_help, show_view_help,
+                                         show_convert_help, show_batch_help))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -820,14 +890,6 @@ def _require_source_dimensions(args: argparse.Namespace) -> tuple[int, int]:
     return args.width, args.height
 
 
-#: Output suffixes that mean "write a viewable image", not a raw byte dump.
-#: A YUV input plus one of these is a decode, not a rearrangement -- see
-#: :func:`_wants_image_output`.
-_IMAGE_OUTPUT_SUFFIXES = frozenset({
-    ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
-})
-
-
 def _wants_image_output(output_path: str | None) -> bool:
     """Whether *output_path* asks for a PNG/JPEG rather than a raw byte dump.
 
@@ -835,10 +897,17 @@ def _wants_image_output(output_path: str | None) -> bool:
     "decode this YUV to an image", while ``-o out.yuv`` (or no ``-o``) reads as
     "re-arrange the bytes".  Without this distinction the two jobs shared one
     code path and the decode one did not exist.
+
+    The suffix set lives in :mod:`raw_view.cli_help` because the same set answers
+    "does this *input* name claim to be an image?" -- two copies had drifted
+    (6 vs 9 entries) and the error text for ``-o out.webp`` talked about chroma
+    sampling instead of the extension (review M-6).
     """
+    from raw_view.cli_help import IMAGE_OUTPUT_SUFFIXES
+
     if not output_path:
         return False
-    return Path(output_path).suffix.lower() in _IMAGE_OUTPUT_SUFFIXES
+    return Path(output_path).suffix.lower() in IMAGE_OUTPUT_SUFFIXES
 
 
 def _decode_yuv_to_image(
@@ -885,6 +954,7 @@ def _decode_yuv_to_image(
         sys.exit(1)
     available = file_size - args.offset
     frames = available // frame_bytes if frame_bytes else 0
+    trailing = available - frames * frame_bytes
     if available < frame_bytes:
         msg = (
             f"input too short for one {source_format} frame at {width}x{height}: "
@@ -907,7 +977,17 @@ def _decode_yuv_to_image(
     print(f"Input type:   YUV")
     print(f"Source fmt:   {source_format}")
     print(f"Dimensions:   {width}x{height} (source frame, no resize)")
-    print(f"Frames:       {frames} (first frame decoded)")
+    # "found" vs "decoded" are two different numbers; the old text squeezed both
+    # into one line and read as if every frame was processed.
+    print(f"Frames found: {frames} (decoding frame 1 only)")
+    if trailing:
+        # Deliberately a warning, not an error: this path is a preview/decode, so
+        # a partial tail is harmless -- unlike job 2, which must not emit a
+        # truncated frame and refuses the whole file.
+        print(
+            f"Warning:      trailing {trailing} byte(s) are not a whole "
+            f"{frame_bytes}-byte frame and were ignored",
+        )
     if args.offset:
         print(f"Offset:       {args.offset}")
     print()
@@ -970,6 +1050,13 @@ def _run_convert_yuv(args: argparse.Namespace) -> None:
 
     reason = reject_reason(source_format, target_format)
     if reason:
+        # A same-format pair with a non-image output name is almost always "I
+        # meant to decode this": the suffix is what decides, so say so instead of
+        # answering a question about chroma sampling (review M-6).
+        if source_format.upper() == target_format.upper() and args.output:
+            from raw_view.cli_help import image_output_advice
+
+            reason = f"{reason}\n       {image_output_advice(args.output)}"
         logger.error("Convert rejected: %s", reason)
         print(f"Error: {reason}", file=sys.stderr)
         sys.exit(1)
@@ -1678,6 +1765,11 @@ def main() -> None:
         _show_batch_help()
         return
 
+    # A command line that carries CLI options but no mode word is almost always
+    # a typo ("raw-view --width 800").  Without this it would fall through to
+    # `view` -> GUI and block the terminal; see _enforce_mode_word.
+    _enforce_mode_word(args, sys.argv[1:])
+
     if args.mode == "convert":
         _run_convert(args)
     elif args.mode == "batch":
@@ -1686,6 +1778,101 @@ def main() -> None:
         _run_view_mode(args)
     else:
         _run_gui(args.files)
+
+
+#: Options that only make sense *inside* a command-line operation, grouped by
+#: the spelling to show in the message.  Seeing any of these with no mode word
+#: means the user intended a command, not a window.
+_CLI_ONLY_OPTIONS: dict[str, tuple[str, ...]] = {
+    "--input": ("-i", "--input"),
+    "--output": ("-o", "--output"),
+    "--width": ("--width",),
+    "--height": ("--height",),
+    "--offset": ("--offset",),
+    "--target": ("-t", "--target"),
+    "--raw-type": ("--raw-type",),
+    "--yuv-type": ("--yuv-type",),
+    "--alignment": ("--alignment",),
+    "--endianness": ("--endianness",),
+    "--source-mode": ("--source-mode",),
+    "--bayer-pattern": ("--bayer-pattern",),
+    "--preview-mode": ("--preview-mode",),
+    "--input-type": ("--input-type",),
+    "--input-yuv-type": ("--input-yuv-type",),
+    "--input-alignment": ("--input-alignment",),
+    "--input-endianness": ("--input-endianness",),
+    "--input-raw-type": ("--input-raw-type",),
+    # --batch-file is read only by the batch path, so with no mode word it is
+    # silently ignored and the command falls through to the GUI.
+    "--batch-file": ("-b", "--batch-file"),
+}
+
+#: Options that legitimately stand alone: they print something and exit, so a
+#: missing mode word is not a mistake for them.
+_STANDALONE_ANSWERED_BEFORE_GUI = frozenset({
+    "--version", "-h", "--help",
+    "--help-view", "--help-convert", "--help-batch", "--batch-help",
+})
+
+
+def _options_without_mode(argv: list[str]) -> list[str]:
+    """Which CLI-only options *argv* names (accepts ``--width=800`` too)."""
+    found = []
+    for option, spellings in _CLI_ONLY_OPTIONS.items():
+        for spelling in spellings:
+            if any(
+                token == spelling or token.startswith(f"{spelling}=")
+                for token in argv
+            ):
+                found.append(option)
+                break
+    return sorted(found)
+
+
+def _enforce_mode_word(args: argparse.Namespace, argv: list[str]) -> None:
+    """Refuse an accidental GUI launch instead of blocking the terminal.
+
+    The criterion is **"would this command line actually open the GUI?"**, not
+    "does it carry CLI options".  Those differ in both directions:
+
+    * ``-i f.yuv -o out.png ...`` carries plenty of options but never reaches
+      ``_run_gui`` -- ``_run_view_mode`` sees ``args.input`` and decodes.  Judging
+      by options alone rejected this legitimate (and historically working) call.
+    * ``-b jobs.json`` carries an option that the *view* path never reads, so it
+      falls through to ``_run_gui`` and blocks the terminal.  Judging by options
+      alone missed it whenever the option was not in the table.
+
+    So: fire only when there is no mode word, no ``-i`` (the one thing that makes
+    ``view`` decode instead of open a window), the GUI is allowed at all, and at
+    least one CLI option was given.  A completely bare ``raw-view`` stays the
+    documented way to open a window, and ``raw-view file.raw`` keeps loading
+    those files in the GUI.
+    """
+    if _mode_word_from_argv(argv) is not None:
+        return
+    if any(token in _STANDALONE_ANSWERED_BEFORE_GUI for token in argv):
+        return
+    # `-i` means "decode this file", which _run_view_mode handles without a GUI.
+    if getattr(args, "input", None):
+        return
+    # A console-only build has no GUI to open; _run_view_mode already explains
+    # that in its own words, so do not pre-empt it with a different message.
+    if not _gui_allowed():
+        return
+    used = _options_without_mode(argv)
+    if not used:
+        return
+    print(
+        "Error: a mode word is required: raw-view {view|convert|batch} ...\n"
+        f"       (got {' '.join(used)} without a mode word)\n"
+        "       raw-view --help          the menu and where to look next\n"
+        "       raw-view --help-convert  image/RAW/YUV conversion\n"
+        "       raw-view --help-view     RAW/YUV binary -> PNG\n"
+        "       raw-view --help-batch    JSON batches\n"
+        "       A bare `raw-view` opens the GUI (that is how you open a window).",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _cli_main() -> None:

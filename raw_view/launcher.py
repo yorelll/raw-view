@@ -42,6 +42,12 @@ turned into ``view a.raw``.  Guessing there would also mean ``--width 800``
 (a typo'd option) launches a window and blocks the terminal, which is far worse
 than an immediate usage error.
 
+This routing table is about *which executable* runs.  The "never a window for a
+command line" promise is enforced one layer down as well:
+``raw_view.__main__._enforce_mode_word`` rejects a command line that carries CLI
+options but no mode word (exit 2).  Both halves are needed -- routing decides
+which binary, the guard decides what it does.
+
 Console ownership
 -----------------
 ``raw-view.exe`` is built ``--windowed`` (PE subsystem 2) so double-clicking it

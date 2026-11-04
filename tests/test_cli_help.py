@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -34,17 +35,46 @@ from _settings_isolation import isolated_env
 _MAIN_DIR = Path(__file__).resolve().parents[1]
 
 
-def _run_cli(*argv: str, timeout: int = 120) -> subprocess.CompletedProcess:
+def _unwrapped(text: str) -> str:
+    """Join backslash-continued command lines into one line.
+
+    Help wraps long commands with ``\\`` (review L-1: 175-column lines folded
+    badly in an 80-column terminal), so assertions about a whole command must
+    compare against the joined text rather than one physical line.  Runs of
+    whitespace collapse to one space, which is what a reader sees.
+    """
+    import re
+
+    joined = text.replace("\\\r\n", " ").replace("\\\n", " ")
+    return re.sub(r"[ ]{2,}", " ", joined)
+
+
+def _run_cli(*argv: str, timeout: int = 120,
+             cwd: str | None = None,
+             env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run the CLI in a subprocess and decode its output as UTF-8.
 
     Bytes (not ``text=True``): the help pages are UTF-8 by contract, but the
     surrounding Windows console may be cp936/cp1252, and ``text=True`` decodes
     with the locale codec -- which is exactly the failure mode those pages guard
     against.
+
+    *cwd* defaults to the repository root (``python -m raw_view`` resolves there);
+    pass a temp directory when the command would otherwise create files.  When a
+    different cwd is used the repository is added to ``PYTHONPATH`` so the module
+    is still importable.  *env_extra* adds variables on top of the isolated
+    environment (used to exercise ``RAW_VIEW_LOG_LEVEL``).
     """
+    env = isolated_env()
+    if env_extra:
+        env.update(env_extra)
+    if cwd is not None:
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(_MAIN_DIR), env.get("PYTHONPATH", "")])
+        )
     proc = subprocess.run(
         [sys.executable, "-m", "raw_view", *argv],
-        capture_output=True, env=isolated_env(), cwd=str(_MAIN_DIR),
+        capture_output=True, env=env, cwd=cwd or str(_MAIN_DIR),
         timeout=timeout,
     )
     return subprocess.CompletedProcess(
@@ -91,16 +121,136 @@ class LevelOneHelpTests(unittest.TestCase):
     def test_short_and_long_help_agree(self):
         self.assertEqual(_run_cli("-h").stdout, self.text)
 
-    def test_help_beats_a_mode(self):
-        """`view --help` prints the overview instead of starting a decode."""
-        for mode in ("view", "convert", "batch"):
+    def test_mode_word_selects_that_modes_page(self):
+        """`convert --help` prints the *convert* page, not the menu (M-5).
+
+        Asking for a mode's help and being shown the overview makes the user type
+        a second command to reach what they already asked for; the bare -h keeps
+        the menu.
+        """
+        expected = {
+            "view": "raw-view view -- decode a RAW/YUV binary",
+            "convert": "raw-view convert -- encode, transcode, or decode",
+            "batch": "raw-view batch -- run many view/convert jobs",
+        }
+        for mode, first_line in expected.items():
             with self.subTest(mode=mode):
                 proc = _run_cli(mode, "--help")
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout, self.text)
+                self.assertTrue(proc.stdout.startswith(first_line), proc.stdout[:80])
+                self.assertNotEqual(proc.stdout, self.text)
+
+    def test_mode_word_selects_the_page_for_h_too(self):
+        for mode in ("view", "convert", "batch"):
+            with self.subTest(mode=mode):
+                self.assertEqual(_run_cli(mode, "-h").stdout,
+                                 _run_cli(mode, "--help").stdout)
 
     def test_usage_mentions_the_help_entries(self):
-        self.assertIn("--help-view", self.text.split("MODES")[0])
+        self.assertIn("--help", self.text.split("MODES")[0])
+        self.assertIn("mode word is REQUIRED", self.text)
+
+
+class OptionCoverageTests(unittest.TestCase):
+    """Every option the parser accepts must appear in some help page.
+
+    This is the structural guard the review asked for (H-3 / M-2): it is what
+    makes the main page's "the remaining options belong to one mode each"
+    verifiable instead of aspirational, and it fails the moment somebody adds an
+    option without documenting it.  Mutation check: adding an undocumented
+    ``--mutation-probe`` used to leave all 55 tests green; it now fails here.
+    """
+
+    #: Aliases that are deliberately documented through their canonical spelling.
+    #: Mapping is alias -> the spelling that must appear.
+    _ALIAS_OF = {
+        "-h": "--help",
+        "-i": "--input",
+        "-o": "--output",
+        "-t": "--target",
+        "-b": "--batch-file",
+        "--batch-help": "--help-batch",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        from raw_view.cli_help import batch_help, convert_help, main_help, view_help
+
+        cls.pages = {
+            "main": main_help("0.0.0"),
+            "view": view_help(),
+            "convert": convert_help(),
+            "batch": batch_help(),
+        }
+        cls.all_text = "\n".join(cls.pages.values())
+
+    def _option_strings(self) -> list[str]:
+        import argparse
+
+        import raw_view.__main__ as main_mod
+
+        strings = []
+        for action in main_mod._build_parser()._actions:
+            if isinstance(action, argparse._HelpAction):  # pragma: no cover
+                continue
+            strings.extend(action.option_strings)
+        return strings
+
+    def test_every_option_is_documented_somewhere(self):
+        missing = []
+        for option in self._option_strings():
+            required = self._ALIAS_OF.get(option, option)
+            # Match the token, not a prefix: "--input" must not be satisfied by
+            # "--input-type" appearing in the text.
+            if not re.search(rf"(?<![\w-]){re.escape(required)}(?![\w-])",
+                             self.all_text):
+                missing.append(option)
+        self.assertEqual(
+            missing, [],
+            "these options are accepted by the parser but appear in no help page: "
+            f"{missing}",
+        )
+
+    def test_every_option_appears_on_a_mode_page_not_only_the_overview(self):
+        """The overview alone is not enough: a user reading a mode page needs it."""
+        from raw_view.cli_help import batch_help, convert_help, view_help
+
+        mode_text = "\n".join((view_help(), convert_help(), batch_help()))
+        mode_only = {
+            "--input-type", "--input-yuv-type", "--input-alignment",
+            "--input-endianness", "--input-raw-type", "--raw-type", "--yuv-type",
+            "--alignment", "--endianness", "--source-mode", "--bayer-pattern",
+            "--preview-mode", "--batch-file", "--target",
+        }
+        for option in sorted(mode_only):
+            with self.subTest(option=option):
+                self.assertTrue(
+                    re.search(rf"(?<![\w-]){re.escape(option)}(?![\w-])", mode_text),
+                    f"{option} is not mentioned on any mode page",
+                )
+
+    def test_main_page_does_not_claim_more_than_it_documents(self):
+        """H-3: the old page said "every other option ... is documented on that
+        mode's page" and two options were on no page at all.  The claim is now
+        narrower and this pins it."""
+        main = self.pages["main"]
+        self.assertNotIn("every other option belongs to exactly one mode", main)
+        self.assertIn("the remaining options belong to one mode each", main)
+
+    def test_core_options_are_not_claimed_for_batch(self):
+        """M-1: --width/-height/-offset/-i/-o are not read in batch mode."""
+        main = self.pages["main"]
+        core = main.split("CORE OPTIONS", 1)[1].split("MODE PAGES", 1)[0]
+        self.assertNotIn("accepted by every mode", core)
+        self.assertIn("batch ignores these five", core)
+
+    def test_batch_page_documents_the_required_option(self):
+        self.assertIn("-b, --batch-file", self.pages["batch"])
+        self.assertIn("REQUIRED OPTION", self.pages["batch"])
+
+    def test_input_raw_type_is_documented_as_reserved(self):
+        self.assertIn("--input-raw-type", self.pages["convert"])
+        self.assertIn("reserved", self.pages["convert"])
 
 
 class ModeHelpTests(unittest.TestCase):
@@ -137,9 +287,9 @@ class ModeHelpTests(unittest.TestCase):
 
     def test_view_page_covers_both_input_families(self):
         text = self.view.stdout
-        for token in ("--target RAW", "--target YUV", "--raw-type", "--yuv-type",
-                      "--alignment", "--endianness", "--bayer-pattern",
-                      "--preview-mode", "--offset"):
+        for token in ("-t RAW", "-t YUV", "--input-yuv-type",
+                      "--raw-type", "--yuv-type", "--alignment", "--endianness",
+                      "--bayer-pattern", "--preview-mode", "--offset"):
             with self.subTest(token=token):
                 self.assertIn(token, text)
 
@@ -149,7 +299,13 @@ class ModeHelpTests(unittest.TestCase):
         self.assertIn("YVYU", text)
         self.assertIn("YOnly8", text)
         self.assertIn("RAW10 Packed", text)
-        self.assertIn("Generalise", text)
+        self.assertIn("Try next", text)
+
+    def test_view_page_explains_target_direction(self):
+        """L-2: view's -t names the INPUT; convert's names the OUTPUT."""
+        self.assertIn("-t names what the INPUT is", _unwrapped(self.view.stdout))
+        self.assertIn("-t/--target names what you WRITE",
+                      _unwrapped(self.convert.stdout))
 
     def test_view_page_examples_are_runnable_commands(self):
         text = self.view.stdout
@@ -169,7 +325,9 @@ class ModeHelpTests(unittest.TestCase):
         self.assertIn("YUV -> image", text)
 
     def test_convert_page_has_the_nv16_to_yuyv_example(self):
-        text = self.convert.stdout
+        # Commands are wrapped with a trailing backslash, so compare the joined
+        # text rather than requiring one physical line.
+        text = _unwrapped(self.convert.stdout)
         self.assertIn("--input-type yuv --input-yuv-type NV16 --yuv-type YUYV", text)
 
     def test_convert_page_lists_both_families_and_the_refusals(self):
@@ -186,7 +344,10 @@ class ModeHelpTests(unittest.TestCase):
         self.assertIn("RAW12 Packed", self.convert.stdout)
 
     def test_convert_page_shows_the_yuv_to_png_command(self):
-        self.assertIn("--input-type yuv --input-yuv-type YOnly10", self.convert.stdout)
+        self.assertIn(
+            "--input-type yuv --input-yuv-type YOnly10",
+            _unwrapped(self.convert.stdout),
+        )
 
     # ── batch ──
 
@@ -473,30 +634,87 @@ class ImageReadErrorGuidanceTests(_YuvFixtureTestCase):
         self.assertIn("1296", text)
         self.assertIn("736", text)
 
-    def test_guidance_offers_a_command_that_actually_works(self):
-        """Extract the suggested `view` command and run it."""
+    def _suggested_commands(self, stderr: str) -> list[list[str]]:
+        """Every runnable command the guidance printed, as argv lists."""
+        commands = []
+        for line in stderr.splitlines():
+            stripped = line.strip()
+            if not any(stripped.startswith(p) for p in
+                       ("raw-view ", "raw-view.exe ", "raw-view-cli.exe ",
+                        "python -m raw_view ")):
+                continue
+            # shlex, not str.split: the quoted paths contain spaces on Windows.
+            argv = shlex.split(stripped)
+            if argv[0] == "raw-view":
+                argv = argv[1:]                      # packaged build spelling
+            elif argv[:3] == ["python", "-m", "raw_view"]:
+                argv = argv[3:]                      # source-checkout spelling
+            else:  # pragma: no cover - other packaged names
+                self.fail(f"unexpected executable in suggestion: {argv[0]}")
+            commands.append(argv)
+        return commands
+
+    def test_every_suggested_command_actually_works(self):
+        """Run EVERY command the guidance prints (review H-1).
+
+        The old test executed only the first suggestion, which is how a transcode
+        command that was rejected as ``X -> X is a no-op`` shipped: the guidance
+        filled ``--input-yuv-type`` and ``--yuv-type`` from one variable.
+        """
         source = self._write_yonly10("grey2.bin", 64, 48)
         proc = self._convert_binary_as_image(
             source, "grey2.png", "--target", "YUV", "--yuv-type", "YOnly10",
             "--width", "64", "--height", "48",
         )
         self.assertEqual(proc.returncode, 1)
-        suggestion = next(
-            line.strip() for line in proc.stderr.splitlines()
-            if " view -i " in line and line.strip().endswith("YOnly10 --width 64 --height 48")
+        commands = self._suggested_commands(proc.stderr)
+        self.assertGreaterEqual(len(commands), 3)
+        for argv in commands:
+            with self.subTest(command=" ".join(argv)):
+                # Run in the temp dir: one suggestion uses a relative output
+                # name ("out.yuv"), which must not land in the repository root.
+                result = _run_cli(*argv, cwd=self._tmp)
+                self.assertEqual(
+                    result.returncode, 0,
+                    f"guidance suggested a command that fails:\n"
+                    f"  {' '.join(argv)}\n  {result.stderr.strip()}",
+                )
+
+    def test_transcode_suggestion_uses_a_different_target(self):
+        """H-1 directly: --input-yuv-type and --yuv-type must not be equal."""
+        source = self._write_yonly10("grey3.bin", 64, 48)
+        proc = self._convert_binary_as_image(
+            source, "grey3.png", "--target", "YUV", "--yuv-type", "YOnly10",
+            "--width", "64", "--height", "48",
         )
-        # shlex, not str.split: the quoted paths contain spaces on Windows.
-        argv = shlex.split(suggestion)
-        self.assertIn(argv[0], ("raw-view", "python", "raw-view.exe", "raw-view-cli.exe"))
-        if argv[0] == "raw-view":
-            argv = argv[1:]            # packaged build spelling
-        elif argv[:3] == ["python", "-m", "raw_view"]:
-            argv = argv[3:]            # source-checkout spelling
-        else:                          # pragma: no cover - other packaged names
-            self.fail(f"unexpected executable in suggestion: {argv[0]}")
-        proc2 = _run_cli(*argv)
-        self.assertEqual(proc2.returncode, 0, proc2.stderr)
-        self.assertTrue(os.path.isfile(self._path("grey2.png")))
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("-> YOnly10 is a no-op", proc.stderr)
+        # YOnly has no legal transcode target, so the whole section is absent.
+        self.assertNotIn("another YUV layout", proc.stderr)
+
+    def test_transcode_suggestion_is_present_and_valid_for_a_transcodable_source(self):
+        source = self._write_nv16("nv16src.bin", 64, 48)
+        proc = self._convert_binary_as_image(
+            source, "nv16src.png", "--target", "YUV", "--yuv-type", "NV16",
+            "--width", "64", "--height", "48",
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("another YUV layout", proc.stderr)
+        for argv in self._suggested_commands(proc.stderr):
+            with self.subTest(command=" ".join(argv)):
+                self.assertEqual(
+                    _run_cli(*argv, cwd=self._tmp).returncode, 0, " ".join(argv)
+                )
+
+    def test_no_suggested_command_repeats_the_source_as_target(self):
+        """A no-op pairs check across several source formats."""
+        for fmt in ("NV16", "NV61", "I420", "NV12", "YUYV"):
+            with self.subTest(fmt=fmt):
+                from raw_view.cli_help import _other_yuv_target
+
+                target = _other_yuv_target(fmt)
+                self.assertIsNotNone(target, f"{fmt} should have a legal target")
+                self.assertNotEqual(target.upper(), fmt.upper())
 
     def test_broken_image_does_not_get_binary_advice(self):
         path = self._path("broken.png")
@@ -721,6 +939,482 @@ class LauncherRoutingTests(unittest.TestCase):
                      ["convert", "--help-convert"]):
             with self.subTest(argv=argv):
                 self.assertEqual(launcher.decide_target(argv), "cli")
+
+
+class ModeWordRequiredTests(unittest.TestCase):
+    """H-2: CLI options without a mode word must not launch a blocking GUI."""
+
+    def test_options_that_would_open_the_gui_are_rejected(self):
+        """N-1: the guard keys on "would this open the GUI", so these must fire.
+
+        Every case here has no ``-i``, so ``view``'s default would fall through to
+        ``_run_gui`` and block the terminal.
+        """
+        for argv in (["--width", "800"], ["--width=800"], ["-o", "o.raw"],
+                     ["-t", "RAW"], ["--yuv-type", "NV16"], ["--offset", "16"],
+                     ["-b", "jobs.json"], ["--batch-file", "jobs.json"]):
+            with self.subTest(argv=argv):
+                proc = _run_cli(*argv, timeout=30)
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertIn("a mode word is required", proc.stderr)
+                # Never silently start a window: no Qt import output at all.
+                self.assertNotIn("qt_material", proc.stderr)
+
+    def test_input_without_a_mode_word_still_decodes(self):
+        """N-1 (the false rejection): ``-i`` never opens the GUI.
+
+        ``view`` is the default mode, and ``_run_view_mode`` decodes whenever
+        ``-i`` is present.  Judging by "carries CLI options" rejected this
+        legitimate, historically working call with exit 2.
+        """
+        tmp = tempfile.mkdtemp(prefix="rawview_nomode_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        source = os.path.join(tmp, "f.yuv")
+        Path(source).write_bytes(bytes(64 * 48 * 2))
+        out = os.path.join(tmp, "out.png")
+        proc = _run_cli("-i", source, "-o", out, "-t", "YUV", "--yuv-type", "YUYV",
+                        "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.isfile(out))
+        self.assertNotIn("a mode word is required", proc.stderr)
+
+    def test_batch_file_without_a_mode_word_does_not_hang(self):
+        """N-1 (the leak): ``-b`` is ignored by the view path -> GUI -> hang.
+
+        The guard's own timeout is the assertion: a regression here blocks the
+        caller's terminal, which is exactly what H-2 exists to prevent.
+        """
+        tmp = tempfile.mkdtemp(prefix="rawview_nob_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        proc = _run_cli("-b", os.path.join(tmp, "jobs.json"), timeout=30)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("a mode word is required", proc.stderr)
+
+    def test_valid_mode_word_still_runs(self):
+        """A recognised mode word is never rejected as "missing a mode word".
+
+        ``view`` with no ``-i`` opens the GUI on purpose, so it cannot be run
+        here; its routing is covered by
+        ``launcher.decide_target``. ``convert``/``batch`` fail on their own
+        missing input but must not be caught by the mode-word guard.
+        """
+        for argv in (["convert"], ["batch"]):
+            with self.subTest(argv=argv):
+                proc = _run_cli(*argv)
+                self.assertNotIn("a mode word is required", proc.stderr)
+
+    def test_mode_word_detection_is_positional_and_exact(self):
+        from raw_view.__main__ import _mode_word_from_argv
+
+        self.assertEqual(_mode_word_from_argv(["view", "-i", "a.raw"]), "view")
+        self.assertEqual(_mode_word_from_argv(["--width", "8", "convert"]), "convert")
+        self.assertIsNone(_mode_word_from_argv(["--width", "800"]))
+        self.assertIsNone(_mode_word_from_argv(["a.raw"]))
+        # An option *value* that happens to look like a mode must not count.
+        self.assertIsNone(_mode_word_from_argv(["-i", "view"]))
+
+    def test_print_and_exit_flags_are_allowed_without_a_mode(self):
+        for argv in (["--version"], ["--help"], ["--help-view"],
+                     ["--help-convert"], ["--help-batch"], ["--batch-help"]):
+            with self.subTest(argv=argv):
+                proc = _run_cli(*argv)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_options_before_the_mode_word_still_work(self):
+        """`--width 64 --height 48 view -i ...` is a long-standing spelling."""
+        tmp = tempfile.mkdtemp(prefix="rawview_order_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(tmp, "a.raw")
+        Path(src).write_bytes(b"\x00" * (64 * 48))
+        proc = _run_cli("--width", "64", "--height", "48", "view", "-i", src,
+                        "-o", os.path.join(tmp, "a.png"), "-t", "RAW",
+                        "--raw-type", "RAW8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class DecodeFrameReportingTests(_YuvFixtureTestCase):
+    """M-3: `Frames found:` numbers what was found, and a partial tail warns."""
+
+    def test_reports_found_versus_decoded(self):
+        src = self._path("three.bin")
+        frame = 64 * 48 * 2
+        Path(src).write_bytes(b"\x00" * (frame * 3))
+        proc = _run_cli("convert", "-i", src, "-o", self._path("three.png"),
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Frames found: 3", proc.stdout)
+        self.assertIn("decoding frame 1 only", proc.stdout)
+
+    def test_partial_tail_is_reported_not_silent(self):
+        src = self._path("partial.bin")
+        frame = 64 * 48 * 2
+        Path(src).write_bytes(b"\x00" * (frame * 2) + b"\x00" * 7)
+        proc = _run_cli("convert", "-i", src, "-o", self._path("partial.png"),
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Frames found: 2", proc.stdout)
+        self.assertIn("trailing 7 byte(s)", proc.stdout)
+        self.assertIn("were ignored", proc.stdout)
+
+    def test_exact_multiple_prints_no_warning(self):
+        src = self._path("exact.bin")
+        Path(src).write_bytes(b"\x00" * (64 * 48 * 2))
+        proc = _run_cli("convert", "-i", src, "-o", self._path("exact.png"),
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("trailing", proc.stdout)
+        self.assertNotIn("Warning:", proc.stdout)
+
+
+class ImageOutputSuffixTests(unittest.TestCase):
+    """M-6: the decode/re-arrange decision and its two suffix sets stay aligned."""
+
+    def test_converter_writer_and_decode_decision_agree(self):
+        """Anything we call an image output must be something we can encode.
+
+        ``_imwrite_extension`` returns ``.png`` for *unsupported* suffixes, so the
+        check cannot simply compare to ``.png`` -- that would reject ``.png``
+        itself.  Compare against the extension the writer would actually use for
+        the same suffix instead: a suffix is only safe if the writer keeps it.
+        """
+        from raw_view.cli_help import IMAGE_OUTPUT_SUFFIXES
+        from raw_view.converter import _IMWRITE_FALLBACK_EXT, _imwrite_extension
+
+        for suffix in sorted(IMAGE_OUTPUT_SUFFIXES):
+            with self.subTest(suffix=suffix):
+                written = _imwrite_extension(f"out{suffix}")
+                if suffix == _IMWRITE_FALLBACK_EXT:
+                    self.assertEqual(written, suffix)
+                    continue
+                self.assertNotEqual(
+                    written, _IMWRITE_FALLBACK_EXT,
+                    f"{suffix} is treated as an image output but the writer "
+                    f"falls back to {_IMWRITE_FALLBACK_EXT}",
+                )
+
+    def test_input_suffixes_are_a_superset_of_output_suffixes(self):
+        from raw_view.cli_help import IMAGE_OUTPUT_SUFFIXES, IMAGE_SUFFIXES
+
+        self.assertTrue(IMAGE_OUTPUT_SUFFIXES <= IMAGE_SUFFIXES)
+
+    def test_no_second_copy_of_the_suffix_set_exists(self):
+        """Regression guard for the drift the review found (6 vs 9 entries)."""
+        import raw_view.__main__ as main_mod
+
+        self.assertFalse(
+            hasattr(main_mod, "_IMAGE_OUTPUT_SUFFIXES"),
+            "the suffix set must live in cli_help only; a second copy already "
+            "drifted once",
+        )
+
+
+class NonImageOutputAdviceTests(_YuvFixtureTestCase):
+    """M-6: a same-format pair with a non-image output explains the extension."""
+
+    def test_webp_output_gets_extension_advice(self):
+        src = self._write_yonly10("w.bin", 64, 48)
+        proc = _run_cli("convert", "-i", src, "-o", self._path("out.webp"),
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--yuv-type", "YOnly10", "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("does not end in a writable image extension", proc.stderr)
+        self.assertIn(".png", proc.stderr)
+
+    def test_extensionless_output_gets_the_same_advice(self):
+        src = self._write_yonly10("w2.bin", 64, 48)
+        proc = _run_cli("convert", "-i", src, "-o", self._path("out"),
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--yuv-type", "YOnly10", "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("does not end in a writable image extension", proc.stderr)
+
+    def test_png_output_decodes(self):
+        src = self._write_yonly10("w3.bin", 64, 48)
+        out = self._path("out.png")
+        proc = _run_cli("convert", "-i", src, "-o", out,
+                        "--input-type", "yuv", "--input-yuv-type", "YOnly10",
+                        "--yuv-type", "YOnly10", "--width", "64", "--height", "48")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, "rb") as handle:
+            self.assertEqual(handle.read(8), b"\x89PNG\r\n\x1a\n")
+
+
+class DocsCommandTests(_YuvFixtureTestCase):
+    """S-4: the shell commands in ``docs/cli.md`` must actually run.
+
+    The manual and the help text are maintained separately (help is English and
+    generated, the manual is Chinese prose), so they drift.  Rather than
+    duplicating the manual from the help -- which would lose the prose that makes
+    it usable -- this executes what the manual tells people to type.
+    """
+
+    #: Synopsis lines use *whole-token metavariables* instead of real paths
+    #: (``-i INPUT``).  Matching on tokens, not substrings: a real path may
+    #: legitimately contain "OUTPUT" (``./OUTPUT/x.png``) and must not be
+    #: silently skipped (review N-4).
+    _SYNOPSIS_TOKENS = frozenset({
+        "INPUT", "OUTPUT", "{RAW|YUV}", "[格式参数]", "[参数]", "[文件…]",
+    })
+
+    @classmethod
+    def _is_synopsis(cls, argv: list[str]) -> bool:
+        """Whether this line is a usage synopsis rather than a real command.
+
+        ``raw-view view -i INPUT -o OUTPUT.jpg`` has no runnable file behind it;
+        anything else does, and must be executed.
+        """
+        return any(token in cls._SYNOPSIS_TOKENS for token in argv)
+
+    @classmethod
+    def _commands(cls):
+        """Classify the manual's shell commands.
+
+        Returns ``(runnable, synopsis, expected_failures)``:
+
+        * *runnable* -- real commands that must exit 0;
+        * *synopsis* -- usage lines with ``INPUT``-style metavariables, not run;
+        * *expected_failures* -- the §8 troubleshooting blocks start with the
+          command that *demonstrates* a failure, annotated in the manual with a
+          ``# Error: ...`` comment.  Those are asserted to fail, which is what
+          makes the section's "this is what you will see" claim testable.
+        """
+        import re
+
+        doc = Path(__file__).resolve().parents[1] / "docs" / "cli.md"
+        text = doc.read_text(encoding="utf-8")
+        runnable: list[list[str]] = []
+        synopsis: list[list[str]] = []
+        expected_failures: list[list[str]] = []
+        for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+            # Join backslash continuations, keeping the comment that follows on
+            # the same logical command so "# Error: ..." can be detected.
+            joined = block.replace("\\\n", " ")
+            lines = [l.strip() for l in joined.splitlines() if l.strip()]
+            for index, line in enumerate(lines):
+                if not line.startswith("raw-view "):
+                    continue
+                comment = ""
+                if "  #" in line:
+                    line, comment = line.split("  #", 1)
+                    line = line.strip()
+                # The manual also writes the expected output on the *next* line
+                # as a bare comment ("# Error: failed to read image: ...").
+                if not comment and index + 1 < len(lines):
+                    following = lines[index + 1]
+                    if following.startswith("#"):
+                        comment = following.lstrip("#").strip()
+                try:
+                    argv = shlex.split(line)[1:]
+                except ValueError:  # pragma: no cover - malformed doc line
+                    continue
+                if cls._is_synopsis(argv):
+                    synopsis.append(argv)
+                elif comment.lower().startswith("error"):
+                    expected_failures.append(argv)
+                else:
+                    runnable.append(argv)
+        return runnable, synopsis, expected_failures
+
+    def test_manual_has_executable_examples(self):
+        runnable, _, _ = self._commands()
+        self.assertGreaterEqual(len(runnable), 15)
+
+    def test_issue_section_commands_are_covered(self):
+        """N-3: §8.1 (the user's original report) must be exercised, not skipped."""
+        runnable, _, expected = self._commands()
+        joined = [" ".join(argv) for argv in runnable + expected]
+        self.assertTrue(
+            any("output_0x0b_grey.bin" in line for line in joined),
+            "the §8.1 troubleshooting commands must be executed, not skipped",
+        )
+
+    #: Byte size of each fixture the manual names, at the resolution the manual
+    #: uses for it.  Generous but bounded (~17 MB) so "data too short" can never
+    #: masquerade as "the documented command is wrong".
+    _FIXTURE_SIZES = {
+        "sensor.raw": 1920 * 1080 * 2,        # RAW12 @1920x1080
+        "packed.raw": 1920 * 1080 * 5 // 4,   # RAW10 Packed
+        "frame.yuv": 1920 * 1080 * 2,         # YUYV @1920x1080
+        "grey.bin": 1296 * 736 * 2,           # YOnly10 @1296x736
+        "frame.nv12": 1280 * 720 * 3 // 2,    # NV12 @1280x720
+        "frame.nv16": 1920 * 1080 * 2,        # NV16 @1920x1080
+        "frame.i420": 1920 * 1080 * 3 // 2,   # I420 @1920x1080
+    }
+    #: Image fixtures the manual names (any size decodes).
+    _IMAGE_FIXTURES = ("photo.png", "shot1.png", "shot2.jpg", "shot3.bmp")
+
+    #: Basenames that appear in the manual as *story* paths (§8.1 uses the paths
+    #: from the original bug report).  Each is mapped onto a fixture with the
+    #: right layout, so those commands are executed rather than skipped -- they
+    #: are the most valuable samples in the manual (review N-3).
+    _PATH_ALIASES = {
+        "output_0x0b_grey.bin": 1296 * 736 * 2,   # YOnly10, from the bug report
+        "photo.jpg": 0,                           # image; 0 => written via cv2
+        "jobs.json": None,                        # a minimal valid batch spec
+    }
+
+    def test_every_manual_command_runs(self):
+        import cv2
+
+        for name in self._IMAGE_FIXTURES:
+            cv2.imwrite(self._path(name), np.zeros((48, 64, 3), dtype=np.uint8))
+        for name, size in self._FIXTURE_SIZES.items():
+            Path(self._path(name)).write_bytes(bytes(size))
+        for alias, size in self._PATH_ALIASES.items():
+            if size is None:
+                Path(self._path(alias)).write_text(
+                    json.dumps({"mode": "convert", "target": "RAW",
+                                "raw_type": "RAW8", "width": 8, "height": 8,
+                                "files": []}),
+                    encoding="utf-8",
+                )
+            elif size == 0:
+                cv2.imwrite(self._path(alias), np.zeros((48, 64, 3), dtype=np.uint8))
+            else:
+                Path(self._path(alias)).write_bytes(bytes(size))
+
+        # A `--offset 128` example documents skipping a header, so its input has
+        # to actually have one: 128 bytes followed by two whole frames.
+        offset_fixture = self._path("framewithheader.nv16")
+        Path(offset_fixture).write_bytes(bytes(128) + bytes(1920 * 1080 * 2 * 2))
+
+        known = set(self._IMAGE_FIXTURES) | set(self._FIXTURE_SIZES) | set(self._PATH_ALIASES)
+        runnable, _, expected_failures = self._commands()
+        failures, executed = [], 0
+        for argv in runnable:
+            # Locate the token that follows -i/--input: the --offset example means
+            # to skip a header of that file.
+            input_value_index = None
+            for position, arg in enumerate(argv):
+                if arg in ("-i", "--input") and position + 1 < len(argv):
+                    input_value_index = position + 1
+                    break
+            use_offset_fixture = input_value_index is not None and "--offset" in argv
+
+            resolved = []
+            for position, arg in enumerate(argv):
+                basename = os.path.basename(arg)
+                if use_offset_fixture and position == input_value_index:
+                    resolved.append(offset_fixture)
+                elif basename in known:
+                    resolved.append(self._path(basename))
+                else:
+                    resolved.append(arg)
+            with self.subTest(command=" ".join(argv)):
+                # Run inside the temp dir: the manual's examples use relative
+                # output names, which must not land in the repository root.
+                result = _run_cli(*resolved, cwd=self._tmp)
+                executed += 1
+                if result.returncode != 0:
+                    failures.append((" ".join(argv),
+                                     result.stderr.strip().splitlines()[:1]))
+        self.assertEqual(failures, [], f"documented commands fail: {failures}")
+        # Everything the extractor classifies as runnable is executed; nothing is
+        # silently dropped.  The only lines excluded are whole-token synopses.
+        self.assertEqual(executed, len(runnable))
+
+        # The §8 blocks open with the command that *demonstrates* the failure,
+        # annotated in the manual with "# Error: ...".  Those must fail -- if one
+        # started succeeding, the text explaining it would be wrong.
+        self.assertGreaterEqual(len(expected_failures), 1)
+        for argv in expected_failures:
+            resolved = [
+                self._path(os.path.basename(arg))
+                if os.path.basename(arg) in known else arg
+                for arg in argv
+            ]
+            with self.subTest(expected_failure=" ".join(argv)):
+                result = _run_cli(*resolved, cwd=self._tmp)
+                self.assertEqual(
+                    result.returncode, 1,
+                    f"the manual says this fails but it did not: {' '.join(argv)}",
+                )
+                self.assertIn("Error:", result.stderr)
+
+
+class SingleLineTerminalTests(unittest.TestCase):
+    """L-3: the terminal shows one `Error:` line; the log keeps the detail."""
+
+    def test_failure_prints_one_error_line(self):
+        proc = _run_cli("convert", "-i", "definitely-missing.png", "-o", "o.raw")
+        self.assertEqual(proc.returncode, 1)
+        lines = [l for l in proc.stderr.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 1, proc.stderr)
+        self.assertTrue(lines[0].startswith("Error: "), lines[0])
+        self.assertNotIn("ERROR:", proc.stderr)
+
+    def test_success_keeps_info_progress_lines(self):
+        """N-2: progress lines are wanted on the terminal.
+
+        They are the only feedback during a long conversion, and the file log is
+        not where a user watches a running command.  Raising the console level to
+        WARNING to silence the duplicated ERROR also silenced these, which is why
+        the filter (not the level) is the right mechanism.
+        """
+        tmp = tempfile.mkdtemp(prefix="rawview_log_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(tmp, "a.png")
+        import cv2
+
+        cv2.imwrite(src, np.zeros((8, 8, 3), dtype=np.uint8))
+        proc = _run_cli("convert", "-i", src, "-o", os.path.join(tmp, "a.raw"),
+                        "--raw-type", "RAW8", "--width", "8", "--height", "8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("INFO: Convert:", proc.stderr)
+        self.assertIn("INFO: Convert OK:", proc.stderr)
+        self.assertIn("Converted:", proc.stdout)
+
+    def test_console_handler_keeps_info_but_drops_error(self):
+        """N-2: INFO progress stays on the terminal; only the ERROR duplicate goes.
+
+        Raising the level to WARNING silenced every progress line and made
+        ``RAW_VIEW_LOG_LEVEL`` a no-op for the console, which contradicts
+        ``docs/cli.md``.  The filter -- not the level -- is the right tool.
+        """
+        import logging
+        import tempfile
+
+        import raw_view.logger as log_mod
+
+        tmp = tempfile.mkdtemp(prefix="rawview_log_unit_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        log_mod._initialized = False
+        name = "raw_view_console_filter_test"
+        base = logging.getLogger(name)
+        for handler in list(base.handlers):
+            base.removeHandler(handler)
+            handler.close()
+        logger = log_mod.setup_logger(name=name, log_dir=tmp)
+        console = [h for h in logger.handlers if isinstance(h, logging.StreamHandler)
+                   and not getattr(h, "baseFilename", None)]
+        self.assertTrue(console, "a console handler must exist")
+        handler = console[0]
+        self.assertEqual(handler.level, logging.INFO)
+        self.assertTrue(handler.filter(logging.LogRecord(
+            name, logging.INFO, __file__, 0, "progress", (), None)))
+        self.assertTrue(handler.filter(logging.LogRecord(
+            name, logging.WARNING, __file__, 0, "careful", (), None)))
+        self.assertFalse(handler.filter(logging.LogRecord(
+            name, logging.ERROR, __file__, 0, "boom", (), None)))
+
+    def test_log_level_env_still_controls_the_console(self):
+        """N-2: RAW_VIEW_LOG_LEVEL must keep affecting console output."""
+        tmp = tempfile.mkdtemp(prefix="rawview_n2_env_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        import cv2
+
+        src = os.path.join(tmp, "a.png")
+        cv2.imwrite(src, np.zeros((8, 8, 3), dtype=np.uint8))
+        argv = ["convert", "-i", src, "-o", os.path.join(tmp, "a.raw"),
+                "--raw-type", "RAW8", "--width", "8", "--height", "8"]
+        quiet = _run_cli(*argv, env_extra={"RAW_VIEW_LOG_LEVEL": "WARNING"})
+        noisy = _run_cli(*argv, env_extra={"RAW_VIEW_LOG_LEVEL": "INFO"})
+        self.assertEqual(noisy.returncode, 0, noisy.stderr)
+        self.assertIn("INFO:", noisy.stderr)
+        self.assertNotIn("INFO:", quiet.stderr)
 
 
 if __name__ == "__main__":

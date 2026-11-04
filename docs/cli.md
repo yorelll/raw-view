@@ -19,17 +19,19 @@
 
 ## 目录
 
-1. [先搞清楚三件事](#1-先搞清楚三件事)
-2. [一图看懂参数归属](#2-一图看懂参数归属)
-3. [view：RAW/YUV 二进制 → 图片](#3-viewrawyuv-二进制--图片)
-4. [convert：编码 / 互转 / 解码](#4-convert编码--互转--解码)
-5. [batch：JSON 批量任务](#5-batchjson-批量任务)
-6. [格式总表](#6-格式总表)
-7. [YUV 家族互转：哪些能转、哪些不能](#7-yuv-家族互转哪些能转哪些不能)
-8. [常见错误排查](#8-常见错误排查)
-9. [退出码与输出约定](#9-退出码与输出约定)
+1. [先搞清楚三件事](#s1-start)
+2. [一图看懂参数归属](#s2-params)
+3. [view：RAW/YUV 二进制 → 图片](#s3-view)
+4. [convert：编码 / 互转 / 解码](#s4-convert)
+5. [batch：JSON 批量任务](#s5-batch)
+6. [格式总表](#s6-formats)
+7. [YUV 家族互转：哪些能转、哪些不能](#s7-transcode)
+8. [常见错误排查](#s8-troubleshooting)
+9. [退出码与输出约定](#s9-exit-codes)
 
 ---
+
+<a id="s1-start"></a>
 
 ## 1. 先搞清楚三件事
 
@@ -40,7 +42,7 @@
 | 把 `.raw` / `.bin` / `.yuv` 二进制**看成图**，导出 PNG | `view` | `view -i a.bin -o a.png -t YUV --yuv-type YOnly10 --width 1296 --height 736` |
 | 把 **PNG/JPG 转成** RAW/YUV 二进制 | `convert` | `convert -i p.png -o p.raw -t RAW --raw-type RAW12 --width 1920 --height 1080` |
 | 把 **YUV 换成另一种 YUV 布局**（无损重排） | `convert` | `convert -i f.nv16 -o f.yuyv --input-type yuv --input-yuv-type NV16 --yuv-type YUYV --width 1920 --height 1080` |
-| 把 **YUV 二进制解码成图** | `view` 或 `convert` | 见[第 4.3 节](#43-任务-3yuv-二进制--图片解码) |
+| 把 **YUV 二进制解码成图** | `view` 或 `convert` | 见[第 4.3 节](#s43-yuv-to-image) |
 | 一次处理**一批文件** | `batch` | `batch -b jobs.json` |
 | 打开图形界面 | 无子命令 | `raw-view` |
 
@@ -54,25 +56,41 @@
    或 `--yuv-type`、以及 `--width/--height`。少了任何一个都会读出错误结果或直接
    报错。
 3. **`convert` 的 `--input-type` 默认是 `image`**。拿 `.bin` 直接 `convert` 一定会
-   失败——它去按 PNG/JPG 解码了。见[第 8 节](#8-常见错误排查)第一条。
+   失败——它去按 PNG/JPG 解码了。见[第 8 节](#s8-troubleshooting)第一条。
 
 ---
 
+<a id="s2-params"></a>
+
 ## 2. 一图看懂参数归属
 
-CLI 一共接受 23 个参数，但**大部分只对某一个模式有效**。一级 `--help` 只列核心
-参数，其余按模式分派到二级帮助。
+CLI 一共接受 26 个选项（30 种写法，含短选项与 `--batch-help` 别名），但**大部分
+只对某一个模式有效**。一级 `--help` 只列核心参数，其余按模式分派到二级帮助。
 
-### 2.1 核心参数（所有模式都接受）
+### 2.1 核心参数（view / convert 接受；**batch 不读**）
 
-| 参数 | 含义 |
-|---|---|
-| `-i, --input PATH` | 输入文件 |
-| `-o, --output PATH` | 输出文件；省略则自动命名（各模式规则见下） |
-| `--width N` / `--height N` | 帧宽 / 帧高（含义见上一节第 1 条坑） |
-| `--offset N` | 跳过文件头部的字节数，默认 0 |
-| `-h, --help` / `--version` | 一级帮助 / 版本号 |
-| `--help-view` / `--help-convert` / `--help-batch` | 三个二级帮助 |
+| 参数 | 含义 | batch |
+|---|---|---|
+| `-i, --input PATH` | 输入文件 | ❌ 读 JSON 的 `files[].input` |
+| `-o, --output PATH` | 输出文件；省略则自动命名 | ❌ 读 JSON 的 `files[].output` |
+| `--width N` / `--height N` | 帧宽 / 帧高 | ❌ 读 JSON 的 `width` / `height` |
+| `--offset N` | 跳过文件头部的字节数，默认 0 | ❌ 读 JSON 的 `offset` |
+| `-h, --help` / `--version` | 一级帮助 / 版本号 | ✅ |
+| `--help-view` / `--help-convert` / `--help-batch` | 三个二级帮助 | ✅ |
+
+> **batch 会静默忽略**上表标 ❌ 的五项：它们没有全局含义，每个文件的尺寸/偏移
+> 都由 JSON 条目决定。想让所有文件用同一组尺寸，就写 JSON 的顶层 `width`/`height`。
+
+### 2.1.1 必须写 mode 词
+
+```
+raw-view --width 800          # ❌ exit 2：有 CLI 参数却没有 mode 词
+raw-view view --width 800     # ✅
+raw-view                      # ✅（无参数 = 打开 GUI）
+```
+
+历史上 `--width 800` 会**打开 GUI 并阻塞终端**；现在改为一行错误 + exit 2。
+只有"确实一个 CLI 参数都没给"（裸 `raw-view`）才会进 GUI。
 
 ### 2.2 模式专属参数
 
@@ -97,6 +115,8 @@ CLI 一共接受 23 个参数，但**大部分只对某一个模式有效**。�
 > `--raw-type/--yuv-type/--alignment/--endianness`。两种写法等价。
 
 ---
+
+<a id="s3-view"></a>
 
 ## 3. view：RAW/YUV 二进制 → 图片
 
@@ -150,7 +170,7 @@ raw-view view -i sensor.raw -o gray.png -t RAW \
 
 | 参数 | 取值 | 默认 |
 |---|---|---|
-| `--yuv-type`（或 `--input-yuv-type`） | 见[第 6 节](#6-格式总表) | `YUYV` |
+| `--yuv-type`（或 `--input-yuv-type`） | 见[第 6 节](#s6-formats) | `YUYV` |
 | `--alignment` / `--endianness` | 只影响 `YOnly10/12/14/16` | `msb` / `little` |
 
 几何约束：4:2:2 要求**宽为偶数**；4:2:0 要求**宽高均为偶数**；YOnly 任意正尺寸。
@@ -182,6 +202,8 @@ raw-view view -i a.raw -o a.png -t RAW --raw-type RAW12 \
 ```
 
 ---
+
+<a id="s4-convert"></a>
 
 ## 4. convert：编码 / 互转 / 解码
 
@@ -262,6 +284,8 @@ raw-view convert -i frame.nv16 -o frame.yuyv \
 - 源与目标必须在**同一个色度采样家族**内（见第 7 节）。
 - 单帧 > 512 MB 在**写盘前**拒绝，不会留下半成品。
 
+<a id="s43-yuv-to-image"></a>
+
 ### 4.3 任务 3：YUV 二进制 → 图片（解码）
 
 `--input-type yuv` + **图片扩展名**的输出 = 解码第一帧到图片。
@@ -279,8 +303,14 @@ raw-view view -i grey.bin -o grey.png -t YUV \
     --yuv-type YOnly10 --width 1296 --height 736
 ```
 
-- 不需要 `--target`（会按 YUV 处理），也不需要 `--yuv-type`。
-- 只解码**第一帧**；需要全部帧请用 batch 或先转码。
+- 不需要 `--target`（会按 YUV 处理）。
+- `--yuv-type` **这里不参与判断**（没有"目标布局"这回事）。源布局来自
+  `--input-yuv-type`；**它缺省时回落到 `--yuv-type`**（默认 `YUYV`）——
+  **没有自动检测**，写错布局不会报错，只会解出全错的画面。
+- 只解码**第一帧**；`Frames found:` 会告诉你文件里**能切出几帧**，
+  `(decoding frame 1 only)` 说明只解了第一帧。需要全部帧请用 batch。
+- 尾部不足一帧的字节会被**忽略并打印 `Warning:`**（与任务 2 不同：任务 2 要求
+  整倍数，否则拒绝整个文件）。这是有意的——解码只取第一帧，残帧无害。
 - `--offset`、`--input-alignment`、`--input-endianness` 都生效（与 `view` 一致）。
 
 ### 4.4 convert 的默认值与回落关系
@@ -295,14 +325,27 @@ raw-view view -i grey.bin -o grey.png -t YUV \
 
 ---
 
+<a id="s5-batch"></a>
+
 ## 5. batch：JSON 批量任务
 
 ```bash
 raw-view batch -b jobs.json
+raw-view batch --batch-file jobs.json     # 同一个选项的全名
 ```
+
+`-b, --batch-file` 是**唯一必需**的命令行选项；其余一切都在 JSON 里。
+
+> **`--width` / `--height` / `--offset` / `-i` / `-o` 在 batch 下不生效**，
+> 且**不会报错**——每个文件的尺寸与偏移来自 JSON 的全局键或条目键。要让一批
+> 文件共用尺寸，写 JSON 顶层的 `width`/`height`/`offset`。
 
 JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾逗号**（会
 `JSONDecodeError`）。`--help-batch` 里给出的三段示例都是合法 JSON，可直接复制。
+
+**什么时候用 batch、什么时候用 shell 循环**：只有一个固定命令、逐文件套用时，
+shell 循环（`for f in *.png; do raw-view convert ... "$f"; done`）更简单；当每个
+文件的参数不同（尺寸/格式/mode 混排）、或需要 glob 展开与自动命名时，用 batch。
 
 ### 5.1 最小可用示例
 
@@ -411,6 +454,8 @@ JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾�
 
 ---
 
+<a id="s6-formats"></a>
+
 ## 6. 格式总表
 
 ### 6.1 RAW
@@ -443,6 +488,8 @@ JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾�
 
 ---
 
+<a id="s7-transcode"></a>
+
 ## 7. YUV 家族互转：哪些能转、哪些不能
 
 ### 7.1 能转的方向（共 42 个）
@@ -453,6 +500,8 @@ JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾�
 |---|---|---|
 | 4:2:2 | `YUYV` `UYVY` `YVYU` `VYUY` `NV16` `NV61` | 6 × 5 = 30 |
 | 4:2:0 | `I420` `YV12` `NV12` `NV21` | 4 × 3 = 12 |
+
+<a id="s72-refused"></a>
 
 ### 7.2 不能转的方向与原因
 
@@ -476,6 +525,8 @@ JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾�
 - 源和目标在同一家族内单帧字节数相同，这也是「无损」的由来。
 
 ---
+
+<a id="s8-troubleshooting"></a>
 
 ## 8. 常见错误排查
 
@@ -519,13 +570,23 @@ YUV 源只能转成 YUV 或图片。去掉 `-t RAW`（转码时 `--target` 可�
 同格式互转没有意义。要么换 `--yuv-type`，要么（如果本意是解码）把输出扩展名
 改成 `.png`。
 
+**输出扩展名决定走哪条路**：`.png/.jpg/.jpeg/.bmp/.tif/.tiff` → 解码成图片；
+其它（含 `.webp`、无扩展名）→ 当作 YUV→YUV 重排。后者若你本意是解码，会看到这
+条 no-op 错误，并在下面附一句 `... does not end in a writable image extension`。
+
+### 8.3.1 `Error: a mode word is required: raw-view {view|convert|batch} ...`
+
+命令里给了 CLI 参数（`--width` / `-i` / `-t` 等）但**没写 mode 词**。历史上这会
+打开 GUI 并阻塞终端；现在直接报错并返回 **2**。加上 `view` / `convert` / `batch`
+即可；只想开 GUI 就敲一个裸 `raw-view`。
+
 ### 8.4 `Error: ... is YUV 4:0:0 (luma only, no chroma planes)`
 
-YOnly ↔ 4:2:x 不能无损互转，见[第 7.2 节](#72-不能转的方向与原因)。
+YOnly ↔ 4:2:x 不能无损互转，见[第 7.2 节](#s72-refused)。
 
 ### 8.5 `Error: ... changes chroma sampling`
 
-跨 4:2:2 / 4:2:0 家族，见[第 7.2 节](#72-不能转的方向与原因)。先解码成图片。
+跨 4:2:2 / 4:2:0 家族，见[第 7.2 节](#s72-refused)。先解码成图片。
 
 ### 8.6 `Error: input size N bytes is not an integer multiple of the M-byte ... frame`
 
@@ -561,16 +622,20 @@ batch JSON 里有 `//` 注释或尾逗号。删掉它们（或用 `--help-batch`
 
 ---
 
+<a id="s9-exit-codes"></a>
+
 ## 9. 退出码与输出约定
 
 | 退出码 | 含义 |
 |---|---|
 | `0` | 成功（batch 表示全部条目成功） |
 | `1` | 运行失败（读不到文件、格式不支持、尺寸非法等） |
-| `2` | 参数用法错误（argparse：未知参数、缺参数、非法枚举值） |
+| `2` | 参数用法错误（argparse 的未知/缺参数/非法枚举值；以及**给了 CLI 参数却漏写 mode 词**） |
 
-- **失败时终端只打一行 `Error: ...`**，完整 traceback 写入日志文件
+- **失败时报错本身只有一行 `Error: ...`**（其后可能跟随多行可复制的修复建议；
+  ERROR 级日志不重复打印到终端），完整 traceback 写入日志文件
   （`%LOCALAPPDATA%\raw-view\logs\raw-view.log`，可用 `RAW_VIEW_LOG_DIR` 重定向）。
+  `INFO:` 进度行是否出现在终端，由 `RAW_VIEW_LOG_LEVEL` 决定（默认会打印）。
 - `RAW_VIEW_LOG_LEVEL` 控制控制台/文件日志级别。
 - `RAW_VIEW_NO_GUI=1` 由 `raw-view-cli.exe` 自动设置：该可执行文件永远不会弹窗，
   需要 GUI 的调用会直接报 usage 并返回 2。

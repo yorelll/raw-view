@@ -303,9 +303,29 @@ def setup_logger(
     except OSError:
         pass  # Non-critical — silently skip file logging if dir is unwritable
 
-    # -- Console handler (INFO) --
+    # -- Console handler (INFO, minus the duplicated ERRORs) --
+    #
+    # Progress lines (``INFO: Convert: a.png -> a.raw (...)``) are wanted on the
+    # terminal: they are the only feedback during a long conversion, and
+    # ``RAW_VIEW_LOG_LEVEL`` is documented to control *both* the console and the
+    # file handler, which only holds if this stays at INFO.  Raising the level
+    # to WARNING silenced every progress line and made the environment variable a
+    # no-op for the console.
+    #
+    # What must not reach the terminal is the *ERROR* duplicate: a rejected input
+    # is logged with ``logger.error`` so it stays visible at ERROR severity in the
+    # file, but the CLI already printed the same sentence as ``Error: ...``.
+    # ``docs/cli.md`` promises "失败时终端只打一行 Error: ..."; the filter below
+    # is what makes that true without giving up the progress lines.
+    class _ConsoleFilter(logging.Filter):
+        """Drop ERROR records -- the CLI prints those itself (see module docs)."""
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.levelno != logging.ERROR
+
     ch = logging.StreamHandler(sys.stderr)
     ch.setLevel(logging.INFO)
+    ch.addFilter(_ConsoleFilter())
     ch.setFormatter(logging.Formatter(
         "%(levelname)s: %(message)s",
     ))
