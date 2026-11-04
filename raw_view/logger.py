@@ -136,6 +136,13 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         try:
             if self.shouldRollover(record):
                 try:
+                    if os.environ.get("RAW_VIEW_TEST_FAIL_ROLLOVER"):
+                        # Test-only: reproduce the Windows "file in use" failure
+                        # on every platform.  POSIX renames an open file happily,
+                        # so an end-to-end test cannot create this condition
+                        # otherwise -- and skipping it on CI is how the Linux job
+                        # silently lost coverage.
+                        raise OSError(32, "injected rollover failure")
                     self.doRollover()
                 except OSError as exc:
                     self._note_failure(

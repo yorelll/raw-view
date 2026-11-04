@@ -1204,7 +1204,14 @@ class LogRotationFailureTests(unittest.TestCase):
     """
 
     def _locked_handler(self, log_dir: str):
-        """A handler whose log file is held open by *another* handle."""
+        """A handler whose next write must fail to roll over.
+
+        The failure is forced by patching ``doRollover`` rather than by holding
+        an open handle: on POSIX a rename over an open file succeeds, so a
+        handle-based "lock" only reproduces the bug on Windows.  The exception
+        type is the one Windows raises (``WinError 32`` is an ``OSError``), so
+        the production path exercised here is identical on every platform.
+        """
         from raw_view.logger import SafeRotatingFileHandler
 
         os.makedirs(log_dir, exist_ok=True)
@@ -1212,11 +1219,12 @@ class LogRotationFailureTests(unittest.TestCase):
         # Bigger than maxBytes so the very next record tries to roll over.
         with open(path, "wb") as f:
             f.write(b"x" * (8 * 1024))
-        holder = open(path, "rb+")  # no delete sharing on Windows -> rename fails
         handler = SafeRotatingFileHandler(
             path, maxBytes=1024, backupCount=1, encoding="utf-8"
         )
-        self.addCleanup(holder.close)
+        handler.doRollover = mock.Mock(
+            side_effect=OSError(32, "The process cannot access the file")
+        )
         self.addCleanup(handler.close)
         return handler
 
@@ -1274,8 +1282,16 @@ class LogRotationFailureTests(unittest.TestCase):
         ))
         self.assertEqual(logging.raiseExceptions, before)
 
-    def test_cli_stderr_stays_one_line_with_a_locked_log(self):
-        """End-to-end: the exact combination that used to print stack traces."""
+    def test_cli_stderr_stays_one_line_when_rotation_fails(self):
+        """End-to-end: a failing rollover must not print stack traces.
+
+        A lock-based reproduction (holding the file open) only works on Windows:
+        POSIX happily renames an open file, so the rollover succeeds and there is
+        nothing to degrade.  The child process therefore arms the failure through
+        ``RAW_VIEW_TEST_FAIL_ROLLOVER``, which makes the handler raise the same
+        ``OSError`` Windows raises.  That keeps the exercised path identical on
+        every platform instead of skipping the test on CI.
+        """
         log_dir = tempfile.mkdtemp(prefix="rv-rotcli-")
         work = tempfile.mkdtemp(prefix="rv-rotcli-w-")
         self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
@@ -1287,15 +1303,11 @@ class LogRotationFailureTests(unittest.TestCase):
         empty = os.path.join(work, "empty.raw")
         open(empty, "wb").close()
 
-        holder = open(path, "rb+")
-        try:
-            proc = _run_cli_env(
-                {"RAW_VIEW_LOG_DIR": log_dir},
-                "view", "-i", empty, "-o", os.path.join(work, "o.png"),
-                "--width", "64", "--height", "64",
-            )
-        finally:
-            holder.close()
+        proc = _run_cli_env(
+            {"RAW_VIEW_LOG_DIR": log_dir, "RAW_VIEW_TEST_FAIL_ROLLOVER": "1"},
+            "view", "-i", empty, "-o", os.path.join(work, "o.png"),
+            "--width", "64", "--height", "64",
+        )
 
         self.assertEqual(proc.returncode, 1)
         self.assertNotIn("Logging error", proc.stderr)
