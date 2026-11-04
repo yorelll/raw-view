@@ -28,6 +28,8 @@ GitHub-Actions Windows runners.
 
 from __future__ import annotations
 
+import os
+
 __all__ = [
     "BATCH_EXAMPLES",
     "image_read_guidance",
@@ -38,6 +40,7 @@ __all__ = [
     "show_convert_help",
     "show_main_help",
     "show_view_help",
+    "suggested_prog",
     "view_help",
     "convert_help",
     "batch_help",
@@ -172,6 +175,28 @@ def looks_like_binary(path: str) -> bool:
 # ── Diagnostic text ───────────────────────────────────────────────────
 
 
+def suggested_prog() -> str:
+    """How this process was invoked, for the commands printed in an error.
+
+    A packaged build is ``raw-view.exe`` / ``raw-view-cli.exe`` and is meant to
+    be typed by that name; a source checkout has no such command on PATH, so the
+    suggestion must be ``python -m raw_view``.  Printing a command the reader
+    cannot run would defeat the point of printing it.
+    """
+    argv0 = ""
+    try:
+        import sys
+
+        argv0 = sys.argv[0] or ""
+    except Exception:  # pragma: no cover - defensive, embedded hosts
+        pass
+    if not argv0 or argv0.endswith(("__main__.py", "-m")):
+        return "python -m raw_view"
+    name = os.path.basename(argv0)
+    # `raw-view.exe`, `raw-view`, `raw-view-cli.exe` all read correctly.
+    return name or "raw-view"
+
+
 def image_read_guidance(
     input_path: str,
     output_path: str | None,
@@ -181,6 +206,7 @@ def image_read_guidance(
     *,
     yuv_type: str = "YOnly10",
     raw_type: str = "RAW12",
+    prog: str | None = None,
 ) -> str:
     """The full ``Error:`` block printed when an image input cannot be decoded.
 
@@ -190,6 +216,7 @@ def image_read_guidance(
     block names that cause and prints runnable commands, with the user's own
     paths, dimensions and format names already filled in.
     """
+    prog = prog or suggested_prog()
     out = output_path or "out.png"
     lines = [f"Error: {error}", ""]
     if not looks_like_binary(input_path):
@@ -208,24 +235,24 @@ def image_read_guidance(
         "",
         "  YUV binary -> PNG (decode; `view` and `convert` both work):",
         (
-            f'    raw-view view -i "{input_path}" -o "{out}" '
+            f'    {prog} view -i "{input_path}" -o "{out}" '
             f"-t YUV --yuv-type {yuv_type} --width {width} --height {height}"
         ),
         (
-            f'    raw-view convert -i "{input_path}" -o "{out}" '
+            f'    {prog} convert -i "{input_path}" -o "{out}" '
             f"--input-type yuv --input-yuv-type {yuv_type} "
             f"--width {width} --height {height}"
         ),
         "",
         "  RAW binary -> PNG (decode):",
         (
-            f'    raw-view view -i "{input_path}" -o "{out}" '
+            f'    {prog} view -i "{input_path}" -o "{out}" '
             f"-t RAW --raw-type {raw_type} --width {width} --height {height}"
         ),
         "",
         "  YUV binary -> another YUV layout (lossless byte rearrangement):",
         (
-            f'    raw-view convert -i "{input_path}" -o out.yuv '
+            f'    {prog} convert -i "{input_path}" -o out.yuv '
             f"--input-type yuv --input-yuv-type {yuv_type} --yuv-type YUYV "
             f"--width {width} --height {height}"
         ),

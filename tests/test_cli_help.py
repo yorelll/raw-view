@@ -483,13 +483,17 @@ class ImageReadErrorGuidanceTests(_YuvFixtureTestCase):
         self.assertEqual(proc.returncode, 1)
         suggestion = next(
             line.strip() for line in proc.stderr.splitlines()
-            if line.strip().startswith("raw-view view -i ")
+            if " view -i " in line and line.strip().endswith("YOnly10 --width 64 --height 48")
         )
         # shlex, not str.split: the quoted paths contain spaces on Windows.
         argv = shlex.split(suggestion)
-        self.assertEqual(argv[0], "raw-view")
-        argv = argv[1:]
-        # ``raw-view`` -> ``python -m raw_view`` on a source checkout.
+        self.assertIn(argv[0], ("raw-view", "python", "raw-view.exe", "raw-view-cli.exe"))
+        if argv[0] == "raw-view":
+            argv = argv[1:]            # packaged build spelling
+        elif argv[:3] == ["python", "-m", "raw_view"]:
+            argv = argv[3:]            # source-checkout spelling
+        else:                          # pragma: no cover - other packaged names
+            self.fail(f"unexpected executable in suggestion: {argv[0]}")
         proc2 = _run_cli(*argv)
         self.assertEqual(proc2.returncode, 0, proc2.stderr)
         self.assertTrue(os.path.isfile(self._path("grey2.png")))
@@ -628,6 +632,42 @@ class LooksLikeBinaryTests(unittest.TestCase):
         from raw_view.cli_help import looks_like_binary
 
         self.assertFalse(looks_like_binary(os.path.join(self._tmp, "missing.xyz")))
+
+
+class SuggestedProgTests(unittest.TestCase):
+    """The printed commands must name an executable the reader can actually run."""
+
+    def test_source_invocation_suggests_python_dash_m(self):
+        from unittest import mock
+
+        from raw_view.cli_help import suggested_prog
+
+        with mock.patch.object(sys, "argv", [".../raw_view/__main__.py"]):
+            self.assertEqual(suggested_prog(), "python -m raw_view")
+
+    def test_packaged_build_suggests_its_own_name(self):
+        from unittest import mock
+
+        from raw_view.cli_help import suggested_prog
+
+        for argv0, expected in (
+            ("C:/bundle/raw-view-cli.exe", "raw-view-cli.exe"),
+            ("C:/bundle/raw-view.exe", "raw-view.exe"),
+            ("/usr/local/bin/raw-view", "raw-view"),
+        ):
+            with self.subTest(argv0=argv0):
+                with mock.patch.object(sys, "argv", [argv0]):
+                    self.assertEqual(suggested_prog(), expected)
+
+    def test_guidance_uses_the_given_prog(self):
+        from raw_view.cli_help import image_read_guidance
+
+        text = image_read_guidance(
+            "x.bin", "x.png", 8, 8, "failed to read image: x.bin",
+            prog="raw-view-cli.exe",
+        )
+        self.assertIn("raw-view-cli.exe view -i", text)
+        self.assertNotIn("python -m raw_view", text)
 
 
 class HelpIsAsciiTests(unittest.TestCase):
