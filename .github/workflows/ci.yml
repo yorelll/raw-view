@@ -21,6 +21,10 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 测试套件偶发卡死（Qt 事件循环里某次 processEvents() 不返回）。GitHub 默认
+    # 超时是 360 分钟，卡住的 job 会白占 runner 一个半小时以上；这里收到 20 分钟，
+    # 正常全量约 3–4 分钟，留足余量。
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +58,10 @@ jobs:
           pip install -r requirements.txt -c constraints.txt
 
       - name: Run test suite (unittest)
-        run: python -m unittest discover -s tests -q
+        # 看门狗：套件偶发卡死（Qt processEvents() 不返回），此时进程不会再输出
+        # 任何东西，普通超时只能看到"卡住"而拿不到现场。10 分钟后打印所有线程的
+        # Python 栈再退出（典型耗时 3–4 分钟，10 分钟足够区分"慢"与"卡死"）。
+        run: python tools/ci_test_watchdog.py
 
       - name: Smoke test CLI --batch-help
         run: python -m raw_view --batch-help
