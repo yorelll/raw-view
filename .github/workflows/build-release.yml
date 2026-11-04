@@ -230,18 +230,46 @@ jobs:
       - name: Smoke test CLI executable
         run: .\dist\raw-view\raw-view-cli.exe --batch-help
 
-      # 冒烟：launcher 转发（redirection 形式在 CI 里稳定可断言）。
+      # 冒烟：launcher 转发。两条断言都不能用 pwsh 的默认方式：
+      #
+      # 1) 文件重定向必须走 cmd。PowerShell 7 对 **GUI 子系统**（PE subsystem=2）
+      #    的进程不等它结束就返回，随即拆掉自己建的 stdout 重定向管道；launcher
+      #    是 --windowed 构建（必须如此，否则双击会闪黑框），于是
+      #    `raw-view.exe --version > f` 在 pwsh 下得到空文件，退出时抛
+      #    `OSError: [Errno 22]`。同一命令在 cmd 下正常，换成 console 子系统的
+      #    raw-view-cli.exe 也正常 —— **这是 pwsh 的平台行为，不是产品缺陷**
+      #    （详见 docs/release_exe.md 的「已知限制」）。
+      # 2) `$LASTEXITCODE` 只会由 PowerShell 等待过的原生命令设置，未等待的 GUI
+      #    子系统进程不会。退出码改用同步等待的 cli.exe 断言。
+      #
+      # 版本串按 argparse 的 %(prog)s 实际输出校验（`python -m raw_view x.y.z`，
+      # 下划线），不硬编码 `raw-view`（连字符）。
       - name: Smoke test launcher forwarding
         shell: pwsh
         run: |
-          .\dist\raw-view\raw-view.exe --version > version.txt
-          Get-Content version.txt
-          if (-not (Select-String -Path version.txt -Pattern 'raw-view' -Quiet)) {
-            throw "launcher --version produced no output"
+          # 1) 产物可运行 + 转发到 CLI：用 cmd 做文件重定向（pwsh 下不可靠，见上）。
+          cmd /c ".\dist\raw-view\raw-view.exe --version > version.txt"
+          $version = (Get-Content -Raw version.txt).Trim()
+          Write-Host "launcher --version -> [$version]"
+          if (-not $version) { throw "launcher --version produced no output" }
+          if ($version -notmatch '\d+\.\d+\.\d+') {
+            throw "launcher --version did not report a version: [$version]"
           }
-          # 裸文件名必须是 usage 错误（rc=2），绝不能启动 GUI 阻塞 CI。
-          .\dist\raw-view\raw-view.exe bare.raw 2>$null
-          if ($LASTEXITCODE -ne 2) { throw "bare filename should exit 2, got $LASTEXITCODE" }
+
+          # 2) 管道转发（pwsh 下管道不会被提前拆除，可用）。
+          $helpLine = cmd /c ".\dist\raw-view\raw-view.exe -h" | Select-String -Pattern 'batch-help'
+          if (-not $helpLine) { throw "launcher -h produced no output" }
+
+          # 3) 裸文件名必须报 usage（rc=2），绝不能启动 GUI 阻塞 CI。
+          #    cli.exe 是 console 子系统，同步等待，$LASTEXITCODE 可靠（区别于
+          #    上面的 launcher）；launcher 的分流正确性由 tests/test_launcher.py
+          #    的 26 个用例覆盖。不要用 `& echo %errorlevel%`：PowerShell 会先把
+          #    %errorlevel% 当环境变量展开成空/0。
+          cmd /c ".\dist\raw-view\raw-view-cli.exe bare.raw 2>nul"
+          Write-Host "raw-view-cli.exe bare.raw -> exit $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 2) {
+            throw "bare filename should exit 2, got $LASTEXITCODE"
+          }
 
       - name: Determine version from tag
         id: version

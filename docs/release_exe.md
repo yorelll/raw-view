@@ -99,6 +99,75 @@ GUI 子系统写不了终端，Console 子系统双击时弹黑框，一个二�
 
 ---
 
+## 0.7 已知限制：PowerShell 7 下对 `raw-view.exe` 做文件重定向会得到空文件
+
+**这是 PowerShell 的平台行为，不是 raw-view 的缺陷。请不要据此修改 `launcher.py`。**
+
+### 现象
+
+在 PowerShell 7 里执行文件重定向：
+
+```powershell
+.\raw-view.exe --version > out.txt      # out.txt 是 0 字节
+```
+
+同时退出时可能看到：
+
+```
+Exception ignored in: <_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>
+OSError: [Errno 22] Invalid argument
+```
+
+换成 `cmd` 就完全正常：
+
+```cmd
+raw-view.exe --version > out.txt        :: 26 字节，内容正确
+```
+
+### 原因
+
+1. Windows 由**被启动的那个 exe** 的 PE subsystem 决定控制台行为。`raw-view.exe`
+   是 **GUI 子系统**（subsystem=2）——必须如此，否则双击时会闪一个黑框。
+2. **PowerShell 7 不等待 GUI 子系统的进程**。实测：一个 `sleep 2` 的 GUI 子系统
+   程序，pwsh 在 ~136 ms 就返回了；同样内容的 console 子系统程序要等满 ~2342 ms。
+3. pwsh 返回时**立即拆掉自己建的 stdout 重定向管道**。launcher 之后任何写 stdout
+   的动作都命中一条已断开的管道，于是 `WriteFile` 返回 `ERROR_NO_DATA (232)`，
+   Python 层表现为 `OSError: [Errno 22]`。
+
+实测证据（在 GUI 子系统进程内直接读句柄）：
+
+| 启动方式 | stdout 句柄类型 | 写入结果 |
+|---|---|---|
+| `cmd` + 重定向 | `FILE_TYPE_DISK (1)` | 成功 |
+| `pwsh` + 重定向 | `FILE_TYPE_PIPE (3)` | `ERROR_NO_DATA (232)`，重试 6 次 / 3 秒均失败 |
+
+> 附带说明：`$LASTEXITCODE` 同理——只有 PowerShell **等待过**的原生命令才会设置它，
+> 未等待的 GUI 子系统进程不会，所以 pwsh 里读它是空值。
+
+### 正确用法
+
+| 需求 | 写法 |
+|---|---|
+| 抓输出到文件 | 用 `cmd`：`cmd /c "raw-view.exe --version > out.txt"`，或直接用 **`raw-view-cli.exe`** |
+| 管道处理 | **`pwsh` 下可用**（管道不会被提前拆除）：`raw-view.exe -h \| Select-String batch-help` |
+| 交互式终端直接看输出 | 正常可用（launcher 会 `AttachConsole` 到父终端） |
+| 脚本/CI 里取退出码 | 用 **`raw-view-cli.exe`**（console 子系统，同步等待，`$LASTEXITCODE` 可靠） |
+
+`raw-view-cli.exe` 是 console 子系统，pwsh 会正常等待它，因此重定向、管道、退出码
+全部可靠。**在自动化脚本里优先用它。**
+
+### 对 CI 的影响
+
+`.github/workflows/build-release.yml` 的 launcher 冒烟步骤因此：
+- 文件重定向走 `cmd /c`；
+- 管道断言保留在 pwsh（可用）；
+- 退出码（`bare.raw` → 2）改用 `raw-view-cli.exe` 断言。
+
+launcher 自身的参数分流正确性由 `tests/test_launcher.py`（26 个用例）覆盖，
+不依赖这条冒烟测试。
+
+---
+
 ## 1. 准备环境
 
 ```bash
