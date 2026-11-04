@@ -129,7 +129,8 @@ raw-view.exe --version > out.txt        :: 26 字节，内容正确
 1. Windows 由**被启动的那个 exe** 的 PE subsystem 决定控制台行为。`raw-view.exe`
    是 **GUI 子系统**（subsystem=2）——必须如此，否则双击时会闪一个黑框。
 2. **PowerShell 7 不等待 GUI 子系统的进程**。实测：一个 `sleep 2` 的 GUI 子系统
-   程序，pwsh 在 ~136 ms 就返回了；同样内容的 console 子系统程序要等满 ~2342 ms。
+   程序，pwsh 在约 0.2 秒就返回了；同样内容的 console 子系统程序要等满约 2 秒。
+   （具体数字随机器负载浮动，两个数量级的差异在多次测量中稳定成立。）
 3. pwsh 返回时**立即拆掉自己建的 stdout 重定向管道**。launcher 之后任何写 stdout
    的动作都命中一条已断开的管道，于是 `WriteFile` 返回 `ERROR_NO_DATA (232)`，
    Python 层表现为 `OSError: [Errno 22]`。
