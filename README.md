@@ -60,173 +60,45 @@ python -m raw_view
 python -m raw_view view    # same as above
 ```
 
-### CLI View 模式（RAW/YUV → PNG/JPEG）
+### 命令行（CLI）
+
+命令行有三个模式：`view`（RAW/YUV 二进制 → PNG/JPEG）、`convert`（图片 → RAW/YUV、
+YUV 家族无损互转、YUV → 图片）、`batch`（按 JSON 批量执行）。完整手册见
+**[`docs/cli.md`](docs/cli.md)**——包含每个模式的全部参数、可复制的完整示例、YUV
+家族互转格式表、以及常见错误排查。
 
 ```bash
-# RAW → PNG，指定所有参数
-python -m raw_view view \
-    -i input.raw -o output.png \
-    --target RAW \
-    --raw-type RAW12 \
-    --width 1920 --height 1080 \
-    --alignment msb \
-    --endianness little \
-    --preview-mode "Bayer Color" \
-    --bayer-pattern RGGB
-
-# YUV → JPEG
-python -m raw_view view \
-    -i input.yuv -o output.jpg \
-    --target YUV \
-    --yuv-type NV12 \
-    --width 1280 --height 720
-
-# 仅指定输入，自动生成输出到 view_out/ 目录
-python -m raw_view view -i input.raw --target RAW --width 1920 --height 1080
-
-# 灰度预览输出
-python -m raw_view view -i input.raw -o gray.png --target RAW --preview-mode Grayscale
-
-# 无 -i 时启动交互式 GUI（可同时打开文件）
-python -m raw_view view
-python -m raw_view view file1.raw file2.png
+raw-view --help            # 一级菜单：三个模式 + 核心参数 + 二级帮助入口
+raw-view --help-view       # view 模式完整用法 + 示例
+raw-view --help-convert    # convert 模式完整用法 + 示例
+raw-view --help-batch      # batch JSON 格式 + 可直接复制的示例（--batch-help 为别名）
 ```
 
-### CLI 转换模式（Image → RAW/YUV）
+几条最常用的命令：
 
 ```bash
-# 单文件转换（所有参数）
-python -m raw_view convert \
-    -i image.png \
-    -o output.raw \
-    --target RAW \
-    --raw-type RAW12 \
-    --width 1920 --height 1080 \
-    --alignment msb \
-    --endianness little \
-    --source-mode bayer \
-    --bayer-pattern RGGB
+# RAW/YUV 二进制 → PNG
+raw-view view -i grey.bin -o grey.png -t YUV --yuv-type YOnly10 --width 1296 --height 736
+raw-view view -i sensor.raw -o sensor.png -t RAW --raw-type RAW12 --width 1920 --height 1080 --alignment msb --bayer-pattern RGGB
 
-# 转换为 YUV
-python -m raw_view convert \
-    -i image.png \
-    --target YUV \
-    --yuv-type NV12 \
-    --width 640 --height 480
+# 图片 → RAW/YUV（--width/--height 是**输出**尺寸，会缩放；默认 640x480）
+raw-view convert -i photo.png -o photo.raw -t RAW --raw-type RAW12 --width 1920 --height 1080
+raw-view convert -i photo.png -o photo.yuv -t YUV --yuv-type NV12 --width 1280 --height 720
 
-# 仅指定输入，自动生成输出到 convert_out/ 目录
-python -m raw_view convert -i image.jpg --target RAW --width 1920 --height 1080
+# YUV 家族无损互转（--width/--height 是**源帧**尺寸，必填，不缩放）
+raw-view convert -i frame.nv16 -o frame.yuyv --input-type yuv     --input-yuv-type NV16 --yuv-type YUYV --width 1920 --height 1080
 
-# 灰度模式 + 大端
-python -m raw_view convert -i image.png --target RAW --source-mode gray --endianness big
+# YUV 二进制 → PNG（输出是图片扩展名即为解码；与上面的 view 写法等价）
+raw-view convert -i grey.bin -o grey.png --input-type yuv --input-yuv-type YOnly10     --width 1296 --height 736
+
+# 批量
+raw-view batch -b jobs.json
 ```
 
-### YUV 家族无损互转（`--input-type yuv`）
-
-YUV 4:2:2 / 4:2:0 家族内部**只重排字节、不重新采样、不 resize**，因此可逐字节
-还原；源帧尺寸仅用于解析文件布局。
-
-```bash
-# 4:2:2 家族：NV16 -> YUYV（4x2 源帧，2 帧文件全部保留）
-python -m raw_view convert -i frame.nv16 --input-type yuv \
-    --input-yuv-type NV16 --yuv-type YUYV \
-    --width 4 --height 4 -o frame.yuyv
-
-# 4:2:0 家族：I420 -> NV12
-python -m raw_view convert -i frame.i420 --input-type yuv \
-    --input-yuv-type I420 --yuv-type NV12 \
-    --width 1920 --height 1080
-```
-
-支持的方向共 **42 个**（同家族内两两互转）：
-
-| 家族 | 格式 | 方向数 |
-|---|---|---|
-| 4:2:2 | YUYV / UYVY / YVYU / VYUY / NV16 / NV61 | 6 × 5 = 30 |
-| 4:2:0 | I420 / YV12 / NV12 / NV21 | 4 × 3 = 12 |
-
-- `--width` / `--height` 在 `--input-type yuv` 下**必填**，表示**源帧尺寸**（不会
-  被 resize）。缺省时直接报错，绝不按 640×480 猜测解析布局。
-- 4:2:2 家族要求宽为偶数；4:2:0 家族要求宽高均为偶数。
-- 文件字节数必须是单帧字节数的**整数倍**，否则整份文件拒绝（不静默截断、不做
-  “只转第一帧”）；多帧文件逐帧转换并保留全部帧。
-- **拒绝**的方向会给出明确原因：4:2:2 ↔ 4:2:0（色度重采样，有损）、YUV ↔ RAW
-  （预留）、YOnly/4:0:0（无 U/V 平面）。
-- `--target` 可省略（自动为 YUV）；显式 `--target RAW` 会报错。
-- 单帧超过 512MB 在写盘前拒绝（源/目标两侧都查）。
-
-新参数：`--input-type {image,yuv,raw}`（默认 `image`）、`--input-yuv-type`、
-`--input-alignment`、`--input-endianness`、`--input-raw-type`（`raw` 为预留占位，
-本轮明确报错而非静默按 image 处理）。不带这些参数时所有既有命令行为、输出文案与
-退出码**完全不变**。
-
-### CLI 批量模式（支持 view + convert 混合，每文件独立参数）
-
-```bash
-python -m raw_view batch --batch-file batch.json
-python -m raw_view --batch-help   # 查看 JSON 格式说明
-```
-
-`batch.json` 支持**全局默认 + 每文件覆盖**，且每个文件可独立指定 `mode`：
-
-```json
-{
-  "mode": "convert",
-  "target": "RAW",
-  "raw_type": "RAW12",
-  "yuv_type": "YUYV",
-  "width": 640,
-  "height": 480,
-  "alignment": "lsb",
-  "endianness": "little",
-  "source_mode": "bayer",
-  "bayer_pattern": "RGGB",
-  "preview_mode": "Bayer Color",
-  "offset": 0,
-  "files": [
-    {"input": "img1.png"},
-    {
-      "input": "img2.jpg",
-      "output": "custom_out.raw",
-      "width": 1920,
-      "height": 1080,
-      "alignment": "msb"
-    },
-    {
-      "input": "img3.png",
-      "target": "YUV",
-      "yuv_type": "NV12",
-      "width": 1280,
-      "height": 720
-    },
-    {
-      "input": "image.raw",
-      "mode": "view",
-      "width": 1920,
-      "height": 1080,
-      "bayer_pattern": "BGGR",
-      "preview_mode": "Grayscale"
-    },
-    {
-      "input": "video.yuv",
-      "mode": "view",
-      "target": "YUV",
-      "yuv_type": "NV12",
-      "width": 1920,
-      "height": 1080
-    }
-  ]
-}
-```
-
-- `files[].output` 可选，省略时自动生成
-- 每文件可通过 `"mode": "view"` 或 `"mode": "convert"` 指定操作
-- 每文件可覆盖任意字段（`target`, `width`, `height`, `raw_type`, `yuv_type`, `alignment`, `endianness`, `source_mode`, `bayer_pattern`, `preview_mode`, `offset`）
-- **YUV 输入**：条目可加 `"input_type": "yuv"` + `"input_yuv_type"`（可选 `input_alignment` / `input_endianness`），与 `yuv_type` 目标布局做无损重排；`width`/`height` 此时是**源帧尺寸且必填**。一条 batch 可以混排 image 与 yuv 条目，各自按自己的 `input_type` 解释。
-- **校验**：`mode` / `target` / `input_type` 取值非法（含拼写错误）会一行报错并退出，不再静默按别的语义执行；JSON 结构错误（`"files": "abc"`、`"width": "abc"`、`NaN`）同样一行提示，不打印栈。
-- **单帧上限**：view（解码帧）、convert（编码输出帧）、YUV 转码（源/目标两侧）统一 512MB 上限，且**在写盘前**校验，超限条目不会留下部分或巨型文件。
-- **自动输出名跨条目唯一**：两个条目若派生出同一自动输出名（如 `a/same.png` + `b/same.png`），后者写为 `..._2` 并在输出中提示，绝不“报 2 succeeded 但磁盘只剩 1 个文件”。显式 `output` 不受影响，按原样使用。
-- **危险后缀**：`.exe` / `.dll` / `.bat` / `.ps1` 等可执行/脚本后缀在 view / convert / batch 三条路径都被拒绝；无后缀与普通未知后缀（`.dat` / `.bin`）不受影响。
+> **最容易踩的坑**：`convert` 的 `--input-type` 默认是 `image`。把 `.bin`/`.raw`/
+> `.yuv` 直接 `convert` 会报 `failed to read image`——此时应加 `--input-type yuv`
+> 或改用 `view`。现在这条错误会直接打印可复制的正确命令。详见
+> [`docs/cli.md` 第 8 节](docs/cli.md#8-常见错误排查)。
 
 ## 设置（Settings）
 
@@ -432,13 +304,13 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 | 启动速度 | 快（无需自解压） | 首次较慢（自解压到临时目录） |
 | 体积 | 约 136 MB（zip 压缩后） | 约 122 MB |
 
-> **单文件版仅提供 GUI**。需要命令行（`view` / `convert` / `batch` / `--batch-help`）请使用 **zip 版**。
+> **单文件版仅提供 GUI**。需要命令行（`view` / `convert` / `batch` / `--help-batch`）请使用 **zip 版**。
 
 ### zip 版里的三个 exe
 
 | exe | 子系统 | 用途 |
 |---|---|---|
-| `raw-view.exe` | GUI | **launcher**：无参数或 `view [文件…]` → 启动 GUI；`convert` / `batch` / `-h` / `--version` / 任何 CLI 选项 → 转交给命令行 |
+| `raw-view.exe` | GUI | **launcher**：无参数或 `view [文件…]` → 启动 GUI；`convert` / `batch` / `-h` / `--help-*` / `--version` / 任何 CLI 选项 → 转交给命令行 |
 | `raw-view-gui.exe` | GUI | 只启动 GUI（供 launcher 调用，也可直接用） |
 | `raw-view-cli.exe` | Console | 只跑命令行，**绝不弹窗**；缺参数时直接报 usage 并返回 2 |
 
@@ -447,8 +319,11 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 ### 命令行用法（zip 版）
 
 ```bash
-# 查看帮助 / 版本
-raw-view.exe --batch-help
+# 查看帮助 / 版本（一级菜单 + 三个二级帮助页）
+raw-view.exe --help
+raw-view.exe --help-view
+raw-view.exe --help-convert
+raw-view.exe --help-batch      # --batch-help 仍可用（脚本兼容）
 raw-view.exe --version
 
 # 解码 RAW/YUV -> PNG
@@ -460,6 +335,8 @@ raw-view.exe convert -i img.png --target YUV --yuv-type NV12 --width 2560 --heig
 # 批量
 raw-view.exe batch -b spec.json
 ```
+
+完整参数、示例与排查见 **[`docs/cli.md`](docs/cli.md)**。
 
 > **裸文件参数不支持**：`raw-view.exe a.raw` 不会自动变成 `view a.raw`，而是由 argparse
 > 报 usage 并返回 **2**。要用 GUI 打开文件请写 `raw-view.exe view a.raw` 或直接双击拖入窗口。

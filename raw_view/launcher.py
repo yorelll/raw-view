@@ -69,7 +69,10 @@ _CLI_ONLY_MODES = frozenset({"convert", "batch"})
 _GUI_CAPABLE_MODE = "view"
 
 #: Flags that exist only to print something and exit: always CLI.
-_CLI_BOOL_FLAGS = frozenset({"-h", "--help", "--version", "--batch-help"})
+_CLI_BOOL_FLAGS = frozenset({
+    "-h", "--help", "--version",
+    "--help-view", "--help-convert", "--help-batch", "--batch-help",
+})
 
 #: Every option the CLI parser accepts.  Its presence means the user is asking
 #: for a command-line operation, never for a window.
