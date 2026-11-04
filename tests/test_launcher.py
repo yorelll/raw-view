@@ -218,6 +218,93 @@ class ConsoleHandleTests(unittest.TestCase):
         # argv must reach the child unmodified.
         self.assertEqual(run_mock.call_args[0][0][-1], "--version")
 
+    def test_freeconsole_only_for_a_console_we_attached(self):
+        """Inheriting a console must never free the user's terminal.
+
+        ``FreeConsole`` on a console the launcher merely inherited would tear the
+        terminal down; it may only be called when the launcher itself attached.
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows-only API")
+        from unittest import mock
+
+        # Case 1: stdout inherited -> no attach, therefore no FreeConsole.
+        with mock.patch.object(launcher, "_wrap_std_handle", return_value=object()), \
+             mock.patch.object(launcher, "_kernel32") as kernel:
+            handles = launcher._ConsoleHandles()
+            handles.release()
+        kernel.return_value.AttachConsole.assert_not_called()
+        kernel.return_value.FreeConsole.assert_not_called()
+
+        # Case 2: no handles -> attach -> FreeConsole on release.
+        def only_after_attach(index):
+            return object() if getattr(only_after_attach, "attached", False) else None
+
+        with mock.patch.object(
+            launcher, "_wrap_std_handle", side_effect=only_after_attach
+        ), mock.patch.object(launcher, "_kernel32") as kernel:
+            kernel.return_value.AttachConsole.return_value = 1
+            kernel.return_value.GetStdHandle.return_value = 1234
+
+            def mark_attached(*_a, **_k):
+                only_after_attach.attached = True
+                return 1
+
+            kernel.return_value.AttachConsole.side_effect = mark_attached
+            handles = launcher._ConsoleHandles()
+            kernel.return_value.FreeConsole.assert_not_called()
+            handles.release()
+            kernel.return_value.FreeConsole.assert_called_once()
+
+    def test_freeconsole_not_repeated(self):
+        """release() is idempotent: a second call must not free twice."""
+        if sys.platform != "win32":
+            self.skipTest("Windows-only API")
+        from unittest import mock
+
+        with mock.patch.object(launcher, "_wrap_std_handle", return_value=None), \
+             mock.patch.object(launcher, "_kernel32") as kernel:
+            kernel.return_value.AttachConsole.return_value = 1
+            handles = launcher._ConsoleHandles()
+            handles.release()
+            handles.release()
+        kernel.return_value.FreeConsole.assert_called_once()
+
+    def test_attach_failure_is_tolerated(self):
+        """No parent console (double-click with no shell) must not raise."""
+        if sys.platform != "win32":
+            self.skipTest("Windows-only API")
+        from unittest import mock
+
+        with mock.patch.object(launcher, "_wrap_std_handle", return_value=None), \
+             mock.patch.object(launcher, "_kernel32") as kernel:
+            kernel.return_value.AttachConsole.return_value = 0
+            handles = launcher._ConsoleHandles()
+            handles.release()
+        kernel.return_value.FreeConsole.assert_not_called()
+
+    def test_forward_waits_for_the_child_before_releasing(self):
+        """The console must outlive the child: release happens after run().
+
+        This is the ordering that keeps CLI output ahead of cmd's next prompt.
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows-only API")
+        from unittest import mock
+
+        order: list[str] = []
+        with mock.patch.object(launcher, "_wrap_std_handle", return_value=object()):
+            with mock.patch.object(launcher.subprocess, "run") as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.side_effect = lambda *a, **k: (
+                    order.append("child"), run_mock.return_value)[1]
+                with mock.patch.object(
+                    launcher._ConsoleHandles, "release",
+                    side_effect=lambda: order.append("release"),
+                ):
+                    launcher._forward(["--version"])
+        self.assertEqual(order, ["child", "release"])
+
 
 if __name__ == "__main__":
     unittest.main()

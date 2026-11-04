@@ -41,6 +41,27 @@ The last row is deliberate: a bare ``raw-view.exe a.raw`` is *not* silently
 turned into ``view a.raw``.  Guessing there would also mean ``--width 800``
 (a typo'd option) launches a window and blocks the terminal, which is far worse
 than an immediate usage error.
+
+Console ownership
+-----------------
+``raw-view.exe`` is built ``--windowed`` (PE subsystem 2) so double-clicking it
+never flashes a console window.  The side effect is that **cmd does not wait for
+it**: Windows decides "wait for this process" from the subsystem of the image it
+started, and an interactive ``cmd.exe`` prompt returns as soon as a GUI-subsystem
+image is launched.  (Inside a ``.bat`` file cmd waits for everything, so the
+symptom only shows at the prompt -- which is exactly where users hit it.)
+
+Everything printed by the CLI therefore has to finish *before* the launcher
+exits, or it lands after cmd has already drawn the next prompt -- output appears
+to arrive in the wrong place, and the terminal looks stuck until a keypress
+flushes it.  Two rules keep that window closed:
+
+* the forwarding child is waited for (``subprocess.run``), and
+* a console we attached ourselves is released (``FreeConsole``) as soon as the
+  child exits, instead of lingering for the launcher's remaining lifetime.
+
+Redirection and piping are unaffected: those handles are inherited, never
+attached, and are left exactly as the parent gave them.
 """
 
 from __future__ import annotations
@@ -169,7 +190,9 @@ def _wrap_std_handle(index: int):
     if handle in (None, 0, -1):
         return None
     try:
-        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY if index == -10 else os.O_WRONLY)
+        fd = msvcrt.open_osfhandle(
+            handle, os.O_RDONLY if index == -10 else os.O_WRONLY
+        )
     except OSError:
         return None
     return os.fdopen(
@@ -203,40 +226,94 @@ def _forward(argv: list[str]) -> int:
     Doing it the other way round (attach, then wrap) yields zero bytes in both
     the redirect and pipe cases, which is what naive versions of this file get
     wrong.
+
+    Two further rules, both learned from interactive-cmd behaviour
+    (see the module docstring, "Console ownership"):
+
+    3. The console is only ever attached for the *duration* of the child and is
+       released before returning, so the launcher never keeps a console it did
+       not start with.
+    4. Whatever we attached, we release; whatever the parent gave us, we leave
+       alone.  Tearing down an inherited console would kill the user's terminal.
     """
-    stdin = stdout = stderr = None
-    if sys.platform == "win32":
-        stdin = _wrap_std_handle(-10)
-        stdout = _wrap_std_handle(-11)
-        stderr = _wrap_std_handle(-12)
-        if stdout is None:
+    console = _ConsoleHandles()
+    try:
+        completed = subprocess.run(
+            _cli_command(argv),
+            stdin=console.stream(-10),
+            stdout=console.stream(-11),
+            stderr=console.stream(-12),
+        )
+    finally:
+        console.release()
+    return completed.returncode
+
+
+class _ConsoleHandles:
+    """The std streams a child should inherit, and the console's fate.
+
+    Kept as a small object (rather than five locals in :func:`_forward`) because
+    the lifetime rule is subtle: whatever we attach we must release, and only
+    what we attached.
+    """
+
+    def __init__(self) -> None:
+        self._streams: dict[int, object] = {}
+        self._attached = False
+        if sys.platform != "win32":
+            return
+        for index in (-10, -11, -12):
+            stream = _wrap_std_handle(index)
+            if stream is not None:
+                self._streams[index] = stream
+        if -11 not in self._streams:
+            # No usable stdout: we were probably double-clicked (or launched
+            # from a shell that gave us no handles).  Borrow the parent's
+            # console if there is one -- and remember that we did, so the
+            # console is released again before this process exits.
             try:
                 attached = _kernel32().AttachConsole(-1)  # ATTACH_PARENT_PROCESS
             except (AttributeError, OSError):
                 attached = 0
             if attached:
-                stdin = _wrap_std_handle(-10)
-                stdout = _wrap_std_handle(-11)
-                stderr = _wrap_std_handle(-12)
+                self._attached = True
+                # GetStdHandle now returns the *console* handles; wrap those.
+                for index in (-10, -11, -12):
+                    stream = _wrap_std_handle(index)
+                    if stream is not None:
+                        self._streams[index] = stream
 
-    command = _cli_command(argv)
-    try:
-        completed = subprocess.run(
-            command,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-        )
-    finally:
-        # Attaching a console makes it ours; releasing it lets the shell prompt
-        # return instead of hanging behind an apparently-live child.
-        for stream in (stdin, stdout, stderr):
-            if stream is not None:
-                try:
-                    stream.flush()
-                except Exception:  # noqa: BLE001 - flushing is best effort
-                    pass
-    return completed.returncode
+    def stream(self, index: int):
+        """The text stream for std handle *index*, or ``None``."""
+        return self._streams.get(index)
+
+    def release(self) -> None:
+        """Flush what we hold and release a console we attached ourselves.
+
+        ``FreeConsole`` is the part interactive cmd cares about.  A GUI-subsystem
+        image that attaches to its parent's console keeps a console *reference*
+        for its whole lifetime; while that reference is alive the shell cannot
+        hand the console back to the prompt, so the user sees the prompt return
+        (cmd does not wait for a GUI-subsystem image) while the child is still
+        writing -- output lands after the prompt, out of order.  Releasing the
+        console as soon as the child is done removes that window.
+
+        Only a console *we* attached is released: calling ``FreeConsole`` on one
+        inherited from the parent would tear down the user's terminal.
+        """
+        for stream in self._streams.values():
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001 - flushing is best effort
+                pass
+        self._streams.clear()
+        if not self._attached:
+            return
+        self._attached = False
+        try:
+            _kernel32().FreeConsole()
+        except (AttributeError, OSError):  # pragma: no cover - defensive
+            pass
 
 
 def _cli_command(argv: list[str]) -> list[str]:
