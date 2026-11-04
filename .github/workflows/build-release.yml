@@ -256,9 +256,11 @@ jobs:
             throw "launcher --version did not report a version: [$version]"
           }
 
-          # 2) 管道转发（pwsh 下管道不会被提前拆除，可用）。
-          $helpLine = cmd /c ".\dist\raw-view\raw-view.exe -h" | Select-String -Pattern 'batch-help'
-          if (-not $helpLine) { throw "launcher -h produced no output" }
+          # 2) 管道转发：先捕获成变量再匹配。
+          #    不要写 `cmd /c ... | Select-String`——那条依赖 pwsh 与 GUI 子系统
+          #    进程的时序，本机与 runner 表现不一致；先捕获消除了这层依赖。
+          $help = (cmd /c ".\dist\raw-view\raw-view.exe -h") -join "`n"
+          if ($help -notmatch 'batch-help') { throw "launcher -h did not forward to the CLI" }
 
           # 3) 裸文件名必须报 usage（rc=2），绝不能启动 GUI 阻塞 CI。
           #    cli.exe 是 console 子系统，同步等待，$LASTEXITCODE 可靠（区别于
@@ -270,6 +272,14 @@ jobs:
           if ($LASTEXITCODE -ne 2) {
             throw "bare filename should exit 2, got $LASTEXITCODE"
           }
+
+          # 4) 关键：把步骤退出码归零。
+          #    GitHub Actions 的 pwsh 包装器会在脚本末尾追加 `exit $LASTEXITCODE`。
+          #    上面第 3 条明知故犯地让 cli.exe 以 rc=2 退出（断言用法错误），于是
+          #    $LASTEXITCODE 停在 2——**三条断言全部通过，步骤却以非零退出码失败**。
+          #    实测：同一脚本无此句 exit 0，有此句 exit $LASTEXITCODE=2。
+          #    所有断言都用显式 throw 表达失败，这里不需要靠退出码传递任何信息。
+          $global:LASTEXITCODE = 0
 
       - name: Determine version from tag
         id: version
