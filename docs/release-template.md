@@ -56,8 +56,8 @@ raw-view.exe batch -b spec.json
 - 传感器预设保存在本机注册表/配置目录；团队共享可 *Manage sensor presets → Export / Import*。
 
 ### 文件
-- **`raw-view-<版本号>-windows-x64.zip`** — zip 压缩包（解压即用，含 launcher + GUI + CLI 三 exe 与共享 `_internal/`，约 <大小> MB）
-- **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 <大小> MB）
+- **`raw-view-<版本号>-windows-x64.zip`** — zip 压缩包（解压即用，含 launcher + GUI + CLI 三 exe 与共享 `_internal/`，约 114 MB）
+- **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 99 MB）
 - 各附 `.sha256` 校验和
 
 ### 系统要求

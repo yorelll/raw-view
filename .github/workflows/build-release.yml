@@ -6,17 +6,17 @@
 #
 # What it does:
 #   1. Runs the full test suite (so a broken release is never published)
-#   2. Installs PyInstaller and builds the release artifacts:
+#   2. Builds all four executables from the ONE spec, raw-view.spec:
 #        a. zip bundle     -> dist/raw-view/  (launcher + GUI + CLI, ONE _internal)
 #        b. single file    -> dist/raw-view.exe  (GUI only)
-#      The zip bundle's three executables share a single _internal directory.
-#      Building each with its own copy would take the download from ~132 MB to
-#      ~383 MB, so the onedir builds are assembled: the windowed build's
-#      tree is kept and both executables are copied into it (verified: 3176 of
-#      3177 files are byte-identical between the two builds, and the only
-#      difference - base_library.zip - is content-equivalent).
-#      Each build is staged under .artifact/ first so the --noconfirm --clean
-#      runs never delete each other's output.
+#      A single Analysis feeds all four EXEs and a single COLLECT emits the
+#      three side-by-side onedir executables. That is why they share exactly
+#      one _internal directory, and why the layout cannot drift: PyInstaller
+#      writes it, nothing is moved or copied afterwards.
+#      The same spec is used by the local release.bat, so the two build paths
+#      cannot diverge. See the spec's module docstring for the reasoning
+#      (four separate PyInstaller runs re-analysed the same dependency tree
+#      four times: 1315 s -> ~120 s).
 #   3. Zips the onedir bundle into a "unzip-and-run" package with the
 #      version in its file name (raw-view-<version>-windows-x64.zip).
 #   4. Runs the exe with --help (CLI smoke test) and lists the artifacts
@@ -74,118 +74,26 @@ jobs:
       - name: Smoke test CLI (before packaging)
         run: python -m raw_view --batch-help
 
-      # PyInstaller 两次打包都会 --noconfirm --clean 清理 build/ 与 dist/，
-      # 因此两次产物分别落盘到独立 staging 目录（.artifact/raw-view.exe 与
-      # .artifact/raw-view/），避免 "后一次打包删掉前一次产物"。
+      # 一次构建产出全部四个 exe：单个 Analysis 同时喂给 launcher / GUI / CLI
+      # 三个 onedir EXE 与一个 onefile EXE，COLLECT 只做一次，因此三个 onedir
+      # exe 必然与同一份 _internal 同级——布局由 PyInstaller 直接产出，没有
+      # 任何 staging / move / copy 步骤。
       #
-      # 第一次：onedir 目录 bundle（解压即用，含全部依赖）。
-      # 注意：.venv 是本机专用路径，CI（GitHub Actions）默认把依赖装进 Actions 自带
-      # 的 Python，不存在 .venv/；而 PyInstaller 对不存在的 --add-data 源目录会直接
-      # 报 ERROR 失败。因此 translations 路径由当前 python 安装位置推导，
-      # 两种环境都能跑；缺失时仅提示（Qt 自带默认英文本地化，不影响功能）。
-      # PyInstaller 每次打包都会 --noconfirm --clean 清理 build/ 与 dist/，
-      # 因此每次产物先落到独立 staging 目录（.artifact/...），避免互相删除。
-      #
-      # 三次构建、两个形态：
-      #   1. onedir --windowed  raw_view/gui_entry.py -> raw-view-gui.exe + _internal
-      #   2. onedir --console   raw_view/cli_entry.py -> raw-view-cli.exe
-      #   3. onedir --windowed  raw_view/launcher.py  -> raw-view.exe (launcher)
-      # 最终 zip 里三个 exe **共用一份 _internal**（取自构建 3）。
-      # translations 路径由当前 python 安装位置推导，CI 与本机都能跑；缺失时仅提示。
-      - name: Build onedir GUI half (windowed)
+      # 旧实现是四次独立 pyinstaller 调用（各自完整分析同一棵依赖树）：
+      # 实测 412 + 394 + 238 + 270 = 1315 s；单 Analysis 约 120 s。
+      # 同一份 raw-view.spec 也被本地 release.bat 使用，两条构建路径不会漂移。
+      - name: Build artifacts from raw-view.spec (single Analysis)
         run: |
-          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
-          $TRANS = @()
-          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
-          else { Write-Host "Qt5 translations not found; Qt falls back to English built-ins." }
-          pyinstaller --noconfirm --clean --windowed --name raw-view-gui `
-            --hidden-import=cv2 `
-            --hidden-import=PIL `
-            --collect-all=cv2 `
-            --collect-all=PyQt5 `
-            --collect-all=qt_material `
-            --collect-all=qtawesome `
-            --collect-all=pypinyin `
-            --icon assets/raw-view.ico `
-            --add-data "assets;assets" `
-            @TRANS `
-            --distpath .artifact/gui `
-            --workpath build/gui `
-            raw_view/gui_entry.py
-          if (-not (Test-Path .artifact/gui/raw-view-gui/raw-view-gui.exe)) { throw "GUI half missing" }
-
-      - name: Build onedir CLI half (console)
-        run: |
-          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
-          $TRANS = @()
-          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
-          pyinstaller --noconfirm --clean --console --name raw-view-cli `
-            --hidden-import=cv2 `
-            --hidden-import=PIL `
-            --collect-all=cv2 `
-            --collect-all=PyQt5 `
-            --collect-all=qt_material `
-            --collect-all=qtawesome `
-            --collect-all=pypinyin `
-            --icon assets/raw-view.ico `
-            --add-data "assets;assets" `
-            @TRANS `
-            --distpath .artifact/cli `
-            --workpath build/cli `
-            raw_view/cli_entry.py
-          if (-not (Test-Path .artifact/cli/raw-view-cli/raw-view-cli.exe)) { throw "CLI half missing" }
-
-      - name: Build onedir launcher
-        run: |
-          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
-          $TRANS = @()
-          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
-          pyinstaller --noconfirm --clean --windowed --name raw-view `
-            --hidden-import=cv2 `
-            --hidden-import=PIL `
-            --collect-all=cv2 `
-            --collect-all=PyQt5 `
-            --collect-all=qt_material `
-            --collect-all=qtawesome `
-            --collect-all=pypinyin `
-            --icon assets/raw-view.ico `
-            --add-data "assets;assets" `
-            @TRANS `
-            --distpath .artifact/bundle `
-            --workpath build/launcher `
-            raw_view/launcher.py
-          if (-not (Test-Path .artifact/bundle/raw-view/raw-view.exe)) { throw "launcher missing" }
-
-      # 单文件版：GUI only（PyInstaller --onefile 不允许同一 exe 同时是 console 与 GUI）。
-      - name: Build single-file exe (GUI only)
-        run: |
-          $QT_TRANSLATIONS = python -c "import os, PyQt5; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'translations'))"
-          $TRANS = @()
-          if (Test-Path $QT_TRANSLATIONS) { $TRANS = @("--add-data", "$QT_TRANSLATIONS;Qt5/translations") }
-          pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
-            --hidden-import=cv2 `
-            --hidden-import=PIL `
-            --collect-all=cv2 `
-            --collect-all=PyQt5 `
-            --collect-all=qt_material `
-            --collect-all=qtawesome `
-            --collect-all=pypinyin `
-            --icon assets/raw-view.ico `
-            --add-data "assets;assets" `
-            @TRANS `
-            --distpath .artifact/onefile `
-            --workpath build/onefile `
-            raw_view/gui_entry.py
-          if (-not (Test-Path .artifact/onefile/raw-view.exe)) { throw "single-file exe missing" }
-
-      - name: Collect release artifacts into dist
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item -Recurse -Force .artifact/bundle/raw-view dist/raw-view
-          Copy-Item -Force .artifact/gui/raw-view-gui/raw-view-gui.exe dist/raw-view/raw-view-gui.exe
-          Copy-Item -Force .artifact/cli/raw-view-cli/raw-view-cli.exe dist/raw-view/raw-view-cli.exe
-          Copy-Item -Force .artifact/onefile/raw-view.exe dist/raw-view.exe
-          Get-ChildItem dist/raw-view | Select-Object Name, Length
+          python -m PyInstaller --noconfirm --clean --distpath dist --workpath build raw-view.spec
+          foreach ($path in @(
+            'dist/raw-view/raw-view.exe',
+            'dist/raw-view/raw-view-gui.exe',
+            'dist/raw-view/raw-view-cli.exe',
+            'dist/raw-view/_internal/python312.dll',
+            'dist/raw-view.exe'
+          )) {
+            if (-not (Test-Path $path)) { throw "missing artifact: $path" }
+          }
 
       - name: Verify artifacts exist
         run: |
@@ -314,6 +222,15 @@ jobs:
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat dist/raw-view.exe.sha256
           cat "$ZIP.sha256"
+          # 空的校验和文件绝不能发布（历史上本地脚本曾因 PowerShell 5.1 没有
+          # Get-FileHash 而写出只含 " *文件名" 的空文件；这里设防）。
+          for f in dist/raw-view.exe.sha256 "$ZIP.sha256"; do
+            size=$(wc -c < "$f")
+            if [ "$size" -lt 70 ]; then
+              echo "::error::checksum file looks empty: $f ($size bytes)"
+              exit 1
+            fi
+          done
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -424,8 +341,8 @@ jobs:
             - CLI 模式（view / convert / batch，支持 glob/base_dir）、日志系统、崩溃日志、Light/Dark 主题
 
             ### 文件
-            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（解压即用；含 launcher + GUI + CLI 三个 exe 与共享 `_internal/`，约 137 MB）
-            - **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 123 MB）
+            - **`raw-view-${{ steps.version.outputs.version }}-windows-x64.zip`** — zip 压缩包（解压即用；含 launcher + GUI + CLI 三个 exe 与共享 `_internal/`，约 114 MB）
+            - **`raw-view.exe`** — 单文件 exe（**仅 GUI**，约 99 MB）
             - 各附 `.sha256` 校验和（`sha256sum -c` 校验）
 
             ### 系统要求

@@ -302,7 +302,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 | GUI | ✅ `raw-view.exe`（双击）/ `raw-view-gui.exe` | ✅ 双击 |
 | **命令行** | ✅ `raw-view.exe <命令>` / `raw-view-cli.exe <命令>` | ❌ **不支持** |
 | 启动速度 | 快（无需自解压） | 首次较慢（自解压到临时目录） |
-| 体积 | 约 136 MB（zip 压缩后） | 约 122 MB |
+| 体积 | 约 114 MB（zip 压缩后） | 约 99 MB |
 
 > **单文件版仅提供 GUI**。需要命令行（`view` / `convert` / `batch` / `--help-batch`）请使用 **zip 版**。
 
@@ -314,7 +314,7 @@ Tools → **FourCC Lookup** 打开 FourCC 格式查找对话框，用于快速�
 | `raw-view-gui.exe` | GUI | 只启动 GUI（供 launcher 调用，也可直接用） |
 | `raw-view-cli.exe` | Console | 只跑命令行，**绝不弹窗**；缺参数时直接报 usage 并返回 2 |
 
-三个 exe **共享同一份 `_internal/`**（各带一份会让 zip 从约 136 MB 涨到约 383 MB）。
+三个 exe **共享同一份 `_internal/`**（各带一份会让 zip 从约 114 MB 涨到约 380 MB）。
 
 ### 命令行用法（zip 版）
 
@@ -346,7 +346,8 @@ raw-view.exe batch -b spec.json
 详见：`docs/release_exe.md`
 
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
-- **手动本地打包**：`pyinstaller --noconfirm --clean --onefile --windowed --name raw-view ...`（完整命令见文档）。
+- **手动本地打包**：`pyinstaller --noconfirm --clean --distpath dist --workpath build raw-view.spec`
+  （仓库根目录的 spec 一次产出四个 exe；`release.bat` 与 CI 用的是同一份）。
 - **GitHub Actions 自动发布**：推送形如 `v0.5.7` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
@@ -359,7 +360,7 @@ raw-view.exe batch -b spec.json
 4. 到仓库 [Releases 页面](https://github.com/yorelll/raw-view/releases) 下载即可。
 
 **发行物形态**：
-- **`raw-view.exe`** — 单文件 exe（约 100-130 MB，无需安装 Python，自解压启动）
+- **`raw-view.exe`** — 单文件 exe（约 99 MB，无需安装 Python，自解压启动）
 - **`raw-view-<版本>-windows-x64.zip`** — onedir 压缩包（解压即用；内含 `raw-view/_internal/` 全部依赖；
   适合需要快速分发整个目录、或单文件版启动慢的场景）
 

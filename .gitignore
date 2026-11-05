@@ -12,6 +12,9 @@ __pycache__/
 build/
 dist/
 *.spec
+# ...except the one release spec, which IS version-controlled: it is the single
+# definition of the four executables and is used by release.bat and CI alike.
+!raw-view.spec
 
 # PyInstaller 缓存
 *.egg-info/

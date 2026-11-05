@@ -15,14 +15,15 @@
 3. GitHub Actions 工作流 `.github/workflows/build-release.yml`（tag 触发）自动：
    - Windows 环境安装 Python 3.12 + 全部依赖（叠加 `constraints.txt` 锁定版本）；
    - 运行 `python -m unittest discover -s tests -q`（**测试不过不发布**）；
-   - 用 PyInstaller 做 **3 次 onedir 构建 + 1 次 onefile 构建**（每次都 staging，互不覆盖）：
+   - 用 PyInstaller **打包一次**（同一份 `raw-view.spec`），一次 Analysis 产出全部四个 exe：
      | 构建 | 入口 | 产物 |
      |---|---|---|
-     | onedir `--windowed` | `raw_view/gui_entry.py` | `raw-view-gui.exe` + `_internal` |
-     | onedir `--console` | `raw_view/cli_entry.py` | `raw-view-cli.exe` |
      | onedir `--windowed` | `raw_view/launcher.py` | `raw-view.exe`（launcher） |
+     | onedir `--windowed` | `raw_view/gui_entry.py` | `raw-view-gui.exe` |
+     | onedir `--console` | `raw_view/cli_entry.py` | `raw-view-cli.exe` |
      | onefile `--windowed` | `raw_view/gui_entry.py` | `raw-view.exe`（单文件，仅 GUI） |
-   - 把三个 exe 组装进 **同一份 `_internal/`**（各带一份会让 zip 从约 136 MB 涨到约 383 MB）；
+   - 三个 onedir exe 由**同一次 `COLLECT`** 产出，因此天然与**同一份 `_internal/`** 同级，
+     不需要任何 staging / move / copy 组装步骤；
    - 校验 PE subsystem 必须为 **2 / 2 / 3**（launcher / GUI / CLI）；
    - 把目录压缩为 `raw-view-<版本>-windows-x64.zip`（解压即用）；
    - 生成 `raw-view.exe.sha256` 与 zip 的 `.sha256` 校验和；
@@ -44,10 +45,17 @@ Windows 中双击（或在 `cmd` 中执行 `release.bat`）会自动：
 1. 激活项目 `.venv`；
 2. 运行 `python -m pytest tests/ -q`，测试失败则中止；
 3. 读取 `raw_view.models.APP_VERSION`；
-4. 构建 3 次 onedir（windowed GUI / console CLI / windowed launcher）+ 1 次 onefile，
-   每次用独立的 `--distpath`/`--workpath`，避免 `--clean` 互删；
-5. 组装 `dist/raw-view/`：三个 exe + 一份共享 `_internal/`；
+4. 清理旧的 `build/`、`dist/`（**清理失败直接中止**，不再静默继续）；
+5. 用 `raw-view.spec` **打包一次**，一次 Analysis 产出全部四个 exe，
+   PyInstaller 直接把三个 onedir exe 与同一份 `_internal/` 写进 `dist/raw-view/`；
 6. 生成 `dist/raw-view.exe`、`dist/raw-view-<版本>-windows-x64.zip` 及各自 `.sha256`。
+
+> **为什么第 4 步必须中止而不是继续**：旧脚本用 `rmdir /s /q dist` 清理，失败时
+> 不报错就继续；紧接着 `move` 一个构建目录到 `dist\raw-view`，若该路径已存在
+> （例如被资源管理器或终端占用而没删掉），`move` 会把目录**多套一层**，exe 就落在
+> `dist\raw-view\raw-view\`，与 `_internal` 差一层，运行时报
+> `Failed to load Python DLL ...\_internal\python312.dll`。现在布局由 PyInstaller
+> 直接产出、没有 `move`，并在清理失败时明确报错停下。
 
 > 这是**本地打包**工具，不会提交、推送或创建 GitHub Release。正式远程发布仍应按上文流程：
 > 提交 → push main → CI 通过 → 打 `v<版本>` tag，使 GitHub Actions 生成官方 Release。
@@ -72,10 +80,10 @@ raw-view/
 **为什么需要 launcher**：Windows 由**被启动的那个 exe** 的 PE subsystem 决定控制台行为。
 GUI 子系统写不了终端，Console 子系统双击时弹黑框，一个二进制无法兼顾，所以用 launcher 分流。
 
-**为什么必须共享 `_internal`**：实测两次 onedir 构建（windowed / console）的 `_internal`
-共 3177 个文件，其中 **3176 个逐字节相同**，唯一差异 `base_library.zip` 内容等价
-（155 个 entry 大小/CRC/内容全同，仅 ZIP 内条目顺序不同），交叉运行已验证。因此三者共享
-一份即可：zip 从约 383 MB 降到约 136 MB。
+**为什么必须共享 `_internal`**：三个 exe 的依赖树实质相同（早期实测两次独立 onedir
+构建的 `_internal` 共 3177 个文件、3176 个逐字节相同）。若各带一份，zip 会从约 114 MB
+涨到约 380 MB。现在这不再靠"事后组装"来保证——三个 onedir exe 由 `raw-view.spec`
+里**同一次 `COLLECT`** 产出，共享同一份 `_internal/` 是构建方式的必然结果。
 
 **launcher 的终端处理**（最容易做错的地方）：必须**先包装继承来的 std 句柄，再按需
 `AttachConsole`**。顺序反过来会让 `> file` 与 `| pipe` 都变成 0 字节——`AttachConsole`
@@ -180,6 +188,25 @@ pip install pyinstaller
 
 ## 2. 执行打包
 
+> **首选：直接用仓库根目录的 `raw-view.spec`。** 一条命令产出全部四个 exe
+> （launcher / GUI / CLI / onefile），一次 Analysis 共享依赖，布局由 PyInstaller 直接产出：
+>
+> ```powershell
+> pyinstaller --noconfirm --clean --distpath dist --workpath build raw-view.spec
+> ```
+>
+> 产物：
+> ```
+> dist/raw-view/{raw-view.exe, raw-view-gui.exe, raw-view-cli.exe, _internal/}
+> dist/raw-view.exe        (单文件，仅 GUI)
+> ```
+>
+> 下面三种"手工命令"仅用于调试单个形态。**注意不要照抄加上 `--collect-all=PyQt5`**：
+> 它会把整个 QML 树、全部 Qt 插件与 44 个 Qt DLL（含 Designer/Quick/XmlPatterns）
+> 拉进来，实测多出 2411 个文件、zip 从 102 MB 涨到 129 MB，而本程序只用
+> QtCore/QtGui/QtWidgets/QtSvg。让 PyInstaller 的 Qt hook 按实际 import 收集即可
+> （spec 里就是这么做的）。
+
 ### 方式一：单文件打包（推荐，无需目标电脑安装 Python）
 
 打包为单个 exe 文件，生成的文件较大（约 100MB+），但**无需在目标电脑安装 Python**。
@@ -187,21 +214,19 @@ pip install pyinstaller
 ```powershell
 pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
     --hidden-import=cv2 `
-    --hidden-import=PIL `
     --collect-all=cv2 `
-    --collect-all=PyQt5 `
     --collect-all=qt_material `
     --collect-all=qtawesome `
     --collect-all=pypinyin `
     --icon assets/raw-view.ico `
     --add-data "assets;assets" `
-    raw_view/__main__.py
+    raw_view/gui_entry.py
 ```
 
 > 推荐直接使用现成的 `raw-view.spec`：`pyinstaller --noconfirm --clean raw-view.spec`（已内置 qt_material / qtawesome / assets / 图标）。
 > 修改 `assets/logo.svg` 后，先运行 `python scripts/make_icon.py` 重新生成 `assets/raw-view.ico` 与 `logo.png`。
 
-产物：`dist/raw-view.exe`（单文件，约 114MB）
+产物：`dist/raw-view.exe`（单文件，约 99MB）
 
 ---
 
@@ -210,20 +235,16 @@ pyinstaller --noconfirm --clean --onefile --windowed --name raw-view `
 打包为目录形式，`raw-view.exe` 与 `_internal/` 依赖目录一起分发。**目标电脑无需安装 Python**，只需保留整个目录结构；其优点是启动不必像单文件版一样先解压到临时目录。
 
 ```powershell
-# 打包命令
+# 打包命令（在仓库根目录执行；--paths 用当前目录即可，无需写死绝对路径）
 pyinstaller --noconfirm --clean --windowed --name raw-view `
-    --paths "D:\work\jira\generate_raw\raw-view" `
     --hidden-import=cv2 `
-    --hidden-import=PIL `
     --collect-all=cv2 `
-    --collect-all=PyQt5 `
     --collect-all=qt_material `
     --collect-all=qtawesome `
     --collect-all=pypinyin `
     --icon assets/raw-view.ico `
     --add-data "assets;assets" `
-    --add-data ".venv/Lib/site-packages/PyQt5/Qt5/translations;Qt5/translations" `
-    raw_view/__main__.py
+    raw_view/launcher.py
 ```
 
 产物：`dist/raw-view/raw-view.exe`（目录）
@@ -259,9 +280,10 @@ Compress-Archive -Path dist\raw-view -DestinationPath dist\raw-view-0.2.0-window
 ---
 
 > 注意：
-> - 将 `D:\work\jira\generate_raw\raw-view` 替换为你实际的仓库根目录路径
+> - 上面的"方式一/二/三"是**调试单个形态**用的手工命令；发布请直接用 `raw-view.spec`
+>   （`release.bat` 与 CI 都用它），这样布局与体积才与正式发行物一致
 > - 如果是 Bash，将 `` 改为 `^`，或使用一行命令
-> - CI 里不硬编码本机 `.venv` 路径：打包步骤用当前 `python` 的安装位置解析 PyQt5 translations（见 `build-release.yml`）
+> - spec 用 `SPECPATH` 推导仓库根目录，本机与 CI 都不需要写死绝对路径
 
 ## 3. 验证打包结果
 
@@ -272,10 +294,8 @@ dist\raw-view.exe
 # 方式2：在命令行模式运行（能看到错误输出，用于调试）
 pyinstaller --noconfirm --clean --onefile --console --name raw-view ^
     --hidden-import=cv2 ^
-    --hidden-import=PIL ^
     --collect-all=cv2 ^
-    --collect-all=PyQt5 ^
-    raw_view/__main__.py
+    raw_view/cli_entry.py
 dist\raw-view.exe
 ```
 
