@@ -39,7 +39,12 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.converter import load_bgr_image
-from raw_view.filetypes import DANGEROUS_EXTENSIONS, is_dangerous_extension
+from raw_view.filetypes import (
+    DANGEROUS_EXTENSIONS,
+    SUPPORTED_EXTENSIONS as _SHARED_SUPPORTED_EXTENSIONS,
+    is_dangerous_extension,
+    is_supported_file,
+)
 from raw_view.formats import (
     FormatError,
     ImageSpec,
@@ -234,7 +239,11 @@ _YUV_EXTS: dict[str, str] = {
 
 # Extensions the viewer can actually open / decode. Directory drag-drop scans
 # are filtered to this set so we never pull in unrelated files (configs, caches).
-SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | set(_YUV_EXTS) | {".raw", ".bin"}
+#
+# Both the set and the predicate live in raw_view.filetypes so nothing else has
+# to re-derive them; `filetypes` has no Qt import, so the dependency direction
+# stays "gui -> filetypes", never the reverse.
+SUPPORTED_EXTENSIONS = set(_SHARED_SUPPORTED_EXTENSIONS)
 
 # When a dropped directory resolves to more than this many supported files,
 # the user must confirm before they are all opened.
@@ -276,9 +285,10 @@ def _is_supported_file(path: str) -> bool:
     注意：该判定只用于**自动扫描**来源（目录扫描 / 同目录导航 / 目录拖放）。
     用户显式选择（打开对话框 / 启动参数 / 最近文件）走 ``_open_item(source=
     "explicit")``，允许未知后缀、仅拒绝 :func:`_is_dangerous_extension`。
+
+    实现委托给 :func:`raw_view.filetypes.is_supported_file`，两处不会漂移。
     """
-    suffix = Path(path).suffix.lower()
-    return not suffix or suffix in SUPPORTED_EXTENSIONS
+    return is_supported_file(path)
 
 
 def _widget_alive(widget) -> bool:
@@ -325,7 +335,8 @@ def _suffix_of(name: str) -> str:
     * ``"a.tar.gz"`` → ``".gz"``;
     * ``"A.RAW"`` → ``".raw"`` (case-folded).
 
-    ``_is_supported_file`` keeps using ``Path`` because it also accepts full
+    :func:`_is_supported_file` still goes through ``Path`` (inside
+    :func:`raw_view.filetypes.is_supported_file`) because it also accepts full
     paths from explicit callers; only the listing loops use this helper.
     """
     index = name.rfind(".")

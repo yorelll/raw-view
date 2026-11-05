@@ -481,5 +481,79 @@ class ResolveExtRemovedTests(unittest.TestCase):
         self.assertNotIn("def _resolve_ext", src)
 
 
+class DirectoryInputRejectedTests(unittest.TestCase):
+    """``--input DIR`` is rejected with a batch pointer (folder input cancelled).
+
+    ``view``/``convert`` process exactly one file.  The directory-scan mode was
+    removed by design (silent overwrites on same-named files, no ``--target``
+    check); both entry points must say so and exit 1 instead of reporting
+    "input file not found" for a directory that plainly exists.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="rawview_dirin_")
+        self._dir = Path(self._tmp, "captures")
+        self._dir.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _assert_rejected(self, result: subprocess.CompletedProcess) -> None:
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("--input is a directory", result.stderr)
+        self.assertIn("use batch", result.stderr)
+        self.assertIn("--help-batch", result.stderr)
+        self.assertIn("sample/batch/", result.stderr)
+        self.assertNotIn("input file not found", result.stderr)
+
+    def test_view_rejects_directory(self):
+        self._assert_rejected(_run_cli(
+            "view", "-i", str(self._dir), "-t", "RAW", "--raw-type", "RAW12",
+            "--width", "64", "--height", "48",
+        ))
+
+    def test_convert_rejects_directory(self):
+        self._assert_rejected(_run_cli(
+            "convert", "-i", str(self._dir), "-o", str(Path(self._tmp, "out")),
+            "-t", "RAW", "--raw-type", "RAW12", "--width", "64", "--height", "48",
+        ))
+
+    def test_hint_names_a_single_file_example_per_mode(self):
+        view = _run_cli("view", "-i", str(self._dir), "-t", "RAW",
+                        "--raw-type", "RAW12", "--width", "64", "--height", "48")
+        self.assertIn("raw-view view -i <path to one file>", view.stderr)
+        convert = _run_cli(
+            "convert", "-i", str(self._dir), "-o", str(Path(self._tmp, "out")),
+            "-t", "RAW", "--raw-type", "RAW12", "--width", "64", "--height", "48",
+        )
+        self.assertIn("raw-view convert -i <path to one file>", convert.stderr)
+
+    def test_missing_file_keeps_its_own_message(self):
+        """A non-existent path must NOT get the directory lecture."""
+        missing = str(Path(self._tmp, "nope.bin"))
+        result = _run_cli("view", "-i", missing, "-o", str(Path(self._tmp, "x.png")),
+                          "-t", "YUV", "--yuv-type", "YOnly10",
+                          "--width", "64", "--height", "48")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("input file not found", result.stderr)
+        self.assertNotIn("is a directory", result.stderr)
+
+    def test_no_directory_scan_helpers_remain(self):
+        """The rollback must be complete -- no half-deleted directory logic."""
+        import raw_view.__main__ as main_mod
+
+        for name in (
+            "_resolve_io_paths", "_scan_input_dir", "_mirrored_output_dir",
+            "_looks_binary_file", "_convert_one", "DIR_INPUT_MAX_FILES",
+        ):
+            self.assertFalse(hasattr(main_mod, name), f"{name} should be gone")
+
+    def test_dedupe_helper_is_kept_for_batch(self):
+        """``_dedupe_output_path`` is batch's, not the directory mode's."""
+        import raw_view.__main__ as main_mod
+
+        self.assertTrue(hasattr(main_mod, "_dedupe_output_path"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1464,6 +1464,37 @@ class DirectoryDropTests(unittest.TestCase):
         self.assertTrue(_is_supported_file("x.jpeg"))
         self.assertFalse(_is_supported_file("x.txt"))
 
+    def test_is_supported_file_delegates_to_the_shared_module(self):
+        """One implementation, not two: the GUI predicate defers to filetypes.
+
+        The review found ``filetypes.is_supported_file`` with zero callers while
+        the GUI kept its own copy of the same three-line rule.  Pinning the
+        delegation (and the set it is built on) is what keeps a future edit from
+        re-introducing the duplicate.
+        """
+        from raw_view import filetypes as shared
+
+        self.assertIs(app_module.is_supported_file, shared.is_supported_file)
+        self.assertEqual(set(SUPPORTED_EXTENSIONS), set(shared.SUPPORTED_EXTENSIONS))
+        # Behaviour, not just identity: the cases the GUI has always answered.
+        for name in ("x.png", "x.RAW", "x.yuv", "sensor", "raw_pic/frame0001"):
+            with self.subTest(name=name):
+                self.assertTrue(shared.is_supported_file(name))
+        for name in ("x.txt", "x.exe", "x.dll", "notes.md"):
+            with self.subTest(name=name):
+                self.assertFalse(shared.is_supported_file(name))
+
+    def test_gui_predicate_actually_calls_the_shared_one(self):
+        """Behavioural proof of delegation: a re-inlined body would still pass
+        the identity check above but stop answering from ``filetypes``."""
+        from unittest import mock
+
+        with mock.patch.object(
+            app_module, "is_supported_file", return_value="sentinel"
+        ) as probe:
+            self.assertEqual(_is_supported_file("anything.raw"), "sentinel")
+        probe.assert_called_once_with("anything.raw")
+
     def test_is_supported_file_no_extension(self):
         """无后缀文件 = 支持（二进制 RAW 候选）。"""
         self.assertTrue(_is_supported_file("output"))
@@ -1505,6 +1536,83 @@ class DirectoryDropTests(unittest.TestCase):
         self.assertTrue(too_many)
         files, too_many = handle_drop_paths([_FakeUrl(dense)], max_files=100)
         self.assertFalse(too_many)
+
+
+class ImageExtensionSetAgreementTests(unittest.TestCase):
+    """``models.IMAGE_EXTENSIONS`` and ``filetypes.IMAGE_EXTENSIONS`` must match.
+
+    Two copies of the same set exist for two different questions, and the two
+    questions meet in one place:
+
+    * ``filetypes.IMAGE_EXTENSIONS`` is the image part of
+      :data:`filetypes.SUPPORTED_EXTENSIONS` -- it decides whether a directory
+      drop-scan *collects* a file at all;
+    * ``models.IMAGE_EXTENSIONS`` is what
+      ``gui.app.MainWindow._apply_default_options`` tests to decide whether an
+      opened file becomes ``Standard Image`` or falls through to the ``else``
+      branch, which is **RAW / RAW12**.
+
+    Add ``.webp`` to the ``filetypes`` copy alone and the failure is silent, not
+    loud: the scan collects ``frame.webp``, ``.webp`` is not in the ``models``
+    copy, so the item is opened as RAW12 -- one byte per pixel of a WebP
+    bitstream, i.e. the user gets a screen of noise instead of their image, with
+    no error message at all.  A review mutation that added exactly that entry
+    kept every test in the suite green, which is why this equality is asserted
+    here rather than left to the comments in both modules.
+
+    Deliberately **not** a refactor: ``models`` is imported by most of the GUI,
+    so re-exporting one set from the other (or deleting one) is a larger change
+    than this guarded duplication.  That consolidation is its own round; until
+    then the drift is caught here.
+    """
+
+    def test_the_two_image_extension_sets_are_equal(self):
+        from raw_view import filetypes, models
+
+        self.assertEqual(
+            set(models.IMAGE_EXTENSIONS), set(filetypes.IMAGE_EXTENSIONS),
+            "models.IMAGE_EXTENSIONS and filetypes.IMAGE_EXTENSIONS have "
+            "drifted. They answer different questions (GUI default mode vs "
+            "directory-scan acceptance) but an extension in one and not the "
+            "other means a file the scan collects is opened as RAW12 instead "
+            "of as an image -- silently, with no error.",
+        )
+
+    def test_the_drift_actually_misclassifies_a_file(self):
+        """Behavioural proof of the consequence, not just set equality.
+
+        ``_apply_default_options`` is called on a bare ``MainWindow`` object
+        (``__new__``, no Qt build) so this stays headless and fast.  If a future
+        change made the RAW fall-through harmless, the equality test above would
+        be pinning a non-issue -- this one would notice.
+        """
+        from raw_view import filetypes
+        from raw_view.models import ViewerItem
+
+        window = _new_window()
+        for suffix in sorted(filetypes.IMAGE_EXTENSIONS):
+            with self.subTest(suffix=suffix):
+                item = ViewerItem()
+                window._apply_default_options(item, f"frame{suffix}")
+                self.assertEqual(
+                    item.options.image_type, "Standard Image",
+                    f"{suffix} is accepted by the directory scan but opened as "
+                    f"{item.options.image_type}, not as an image",
+                )
+
+    def test_every_supported_image_suffix_round_trips_through_the_scan(self):
+        """The same agreement, seen from the scan side.
+
+        ``is_supported_file`` accepting a suffix the model call does not call an
+        image is precisely the bug; asserting it from both directions means a
+        one-sided edit fails whichever module is touched.
+        """
+        from raw_view import filetypes
+
+        for suffix in sorted(filetypes.IMAGE_EXTENSIONS):
+            with self.subTest(suffix=suffix):
+                self.assertTrue(filetypes.is_supported_file(f"frame{suffix}"))
+                self.assertIn(suffix, filetypes.SUPPORTED_EXTENSIONS)
 
 
 # ── 无后缀文件支持（排除乱七八糟后缀 + 与文件夹区分）───────────────────────

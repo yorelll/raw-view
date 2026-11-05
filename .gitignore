@@ -40,3 +40,10 @@ raw-view-presets*.json
 *sensor-presets*.json
 *sensor_presets*.json
 presets*.json
+
+# 示例脚本的生成产物：输入/输出目录结构保留在仓库里（.gitkeep），
+# 但脚本运行时生成的文件不入库，避免 30 MB 二进制污染历史。
+sample/**/input/*
+!sample/**/input/.gitkeep
+sample/**/output/*
+!sample/**/output/.gitkeep

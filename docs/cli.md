@@ -44,6 +44,7 @@
 | 把 **YUV 换成另一种 YUV 布局**（无损重排） | `convert` | `convert -i f.nv16 -o f.yuyv --input-type yuv --input-yuv-type NV16 --yuv-type YUYV --width 1920 --height 1080` |
 | 把 **YUV 二进制解码成图** | `view` 或 `convert` | 见[第 4.3 节](#s43-yuv-to-image) |
 | 一次处理**一批文件** | `batch` | `batch -b jobs.json` |
+| 处理**整个文件夹** | `batch`（**不是** `--input 目录`） | 见[第 5 节](#s5-batch) |
 | 打开图形界面 | 无子命令 | `raw-view` |
 
 ### 三条最容易踩的坑
@@ -71,7 +72,7 @@ CLI 一共接受 26 个选项（30 种写法，含短选项与 `--batch-help` �
 
 | 参数 | 含义 | batch |
 |---|---|---|
-| `-i, --input PATH` | 输入文件 | ❌ 读 JSON 的 `files[].input` |
+| `-i, --input PATH` | 输入文件，**只接受单个文件**（目录会报错并提示改用 batch） | ❌ 读 JSON 的 `files[].input` |
 | `-o, --output PATH` | 输出文件；省略则自动命名 | ❌ 读 JSON 的 `files[].output` |
 | `--width N` / `--height N` | 帧宽 / 帧高 | ❌ 读 JSON 的 `width` / `height` |
 | `--offset N` | 跳过文件头部的字节数，默认 0 | ❌ 读 JSON 的 `offset` |
@@ -346,6 +347,35 @@ JSON 必须是**严格 JSON + UTF-8**：**不能有 `//` 注释，不能有尾�
 **什么时候用 batch、什么时候用 shell 循环**：只有一个固定命令、逐文件套用时，
 shell 循环（`for f in *.png; do raw-view convert ... "$f"; done`）更简单；当每个
 文件的参数不同（尺寸/格式/mode 混排）、或需要 glob 展开与自动命名时，用 batch。
+
+### 为什么没有「目录输入」——用 batch
+
+`view` / `convert` 的 `--input` **只接受单个文件**。指向目录时会明确报错并
+提示改用 batch（退出码 1）：
+
+```text
+$ raw-view view -i captures/ -o png/ -t RAW --raw-type RAW12 --width 1920 --height 1080
+Error: --input is a directory: captures/
+       view/convert process one file at a time.
+       To process a whole folder, use batch:
+         raw-view batch --help-batch     JSON format + ready-to-run examples
+         sample/batch/                   runnable examples you can copy
+       Or point --input at a single file:
+         raw-view view -i <path to one file> -o out.png --width W --height H ...
+```
+
+曾有「输入目录就扫描整棵树、用同一组参数处理」的模式，**已按设计取消**，
+原因是它天然带来三个问题，而 batch 本来就没有：
+
+| 问题 | 目录输入 | batch |
+|---|---|---|
+| 同名文件 | 递归扫描 + 扁平输出 → `a/frame.png` 与 `b/frame.png` 静默互相覆盖，却报"2 个成功" | 自动命名的冲突逐条去重（`_2`/`_3`）并打印提示 |
+| 格式判定 | 只按后缀扫描，不检查 `--target` → PNG 被当 RAW12 二进制"解码成功"，exit=0 | 每条任务自己写清 `mode`/`target`/`input_type` |
+| 输出路径 | 需额外推断 `-o out`（不存在、无尾分隔符）算文件还是目录 | `output_dir` 是显式字段，没有任何猜测 |
+
+结论：**批量处理一个文件夹请用 batch**——`files` 的每个条目用 `input` 指 glob（
+`"files": [{"input": "captures/*.raw"}]`），全局键给共用的 `width`/`height`/`target`，
+条目键按需覆盖。可运行的示例见 [`sample/batch/`](../sample/batch/)。
 
 ### 5.1 最小可用示例
 

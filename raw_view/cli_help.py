@@ -388,11 +388,12 @@ QUICK EXAMPLES
   raw-view view file1.raw file2.png          (opens the GUI on these files)
 
 CORE OPTIONS
-  -i, --input PATH     Input file                      (view, convert)
-  -o, --output PATH    Output file; omitted -> auto-named (view, convert)
-  --width N            Frame width                     (view, convert)
-  --height N           Frame height                    (view, convert)
-  --offset N           Bytes skipped before the frame  (view, convert)
+  -i, --input PATH     Input file, exactly one              (view, convert)
+                       (a directory is rejected -- use `batch` for a folder)
+  -o, --output PATH    Output file (auto-named if omitted)  (view, convert)
+  --width N            Frame width                          (view, convert)
+  --height N           Frame height                         (view, convert)
+  --offset N           Bytes skipped before the frame       (view, convert)
 
   batch ignores these five; it takes every parameter from the JSON file.
   See --help-batch for how to set width/height/offset there.
@@ -432,7 +433,8 @@ USAGE
   raw-view view [file ...]        (no -i: opens the GUI and loads these files)
 
 CORE OPTIONS
-  -i, --input PATH    the binary to decode
+  -i, --input PATH    the binary to decode; exactly one file
+                      (a directory is rejected -- use `batch` for a folder)
   -o, --output PATH   image to write (.png/.jpg/.bmp/.tif)
                       omitted -> <input dir>/view_out/<stem>_<W>x<H>_<fmt>.png
   --width / --height  SOURCE frame geometry (default 640x480) -- must match the
@@ -535,6 +537,10 @@ USAGE
   raw-view convert -i INPUT -o OUTPUT [-t {{RAW|YUV}}] [options]
   In convert, -t/--target names what you WRITE (in view it names what you READ).
 
+INPUT
+  -i, --input PATH    exactly one file to read
+                      (a directory is rejected -- use `batch` for a folder)
+
 WHICH JOB RUNS (decided by --input-type and by the output file extension)
   1. image -> RAW/YUV   --input-type image (default)
        Decodes PNG/JPG/BMP, resizes it to --width x --height, writes RAW or YUV.
@@ -591,7 +597,7 @@ JOB 1 DETAILS
 JOB 2 DETAILS -- the YUV families
   Conversions are pure byte permutations inside one family:
     {_YUV_422}   (6 formats, 30 directions)
-    {_YUV_420}   (4 formats, 12 directions)
+    {_YUV_420}{" " * (len(_YUV_422) - len(_YUV_420))}   (4 formats, 12 directions)
   Every pair inside a family converts; the following are refused with a reason:
     4:2:2 <-> 4:2:0   changes chroma sampling, i.e. lossy chroma resampling
     YOnly <-> 4:2:x   YOnly has no chroma planes; colour would have to be invented
@@ -689,6 +695,12 @@ is valid JSON exactly as printed: copy one, save it, and run it.
 Use batch when the jobs differ, share a shape, or are many; a shell loop calling
 `raw-view convert` once per file is simpler when there is exactly one fixed
 command and no per-file variation.
+
+WANT TO PROCESS A WHOLE FOLDER? This is the way. view and convert take exactly
+one file (a directory is rejected -- use `batch` for a folder); batch is what
+replaces that -- point one entry's "input" at a glob:
+{{"files": [{{"input": "captures/*.raw"}}]}}. Ready-to-run examples live in
+sample/batch/.
 
 GLOBAL KEYS -- defaults for every entry; any entry may override any of them
   mode             "convert" (default) | "view"

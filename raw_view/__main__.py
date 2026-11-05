@@ -514,6 +514,42 @@ def _check_transcode_args_for(spec, target: str = "YUV") -> None:
 
 # ── View mode (CLI decode + GUI fallback) ─────────────────────────────
 
+#: Shown when ``--input`` names a directory.  ``view``/``convert`` handle one
+#: file; a whole folder is ``batch``'s job (see ``sample/batch/``).
+_DIRECTORY_INPUT_HINT = (
+    "       view/convert process one file at a time.\n"
+    "       To process a whole folder, use batch:\n"
+    "         raw-view batch --help-batch     JSON format + ready-to-run examples\n"
+    "         sample/batch/                   runnable examples you can copy\n"
+    "       Or point --input at a single file:\n"
+)
+
+
+def _reject_directory_input(input_arg: str, single_file_example: str) -> None:
+    """Refuse a directory for ``--input`` and point the user at ``batch``.
+
+    ``view``/``convert`` process exactly one file.  A folder-input mode used to
+    exist here and was cancelled on purpose: a recursive scan into a flat output
+    directory silently overwrote same-named files while reporting success, and
+    it decoded any supported suffix without checking ``--target``.  ``batch``
+    already handles a whole folder with per-entry parameters (and ships runnable
+    examples), so a second implementation is pure coupling.
+
+    Saying "input file not found" here would send the user hunting for a typo in
+    an existing directory, so the rejection is explicit and exits 1.
+    """
+    if not os.path.isdir(input_arg):
+        return
+    message = (
+        f"--input is a directory: {input_arg}\n"
+        + _DIRECTORY_INPUT_HINT
+        + f"         {single_file_example}"
+    )
+    logger.error("Directory input rejected: %s", input_arg)
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _apply_arg_defaults(args: argparse.Namespace) -> None:
     """Backfill the historical defaults of ``--width``/``--height``/``--target``.
 
@@ -546,6 +582,11 @@ def _run_view_mode(args: argparse.Namespace) -> None:
         sys.exit(2)
     _apply_arg_defaults(args)
     if args.input:
+        _reject_directory_input(
+            args.input,
+            "raw-view view -i <path to one file> -o out.png "
+            "--width W --height H ...",
+        )
         raw_type = args.input_raw_type or args.raw_type
         yuv_type = args.input_yuv_type or args.yuv_type
         _run_view_decode(
@@ -725,6 +766,11 @@ def _run_convert(args: argparse.Namespace) -> None:
         logger.error("--input is required for convert mode")
         print("Error: --input is required for convert mode", file=sys.stderr)
         sys.exit(1)
+    _reject_directory_input(
+        args.input,
+        "raw-view convert -i <path to one file> -o out.raw "
+        "--target RAW --width W --height H ...",
+    )
     if not os.path.isfile(args.input):
         logger.error("Input file not found: %s", args.input)
         print(f"Error: input file not found: {args.input}", file=sys.stderr)

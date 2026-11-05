@@ -49,6 +49,69 @@ def _unwrapped(text: str) -> str:
     return re.sub(r"[ ]{2,}", " ", joined)
 
 
+#: A help-page table row: two spaces, an option token (``-x``/``--long``), two
+#: or more spaces of padding, then the description.  A *continuation* line
+#: (indented, no leading ``-``) is deliberately not a row -- ``-i`` has one and
+#: it carries no scope column.
+_HELP_ROW = re.compile(r"^(  -\S.*?)( {2,})(\S.*)$")
+
+#: A trailing parenthesised annotation on an option row: the ``(view, convert)``
+#: scope column, ``(default RAW12)``, ``(convert only)``.  **One** space is
+#: accepted, deliberately: the defect being guarded against is a row whose
+#: annotation was pushed right by a too-long description, and that row then had
+#: a single space in front of it.  Requiring 2+ spaces would make the detector
+#: blind to exactly the shape it exists to catch.
+_HELP_TAIL = re.compile(r"\s+(\([^()]*\))$")
+
+
+def _scope_columns(text: str) -> dict[tuple[str, str], list[tuple[int, int]]]:
+    """Map ``(section, annotation)`` -> ``[(line number, 1-based column), ...]``.
+
+    Rows are grouped by the section header above them, so different blocks are
+    free to line up at different columns (they do: ``CORE OPTIONS`` sits further
+    right than ``MODE PAGES``, because its option column is wider).  Within one
+    block, the same annotation must start at the same column -- otherwise the
+    table reads as if one row were indented differently.
+
+    Why this exists (review of 0.5.8): the ``-o, --output`` row of the main page
+    put its ``(view, convert)`` 3 columns right of the other four.  The line
+    was only 73 characters wide, so the 100-column guard passed; width is not
+    alignment.  Annotations that appear once in a block constrain nothing, so
+    only groups of 2+ rows are compared -- see
+    ``test_annotation_used_once_is_not_a_constraint``.
+    """
+    groups: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    section = "<top>"
+    for number, line in enumerate(text.splitlines(), start=1):
+        if line and not line.startswith(" "):
+            section = line.strip()
+            continue
+        if not _HELP_ROW.match(line):
+            continue
+        tail = _HELP_TAIL.search(line)
+        if tail is None:
+            continue
+        groups.setdefault((section, tail.group(1)), []).append(
+            (number, line.index(tail.group(1)) + 1)
+        )
+    return groups
+
+
+def _misaligned_scope_columns(text: str) -> list[str]:
+    """Human-readable description of every misaligned annotation in *text*."""
+    problems = []
+    for (section, annotation), positions in _scope_columns(text).items():
+        if len(positions) < 2:
+            continue
+        columns = sorted({column for _, column in positions})
+        if len(columns) > 1:
+            problems.append(
+                f"section {section!r}: {annotation} starts at columns {columns} "
+                f"(lines {[number for number, _ in positions]})"
+            )
+    return problems
+
+
 def _run_cli(*argv: str, timeout: int = 120,
              cwd: str | None = None,
              env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
@@ -919,6 +982,230 @@ class HelpIsAsciiTests(unittest.TestCase):
                            ("convert", convert_help()), ("batch", batch_help())):
             with self.subTest(page=name):
                 text.encode("cp1252")
+
+    def test_no_page_has_a_line_over_100_columns(self):
+        """Review L-1 (0.5.7): long command lines folded badly in an 80-col
+        terminal (one convert line reached 175).  The pages were re-wrapped; a
+        guard is what keeps a future edit from re-introducing a 130-column line
+        that no test would notice."""
+        from raw_view.cli_help import (
+            batch_help, convert_help, main_help, view_help,
+        )
+
+        pages = {
+            "main": main_help("0.0.0"),
+            "view": view_help(),
+            "convert": convert_help(),
+            "batch": batch_help(),
+        }
+        for name, text in pages.items():
+            with self.subTest(page=name):
+                over = [
+                    (number, len(line))
+                    for number, line in enumerate(text.splitlines(), start=1)
+                    if len(line) > 100
+                ]
+                self.assertEqual(over, [], f"{name} help has lines over 100 chars")
+
+
+class HelpColumnAlignmentTests(unittest.TestCase):
+    """Review round 4: within one block, the scope column must be one column.
+
+    The defect this pins: on the main page ``-o, --output PATH`` put its
+    ``(view, convert)`` at column 59 while ``-i``/``--width``/``--height``/
+    ``--offset`` all sat at 56.  The description
+    ``Output file; omitted -> auto-named`` was three characters longer than the
+    others and the author moved the *scope* instead of shortening the sentence,
+    so the five rows no longer read as one table.
+
+    Why the existing guards missed it: the width guard only looks at how long a
+    line is (that row was 73 of 100 columns), and no test compared two rows to
+    each other.  Width is not alignment -- a block can be uniformly wide and
+    still ragged, or uniformly narrow and ragged in the middle.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from raw_view.cli_help import (
+            batch_help, convert_help, main_help, view_help,
+        )
+
+        cls.pages = {
+            "main": main_help("0.0.0"),
+            "view": view_help(),
+            "convert": convert_help(),
+            "batch": batch_help(),
+        }
+
+    def test_no_block_has_a_ragged_annotation_column(self):
+        for name, text in self.pages.items():
+            with self.subTest(page=name):
+                self.assertEqual(
+                    _misaligned_scope_columns(text), [],
+                    f"{name} help has rows whose column does not line up",
+                )
+
+    def test_core_options_scope_column_is_identical_for_all_five_rows(self):
+        """The exact regression, asserted on the exact block.
+
+        A generic sweep alone would pass if someone deleted the fifth row; this
+        fixes the expectation: five core options, one ``(view, convert)`` column.
+        """
+        block = self.pages["main"].split("CORE OPTIONS", 1)[1].split(
+            "MODE PAGES", 1
+        )[0]
+        rows = [
+            line for line in block.splitlines() if "(view, convert)" in line
+        ]
+        self.assertEqual(len(rows), 5, "expected the five core options")
+        columns = {line.index("(view, convert)") + 1 for line in rows}
+        self.assertEqual(
+            len(columns), 1,
+            "the five CORE OPTIONS rows put (view, convert) at different "
+            f"columns {sorted(columns)}:\n" + "\n".join(rows),
+        )
+
+    def test_input_continuation_line_is_not_treated_as_a_row(self):
+        """``-i`` wraps onto a second line that carries no scope.
+
+        The second line is indented under the description column and starts
+        with ``(``, so a naive "every line with a parenthesised tail" parser
+        would compare it against the real rows and report a phantom
+        misalignment -- or, worse, a "fix" that aligned the wrong lines.
+        """
+        block = self.pages["main"].split("CORE OPTIONS", 1)[1].split(
+            "MODE PAGES", 1
+        )[0]
+        lines = block.splitlines()
+        index = next(
+            position for position, line in enumerate(lines)
+            if line.strip().startswith("-i, --input")
+        )
+        continuation = lines[index + 1]
+        self.assertTrue(continuation.strip().startswith("(a directory is rejected"))
+        self.assertIsNone(
+            _HELP_ROW.match(continuation),
+            "the continuation line must not parse as an option row",
+        )
+
+    def test_annotation_used_once_is_not_a_constraint(self):
+        """A lone annotation has no column to agree with, so it is not flagged.
+
+        Without this, every re-wrapped prose line ending in parentheses would be
+        a false positive, and the sane fix would be to weaken the guard.
+        """
+        sample = "\n".join([
+            "RAW OPTIONS",
+            "  --raw-type       RAW8, RAW10, RAW12 (default RAW12)",
+            "  --alignment      msb | lsb (default msb)",
+        ])
+        self.assertEqual(_misaligned_scope_columns(sample), [])
+
+    def test_detector_reports_the_original_defect(self):
+        """Mutation check without touching the source: the detector must fire.
+
+        A test that only ever sees correct input proves nothing about the
+        detector -- a helper hard-wired to return ``[]`` would also pass the
+        sweep above.  This feeds it the 3-column-right row that shipped in 0.5.8.
+        """
+        sample = "\n".join([
+            "CORE OPTIONS",
+            "  -i, --input PATH     Input file, exactly one         (view, convert)",
+            "  -o, --output PATH    Output file; omitted -> auto-named (view, convert)",
+            "  --width N            Frame width                     (view, convert)",
+        ])
+        problems = _misaligned_scope_columns(sample)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("(view, convert)", problems[0])
+        self.assertIn("CORE OPTIONS", problems[0])
+
+    def test_different_blocks_may_use_different_columns(self):
+        """Grouping is per block on purpose: the pages are not one grid.
+
+        ``CORE OPTIONS`` (option column 23) and ``MODE PAGES`` (20) legitimately
+        line up at different columns on the same page; a page-wide grouping
+        would have demanded an unnecessary rewrite of the second block.
+        """
+        # Same annotation, two blocks: CORE OPTIONS rows are ``-i, --input``
+        # (option column 23) and the -h/--version rows in MODE PAGES are
+        # ``-h, --help`` (column 20), so one page-wide grouping would demand a
+        # rewrite that makes the page worse.
+        sample = "\n".join([
+            "CORE OPTIONS",
+            "  -i, --input PATH     Input file, exactly one        (view, convert)",
+            "  --width N            Frame width                    (view, convert)",
+            "MODE PAGES",
+            "  -h, --help        This page           (view, convert)",
+            "  --version         Print the version   (view, convert)",
+        ])
+        self.assertEqual(_misaligned_scope_columns(sample), [])
+        columns = _scope_columns(sample)
+        core = {column for _, column in columns[("CORE OPTIONS", "(view, convert)")]}
+        mode_pages = {column for _, column in columns[("MODE PAGES", "(view, convert)")]}
+        self.assertEqual(len(core), 1)
+        self.assertEqual(len(mode_pages), 1)
+        self.assertNotEqual(core, mode_pages)
+
+
+class DirectoryInputIsCoveredEverywhereTests(unittest.TestCase):
+    """L-3: every page that documents ``-i`` must say it takes one file only.
+
+    ``view``/``convert`` reject a directory with a batch pointer, but the user
+    only meets that error *after* the mistake.  ``--help-batch`` already said
+    so; the two pages where ``-i`` is actually typed did not.
+    """
+
+    _NOTE = "(a directory is rejected -- use `batch` for a folder)"
+
+    @classmethod
+    def setUpClass(cls):
+        from raw_view.cli_help import (
+            batch_help, convert_help, main_help, view_help,
+        )
+
+        cls.pages = {
+            "main": main_help("0.0.0"),
+            "view": view_help(),
+            "convert": convert_help(),
+            "batch": batch_help(),
+        }
+
+    def test_every_page_with_minus_i_states_the_single_file_rule(self):
+        for name in ("main", "view", "convert", "batch"):
+            with self.subTest(page=name):
+                self.assertIn(self._NOTE, self.pages[name])
+
+    def test_the_note_sits_directly_below_the_input_option(self):
+        """The note must be attached to ``-i`` on every page, not to batch prose.
+
+        Three pages saying it three different ways is how help drifts; placing
+        it under the option itself is what makes it reachable before the user
+        hits the error.
+        """
+        for name in ("main", "view", "convert"):
+            with self.subTest(page=name):
+                lines = [line.strip() for line in self.pages[name].splitlines()]
+                index = next(
+                    position for position, line in enumerate(lines)
+                    if line.startswith("-i, --input")
+                )
+                self.assertEqual(lines[index + 1], self._NOTE)
+
+    def test_batch_folder_example_is_a_valid_entry_object(self):
+        """The folder pointer must be copy-pasteable JSON, not a bare string.
+
+        ``"files": ["captures/*.raw"]`` is rejected by the validator
+        (``files[0] must be a JSON object, got str``), so the example that tells
+        users to use batch would itself fail on the first run.
+        """
+        import re
+
+        text = self.pages["batch"]
+        match = re.search(r'\{"files": \[.*?\]\}', text)
+        self.assertIsNotNone(match, "the batch page no longer shows a files example")
+        document = json.loads(match.group(0))
+        self.assertIsInstance(document["files"][0], dict)
+        self.assertIn("input", document["files"][0])
 
 
 class LauncherRoutingTests(unittest.TestCase):
