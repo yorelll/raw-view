@@ -70,6 +70,32 @@ DEFAULT_CONVERT_HEIGHT = 1440
 INPUT_FILE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
 
 
+def _make_subcard(title: str) -> tuple[QFrame, QFormLayout]:
+    """Build one bordered form section (0.5.10 P3 grouping).
+
+    The Convert page used to be one 17-row flat form; splitting it into
+    ``Input`` / ``Output`` / ``Format`` lets the eye find a parameter without
+    reading every label.  ``QFrame#subcard`` is the nested surface in the
+    stylesheet (transparent fill + 1 px border, radius 8).
+    """
+    frame = QFrame()
+    frame.setObjectName("subcard")
+    frame.setFrameShape(QFrame.StyledPanel)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(8)
+    heading = QLabel(title)
+    heading.setObjectName("groupTitle")
+    layout.addWidget(heading)
+    form = QFormLayout()
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setHorizontalSpacing(10)
+    form.setVerticalSpacing(6)
+    form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    layout.addLayout(form)
+    return frame, form
+
+
 def _is_file_in_use_error(exc: BaseException) -> bool:
     """True only for OS errors caused by another program holding the target.
 
@@ -343,36 +369,54 @@ class ConvertDialog(QDialog):
         output_row_w.setLayout(output_row)
 
         # ── Layout construction ───────────────────────────────────────
-        form = QFormLayout()
-        # Kept for _apply_cond_rows(): hidden conditional rows are taken out of
-        # the layout (setVisible alone still reserves a 6px row gap).
-        self._form = form
-        form.addRow("Input file", input_row_w)
-        form.addRow("Input type", self.input_type)
-        form.addRow("", self._input_hint)
-        form.addRow("Input YUV format", self.input_yuv_type)
-        form.addRow("Source offset (bytes)", self.offset)
-        form.addRow("Output file", output_row_w)
-        form.addRow("Target", self.target_type)
-        form.addRow("RAW type", self.raw_type)
-        form.addRow("YUV format", self.yuv_type)
+        # Three subcards (P3) instead of one flat 17-row form.  Each card owns
+        # its own QFormLayout; ``_form`` stays the *Input* form because the
+        # dialog-level Mode row aligns to the first visible card's label
+        # column (see _sync_mode_row_alignment).
+        input_card, input_form = _make_subcard("Input")
+        output_card, output_form = _make_subcard("Output")
+        format_card, format_form = _make_subcard("Format")
+
+        input_form.addRow("Input file", input_row_w)
+        input_form.addRow("Input type", self.input_type)
+        input_form.addRow("", self._input_hint)
+        input_form.addRow("Input YUV format", self.input_yuv_type)
+        input_form.addRow("Source offset (bytes)", self.offset)
+
+        output_form.addRow("Output file", output_row_w)
+        output_form.addRow("Target", self.target_type)
+        output_form.addRow("Width", self.width)
+        output_form.addRow("Height", self.height)
+
+        format_form.addRow("RAW type", self.raw_type)
+        format_form.addRow("YUV format", self.yuv_type)
         # YOnly 位深（YOnly 时显示）；其后为位对齐/大小端（YOnly 多 bit 需要）
-        form.addRow("Bit depth", self.bit_depth_combo)
-        form.addRow("Alignment", self.align)
-        form.addRow("Endianness", self.endian)
-        form.addRow("RAW source", self.raw_source_mode)
-        form.addRow("Bayer pattern", self.bayer_pattern)
-        form.addRow("Width", self.width)
-        form.addRow("Height", self.height)
+        format_form.addRow("Bit depth", self.bit_depth_combo)
+        format_form.addRow("Alignment", self.align)
+        format_form.addRow("Endianness", self.endian)
+        format_form.addRow("RAW source", self.raw_source_mode)
+        format_form.addRow("Bayer pattern", self.bayer_pattern)
+
+        # ``_form`` is the Input form: the Mode row lives above the stack and
+        # must line up with the first card's label column.
+        self._form = input_form
+        # Display order, used by _apply_cond_rows() and by structural tests.
+        self._form_sequence = [input_form, output_form, format_form]
+        # Form labels now sit inside a bordered subcard: the Mode row above the
+        # stack must be inset by the card's frame + left margin to stay in the
+        # same column (frameWidth() is 1 for QFrame.StyledPanel).
+        self._convert_form_inset = (
+            input_card.frameWidth() + input_card.layout().contentsMargins().left()
+        )
 
         # QFormLayout hides only the field, never the row label.  Cache every
         # conditional row's label so _apply_cond_rows() can move both together;
         # otherwise a hidden field leaves its label dangling with no control
         # next to it (0.5.10 review H-1).  Collected after all addRow() calls:
         # labelForField() only answers for a field already in the form.
-        self._cond_row_labels = {
-            field: form.labelForField(field)
-            for field in (
+        self._cond_row_labels = {}
+        for _form in self._form_sequence:
+            for _field in (
                 self.input_yuv_type,
                 self.offset,
                 self.raw_type,
@@ -381,32 +425,30 @@ class ConvertDialog(QDialog):
                 self.endian,
                 self.raw_source_mode,
                 self.bayer_pattern,
-            )
-        }
-        self._cond_row_labels = {
-            field: label
-            for field, label in self._cond_row_labels.items()
-            if label is not None
-        }
+            ):
+                _label = _form.labelForField(_field)
+                if _label is not None:
+                    self._cond_row_labels[_field] = _label
         # Named handle kept for readability/tests; visibility is driven through
         # _apply_cond_rows() so the label can never drift from its field.
         self._offset_label = self._cond_row_labels.get(self.offset)
 
-        # Conditional rows grouped by the fixed row that follows them, so a
-        # visible row is inserted back at its original position (0.5.10.1
-        # review L-1).  ``None`` means "append after everything else".
+        # Conditional rows grouped by their owning form and by the fixed row
+        # that follows them, so a visible row is inserted back at its original
+        # position (0.5.10.1 review L-1).  ``None`` anchors append at the end
+        # of that form.
         self._cond_row_groups = (
             (
-                output_row_w, (
+                input_form, None, (
                     (self.input_yuv_type, "Input YUV format"),
                     (self.offset, "Source offset (bytes)"),
                 ),
             ),
             (
-                self.yuv_type, ((self.raw_type, "RAW type"),),
+                format_form, self.yuv_type, ((self.raw_type, "RAW type"),),
             ),
             (
-                self.width, (
+                format_form, None, (
                     (self.bit_depth_combo, "Bit depth"),
                     (self.align, "Alignment"),
                     (self.endian, "Endianness"),
@@ -433,7 +475,10 @@ class ConvertDialog(QDialog):
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.addLayout(form)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(input_card)
+        content_layout.addWidget(output_card)
+        content_layout.addWidget(format_card)
         content_layout.addWidget(preview_group)
 
         scroll = QScrollArea()
@@ -455,7 +500,6 @@ class ConvertDialog(QDialog):
         # destination and action button; it is NOT appended to the Convert
         # form any more (user report: the two workflows were mixed together).
         self._variant_page = VariantConvertPage(settings, self)
-        self._variant_page.generate_button.setObjectName("secondaryButton")
 
         # ── Mode selector (top of the dialog) ────────────────────────
         # Default is Convert.  "Variant Convert" is disabled (and painted grey)
@@ -486,6 +530,10 @@ class ConvertDialog(QDialog):
         self._mode_label = QLabel("Mode")
         self._mode_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self._mode_form = QFormLayout()
+        # Same label/field gap as the Convert subcard, otherwise the Mode combo
+        # starts a few pixels left of the card's fields even when the label
+        # columns match.
+        self._mode_form.setHorizontalSpacing(input_form.horizontalSpacing())
         self._mode_form.addRow(self._mode_label, self.mode_selector)
 
         self._stack = QStackedWidget()
@@ -506,9 +554,11 @@ class ConvertDialog(QDialog):
         # would let the tall Variant page stretch the Convert page.
         # NB: self.width / self.height are QSpinBox attributes on this dialog,
         # so QWidget.width()/height() are shadowed — use sizeHint() instead.
+        self._max_dialog_height = 720
         screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
-            max_h = int(screen.availableGeometry().height() * 0.9)
+            max_h = min(int(screen.availableGeometry().height() * 0.85), 720)
+            self._max_dialog_height = max_h
             self.setMaximumHeight(max_h)
             hint = self._stack.currentWidget().sizeHint()
             self.resize(hint.width(), min(hint.height(), max_h))
@@ -674,10 +724,9 @@ class ConvertDialog(QDialog):
         ``_cond_row_labels`` the only place label widgets are cached, so a
         label can never drift from its field.
         """
-        form = self._form
         # 1) Detach only the rows that must be hidden.  Recompute the row index
         # each time: takeRow() shifts the rows below it.
-        for _anchor, rows in self._cond_row_groups:
+        for form, _anchor, rows in self._cond_row_groups:
             for field, _label_text in rows:
                 if desired.get(field, False):
                     continue
@@ -701,43 +750,54 @@ class ConvertDialog(QDialog):
                 field.setEnabled(False)
 
         # 2) Insert the rows that must show but are not in the form yet, group
-        # by group, in declared order.  Start at the *earliest* row this group
-        # still occupies: a row that becomes visible again has to be inserted
-        # before the first surviving sibling declared after it, not merely
-        # before the anchor (otherwise ``Bit depth`` would land after the
-        # already-present ``Alignment``/``Endianness``).
-        for anchor, rows in self._cond_row_groups:
-            insert_at = (
+        # by group, in declared order.  The position is derived from the
+        # currently present siblings rather than from a single anchor: after
+        # P3 the rows live in three forms and only part of a group may be
+        # visible (e.g. RAW/bayer toggling), so "insert at the anchor" could
+        # put a row *before* an earlier sibling.  Prefer the first present
+        # later sibling; otherwise place it after the last present earlier
+        # sibling; otherwise use the anchor.
+        for form, anchor, rows in self._cond_row_groups:
+            fallback = (
                 form.rowCount() if anchor is None
                 else form.getWidgetPosition(anchor)[0]
             )
-            if insert_at < 0:
-                insert_at = form.rowCount()
-            for field, _label_text in rows:
-                position = form.getWidgetPosition(field)[0]
-                if position >= 0 and desired.get(field, False):
-                    insert_at = min(insert_at, position)
-            for field, label_text in rows:
+            if fallback < 0:
+                fallback = form.rowCount()
+            for index, (field, label_text) in enumerate(rows):
                 if not desired.get(field, False):
                     continue
-                position = form.getWidgetPosition(field)[0]
-                if position < 0:
-                    label = self._cond_row_labels.get(field)
+                if form.getWidgetPosition(field)[0] >= 0:
+                    field.setEnabled(True)
+                    continue
+                insert_at = -1
+                for later_field, _later_text in rows[index + 1:]:
+                    position = form.getWidgetPosition(later_field)[0]
+                    if position >= 0:
+                        insert_at = position
+                        break
+                if insert_at < 0:
+                    for earlier_field, _earlier_text in reversed(rows[:index]):
+                        position = form.getWidgetPosition(earlier_field)[0]
+                        if position >= 0:
+                            insert_at = position + 1
+                            break
+                if insert_at < 0:
+                    insert_at = fallback
+                label = self._cond_row_labels.get(field)
+                if label is not None:
+                    form.insertRow(insert_at, label, field)
+                else:
+                    form.insertRow(insert_at, label_text, field)
+                    label = form.labelForField(field)
                     if label is not None:
-                        form.insertRow(insert_at, label, field)
-                    else:
-                        form.insertRow(insert_at, label_text, field)
-                        label = form.labelForField(field)
-                        if label is not None:
-                            self._cond_row_labels[field] = label
-                    if label is not None:
-                        label.setVisible(True)
-                    field.setVisible(True)
-                    position = insert_at
+                        self._cond_row_labels[field] = label
+                if label is not None:
+                    label.setVisible(True)
+                field.setVisible(True)
                 # Enabled state is derived here rather than from isVisible(),
                 # which is always False before show() (0.2.2).
                 field.setEnabled(True)
-                insert_at = position + 1
 
     def _sync_mode_row_alignment(self) -> None:
         """Match the Mode row columns to the *visible* page's label column.
@@ -766,6 +826,24 @@ class ConvertDialog(QDialog):
                 form = getattr(variant_page, "_top_form", None)
         if form is None:
             return
+        # The Convert form lives inside a bordered subcard, so its labels are
+        # inset by the frame + card padding; the Variant form is not.  Without
+        # this the Mode label/combo sat 13 px left of the Convert labels after
+        # P3 introduced the cards (font 24 regression test).
+        inset = (
+            getattr(self, "_convert_form_inset", 0)
+            if form is getattr(self, "_form", None)
+            else 0
+        )
+        mode_form = getattr(self, "_mode_form", None)
+        if mode_form is not None:
+            if mode_form.contentsMargins().left() != inset:
+                mode_form.setContentsMargins(inset, 0, 0, 0)
+            spacing = form.horizontalSpacing()
+            if spacing < 0:
+                spacing = 6
+            if mode_form.horizontalSpacing() != spacing:
+                mode_form.setHorizontalSpacing(spacing)
         widest = 0
         for row in range(form.rowCount()):
             item = form.itemAt(row, QFormLayout.LabelRole)
@@ -913,6 +991,14 @@ class ConvertDialog(QDialog):
         # The anchor form changed with the page; realign before the next paint
         # so the Mode row matches the page the user is now looking at.
         self._sync_mode_row_alignment()
+        # Switching pages used to leave the dialog at the old page's height, so
+        # a short Convert page was surrounded by empty space and a tall Variant
+        # page could push its footer off-screen.  Re-size to the new page within
+        # the screen cap (P3).  ``self.width``/``self.height`` are QSpinBox
+        # attributes, so use the widget's current size, not ``self.width()``.
+        cap = getattr(self, "_max_dialog_height", 720)
+        hint = self._stack.currentWidget().sizeHint()
+        self.resize(self.size().width(), min(hint.height(), cap))
         self._carry_input_between_pages(previous, self._stack.currentWidget())
 
     def _carry_input_between_pages(self, source, target) -> None:

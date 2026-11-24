@@ -718,7 +718,11 @@ class CliBackwardCompatibilityTests(unittest.TestCase):
 # ── 7. GUI: Convert dialog input-type behaviour ──────────────────────
 
 def _form_field_sequence(dialog, names: dict) -> list:
-    """Named widgets in the order they currently occupy ``dialog._form``.
+    """Named widgets in the order they currently occupy the dialog's forms.
+
+    0.5.10 P3 split Convert into Input / Output / Format subcards, each with
+    its own ``QFormLayout``; ``dialog._form_sequence`` lists them in display
+    order.  Batch keeps a single ``_form`` and is unaffected.
 
     Rows are compared by widget identity, not by label text: some rows carry an
     empty label (QFormLayout then has no LabelRole item) and ``insertRow`` may
@@ -730,13 +734,20 @@ def _form_field_sequence(dialog, names: dict) -> list:
 
     by_widget_id = {id(widget): name for name, widget in names.items()}
     sequence = []
-    for row in range(dialog._form.rowCount()):
-        item = dialog._form.itemAt(row, QFormLayout.FieldRole)
-        widget = item.widget() if item is not None else None
-        name = by_widget_id.get(id(widget))
-        if name is not None:
-            sequence.append(name)
+    for form in getattr(dialog, "_form_sequence", None) or [dialog._form]:
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.FieldRole)
+            widget = item.widget() if item is not None else None
+            name = by_widget_id.get(id(widget))
+            if name is not None:
+                sequence.append(name)
     return sequence
+
+
+def _form_row_count(dialog) -> int:
+    """Total row count across the dialog's form(s), in display order."""
+    forms = getattr(dialog, "_form_sequence", None) or [dialog._form]
+    return sum(form.rowCount() for form in forms)
 
 
 class _DialogTestBase(unittest.TestCase):
@@ -1074,10 +1085,11 @@ class ConvertDialogInputTypeTests(_DialogTestBase):
             show_raw = raw and not input_yuv
             show_bit = (not raw) and yonly and not input_yuv
             show_align = raw or show_bit
+            # P3 card order: Input -> Output -> Format.
             order = ["input_type", "input_hint"]
             if input_yuv:
                 order += ["input_yuv_type", "offset"]
-            order += ["target"]
+            order += ["target", "width", "height"]
             if show_raw:
                 order += ["raw_type"]
             order += ["yuv_type"]
@@ -1089,7 +1101,6 @@ class ConvertDialogInputTypeTests(_DialogTestBase):
                 order += ["raw_source"]
                 if bayer:
                     order += ["bayer"]
-            order += ["width", "height"]
             return order
 
         def check(state, **kwargs):
@@ -1112,7 +1123,7 @@ class ConvertDialogInputTypeTests(_DialogTestBase):
             # row was removed; its explanation lives in Format Help only.
             visible_cond = sum(1 for want in wanted.values() if want)
             self.assertEqual(
-                dialog._form.rowCount(), 8 + visible_cond,
+                _form_row_count(dialog), 8 + visible_cond,
                 f"{state}: hidden rows must not reserve layout height",
             )
             # L-1 (0.5.10.2): lock the actual row *order*, not just the count.

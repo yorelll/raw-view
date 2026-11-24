@@ -204,10 +204,11 @@ class VariantConvertPage(QWidget):
 
         # ── Image-only mode ───────────────────────────────────────────
         self.image_card = QFrame()
-        self.image_card.setObjectName("card")
+        self.image_card.setObjectName("subcard")
         self.image_card.setFrameShape(QFrame.StyledPanel)
         image_layout = QVBoxLayout(self.image_card)
-        image_layout.setContentsMargins(8, 8, 8, 8)
+        image_layout.setContentsMargins(12, 10, 12, 10)
+        image_layout.setSpacing(8)
 
         image_form = QFormLayout()
         self.raw_source_mode = QComboBox()
@@ -226,10 +227,11 @@ class VariantConvertPage(QWidget):
 
         # ── YUV-only mode ─────────────────────────────────────────────
         self.yuv_card = QFrame()
-        self.yuv_card.setObjectName("card")
+        self.yuv_card.setObjectName("subcard")
         self.yuv_card.setFrameShape(QFrame.StyledPanel)
         yuv_layout = QVBoxLayout(self.yuv_card)
-        yuv_layout.setContentsMargins(8, 8, 8, 8)
+        yuv_layout.setContentsMargins(12, 10, 12, 10)
+        yuv_layout.setSpacing(8)
 
         yuv_form = QFormLayout()
         # Only formats the transcoder can read: YOnly has no chroma planes and
@@ -312,6 +314,21 @@ class VariantConvertPage(QWidget):
         output_folder_row.addWidget(self._same_dir_cb, 0)
         output_folder_row.addStretch(1)
 
+        # Destination controls get their own "Output" section instead of
+        # floating between the format cards and the footer (P3).
+        output_card = QFrame()
+        output_card.setObjectName("subcard")
+        output_card.setFrameShape(QFrame.StyledPanel)
+        output_layout = QVBoxLayout(output_card)
+        output_layout.setContentsMargins(12, 10, 12, 10)
+        output_layout.setSpacing(6)
+        output_title = QLabel("Output")
+        output_title.setObjectName("groupTitle")
+        output_layout.addWidget(output_title)
+        output_layout.addLayout(output_folder_row)
+        output_layout.addWidget(self._output_dir_widget)
+        output_layout.addWidget(self._output_dir_hint)
+
         # ── Generate button (pinned below the scroll area) ────────────
         self.generate_button = QPushButton("Generate Variants")
         self.generate_button.setObjectName("accentButton")
@@ -333,13 +350,14 @@ class VariantConvertPage(QWidget):
         self._top_form.addRow("Input file", input_row_w)
         self._top_form.addRow("Input type", self.input_type)
         self._top_form.addRow("", self._input_hint)
+        content_layout.setSpacing(8)
         content_layout.addLayout(self._top_form)
         content_layout.addWidget(self.image_card)
         content_layout.addWidget(self.yuv_card)
-        content_layout.addLayout(self._dims_form)
-        content_layout.addLayout(output_folder_row)
-        content_layout.addWidget(self._output_dir_widget)
-        content_layout.addWidget(self._output_dir_hint)
+        # Width/Height (source frame size for YUV) and the destination live in
+        # the same Output section.
+        output_layout.insertLayout(1, self._dims_form)
+        content_layout.addWidget(output_card)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

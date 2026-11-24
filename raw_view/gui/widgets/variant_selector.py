@@ -135,7 +135,7 @@ class VariantSelector(QWidget):
     ) -> QFrame:
         checked = checked or set()
         frame = QFrame()
-        frame.setObjectName("card")
+        frame.setObjectName("subcard")
         frame.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -154,7 +154,7 @@ class VariantSelector(QWidget):
 
     def _make_size_group(self) -> QFrame:
         frame = QFrame()
-        frame.setObjectName("card")
+        frame.setObjectName("subcard")
         frame.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 6, 8, 6)

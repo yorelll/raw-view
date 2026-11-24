@@ -383,7 +383,10 @@ class BatchConvertDialog(QDialog):
         if screen is not None:
             avail_h = screen.availableGeometry().height()
             params_scroll.setMaximumHeight(int(avail_h * 0.45))
-            self.setMaximumHeight(int(avail_h * 0.9))
+            # P3: same 0.85 / 720 px cap as Convert so the footer never falls
+            # off a 1366x768 screen.  The form itself is deliberately unchanged
+            # (its field sequence and row count are pinned by tests).
+            self.setMaximumHeight(min(int(avail_h * 0.85), 720))
 
         # Signals
         self.input_edit.fileDropped.connect(self._on_files_dropped)
