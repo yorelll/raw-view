@@ -70,6 +70,20 @@ DEFAULT_CONVERT_HEIGHT = 1440
 INPUT_FILE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
 
 
+def _page_content_height(page: QWidget) -> int:
+    """Preferred height of a page, including content inside its QScrollArea.
+
+    ``QScrollArea.sizeHint()`` is a fixed viewport guess, so on its own it made
+    both pages look ~400px tall even though their forms need 800px+.  Prefer
+    the real content height to the scroll area's own hint.
+    """
+    height = page.sizeHint().height()
+    scroll = page.findChild(QScrollArea)
+    if scroll is not None and scroll.widget() is not None:
+        height = max(height, scroll.widget().sizeHint().height())
+    return height
+
+
 def _make_subcard(title: str) -> tuple[QFrame, QFormLayout]:
     """Build one bordered form section (0.5.10 P3 grouping).
 
@@ -560,8 +574,15 @@ class ConvertDialog(QDialog):
             max_h = min(int(screen.availableGeometry().height() * 0.85), 720)
             self._max_dialog_height = max_h
             self.setMaximumHeight(max_h)
-            hint = self._stack.currentWidget().sizeHint()
-            self.resize(hint.width(), min(hint.height(), max_h))
+            page = self._stack.currentWidget()
+            # The page hint does not include the dialog chrome (Mode row,
+            # margins, footer spacing).  Add it back, and prefer the scroll
+            # content's height over QScrollArea's fixed 400px guess so the
+            # dialog opens tall enough for the grouped cards.
+            chrome = max(self.sizeHint().height() - self._stack.sizeHint().height(), 0)
+            hint = page.sizeHint()
+            height = _page_content_height(page) + chrome
+            self.resize(hint.width(), min(height, max_h))
 
         # Signals
         self.input_edit.fileDropped.connect(self._sync_default_output)
@@ -997,8 +1018,10 @@ class ConvertDialog(QDialog):
         # the screen cap (P3).  ``self.width``/``self.height`` are QSpinBox
         # attributes, so use the widget's current size, not ``self.width()``.
         cap = getattr(self, "_max_dialog_height", 720)
-        hint = self._stack.currentWidget().sizeHint()
-        self.resize(self.size().width(), min(hint.height(), cap))
+        page = self._stack.currentWidget()
+        chrome = max(self.sizeHint().height() - self._stack.sizeHint().height(), 0)
+        height = _page_content_height(page) + chrome
+        self.resize(self.size().width(), min(height, cap))
         self._carry_input_between_pages(previous, self._stack.currentWidget())
 
     def _carry_input_between_pages(self, source, target) -> None:
