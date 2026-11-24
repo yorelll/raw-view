@@ -569,12 +569,19 @@ class CondRowShortCircuitTests(_WindowFixture):
             self.assertFalse(field.isEnabled(), f"{name} must stay disabled")
 
         # The row that follows the conditional block must sit directly under the
-        # row that precedes it: no blank slot left behind.
-        width_row = form.getWidgetPosition(self.panel.width_spin)[0]
+        # row that precedes it: no blank slot left behind.  0.5.10 P2 renders
+        # Width/Height as one merged ``size_row`` under a "Geometry" heading,
+        # so the section heading is the first row after the conditional block.
+        geometry_row = form.getWidgetPosition(self.panel._geometry_section_label)[0]
+        size_row = form.getWidgetPosition(self.panel.size_row)[0]
         format_row = form.getWidgetPosition(self.panel.format_combo)[0]
         self.assertEqual(
-            width_row - format_row, 1,
+            geometry_row - format_row, 1,
             "hidden conditional rows must not leave a gap in the form",
+        )
+        self.assertEqual(
+            size_row - geometry_row, 1,
+            "the merged Size row must directly follow the Geometry heading",
         )
 
     def test_raw_yuv_raw_round_trip_keeps_row_order(self):

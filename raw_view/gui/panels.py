@@ -387,35 +387,51 @@ class ControlPanel(QWidget):
         zoom_layout.addWidget(self.zoom_slider, 1)
         zoom_layout.addWidget(self.zoom_spin)
 
+        # ── Size row (Width x Height on one 4px-grid row) ─────────────
+        size_row = QWidget()
+        size_layout = QHBoxLayout(size_row)
+        size_layout.setContentsMargins(0, 0, 0, 0)
+        size_layout.setSpacing(6)
+        size_layout.addWidget(self.width_spin, 1)
+        self._size_x_label = QLabel("×")
+        self._size_x_label.setAlignment(Qt.AlignCenter)
+        self._size_x_label.setProperty("role", "formLabel")
+        size_layout.addWidget(self._size_x_label, 0)
+        size_layout.addWidget(self.height_spin, 1)
+        self.size_row = size_row
+
         # ── Apply button ──
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.setObjectName("accentButton")
+        # 34px panel action; the generic accentButton rule is 30px.
+        self.apply_btn.setProperty("applyPrimary", True)
         self.apply_btn.setToolTip("Apply current decode parameters (Ctrl+A)")
 
         # ── Layout ──
         form = QFormLayout(content)
-        form.setVerticalSpacing(10)
+        form.setVerticalSpacing(6)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         # 条件行显隐由 _apply_cond_rows 统一管理：用 takeRow/insertRow 把隐藏行
         # 彻底移出表单（仅 setVisible 时本机 PyQt5 的 QFormLayout 仍保留行几何，
         # 会在 Format 与 Width 之间留出大段空白，0.4.1 修复）。
         self._main_form = form
-        form.addRow("Preset", preset_select_row)
+        form.addRow(self._section_label("Preset"))
+        form.addRow(preset_select_row)
 
-        # Separator: the Preset rows are "preset management"; everything below
-        # is "parameter configuration" — divide them so the two functional
-        # areas read as distinct groups.
+        # Separator: the Preset block is "preset management"; everything below
+        # is "parameter configuration" — divide the two functional areas.
         preset_divider = QFrame()
         preset_divider.setFrameShape(QFrame.HLine)
         preset_divider.setObjectName("groupDivider")
         preset_divider.setFixedHeight(1)
         form.addRow(preset_divider)
 
+        form.addRow(self._section_label("Format"))
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
 
         # ── 条件显隐区：RAW 高级参数 + YOnly 位深（主 QFormLayout 直接行）──
-        # 不做折叠组；这些行是主表单的直接行，每个 label+field 一行。行本身
-        # 不放进容器，显隐由「状态槽同步主表单行可见性」控制：
+        # 这些行是主表单的直接行；显隐由「状态槽同步主表单行可见性」控制：
         #   - Type=RAW            → 显示 Alignment/Endianness/RAW preview/Bayer
         #   - Type=YUV+Format=YOnly → 显示 Bit depth/Alignment/Endianness
         #   - 其它（YUV 非 YOnly / Standard Image）→ 全部隐藏
@@ -437,14 +453,20 @@ class ControlPanel(QWidget):
             k: v for k, v in self._cond_row_labels.items() if v is not None
         }
 
-        form.addRow("Width", self.width_spin)
-        form.addRow("Height", self.height_spin)
+        # Anchor for the conditional block: everything that becomes visible is
+        # inserted just before the Geometry section title.
+        self._geometry_section_label = self._section_label("Geometry")
+        form.addRow(self._geometry_section_label)
+        form.addRow("Size", size_row)
         form.addRow("Offset", self.offset_spin)
+        form.addRow(self._section_label("View"))
         form.addRow("Zoom", zoom_row)
 
-        # Make Apply visually prominent and tall enough that it never gets
-        # half-clipped on small/maximized window heights.
-        self.apply_btn.setMinimumHeight(36)
+        self._mark_form_labels(form)
+
+        # Apply is a 34px primary action inside the card, inset 14px on both
+        # sides (the root layout owns the margins below); the height comes
+        # from the stylesheet's [applyPrimary="true"] rule.
         self.apply_btn.setSizePolicy(
             self.apply_btn.sizePolicy().horizontalPolicy(),
             self.apply_btn.sizePolicy().Fixed,
@@ -452,8 +474,8 @@ class ControlPanel(QWidget):
 
         scroll.setWidget(content)
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 8)
-        root_layout.setSpacing(6)
+        root_layout.setContentsMargins(14, 14, 14, 12)
+        root_layout.setSpacing(10)
         root_layout.addWidget(scroll, 1)
         # Apply button lives outside the scroll area so it is always fully
         # visible regardless of the scroll-area's content height.
@@ -1136,8 +1158,33 @@ class ControlPanel(QWidget):
         }
         self._apply_cond_rows(names)
 
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        """Small sentence-case heading spanning both form columns."""
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        return label
+
+    @staticmethod
+    def _mark_form_labels(form: QFormLayout) -> None:
+        """Apply the 92px form-label column and the 12px label role.
+
+        Section headings are ordinary labels added as spanning rows, so they
+        are excluded by their objectName.  A minimum width (rather than a
+        hard-coded fixed width on every label) keeps the field column stable
+        while still letting an unusually long translated label grow.
+        """
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.LabelRole)
+            label = item.widget() if item is not None else None
+            if label is None or label.objectName() == "sectionLabel":
+                continue
+            label.setProperty("role", "formLabel")
+            label.setMinimumWidth(92)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
     # 条件行规范顺序：(属性名, label 文本)。_apply_cond_rows 按此顺序把需要显示
-    # 的行插回 Width 行之前，保证 RAW / YOnly / 其它状态下的行序一致。
+    # 的行插回 Geometry 分组标题之前，保证 RAW / YOnly / 其它状态下的行序一致。
     _COND_ROW_SPECS = [
         ("bit_depth_combo", "Bit depth"),
         ("align_combo", "Alignment"),
@@ -1235,8 +1282,11 @@ class ControlPanel(QWidget):
                     cached_label.setVisible(False)
             field.setVisible(False)
 
-        # 2) 找到 Width 行（固定行）当前的插入位置，条件行段统一插在它前面。
-        anchor = _row_of(self.width_spin)
+        # 2) 找到 Geometry 分组标题行当前的插入位置，条件行段统一插在它前面。
+        anchor_widget = getattr(self, "_geometry_section_label", None)
+        if anchor_widget is None:
+            anchor_widget = getattr(self, "size_row", None)
+        anchor = _row_of(anchor_widget) if anchor_widget is not None else None
         insert_at = anchor if anchor is not None else form.rowCount()
 
         # 3) 按规范顺序插入需要显示的条件行，隐藏的只禁用。

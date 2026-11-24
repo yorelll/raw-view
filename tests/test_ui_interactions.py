@@ -797,7 +797,9 @@ class AdvancedVisibilityTests(unittest.TestCase):
             p.set_type("YUV")
             p.set_format("I420")
 
-        self.assertEqual(p._main_form.rowCount(), 8)
+        # 0.5.10 P2: four section headings + one merged Size row replace the
+        # old flat Width/Height rows (11 base rows instead of 8).
+        self.assertEqual(p._main_form.rowCount(), 11)
         for name, _label in p._COND_ROW_SPECS:
             field = getattr(p, name)
             self.assertIsNone(_label_for(p, field))
@@ -806,20 +808,18 @@ class AdvancedVisibilityTests(unittest.TestCase):
         # Fixed rows remain in their expected order and still have labels.
         self.assertEqual(_label_for(p, p.type_combo), "Type")
         self.assertEqual(_label_for(p, p.format_combo), "Format")
-        self.assertEqual(_label_for(p, p.width_spin), "Width")
-        self.assertEqual(_label_for(p, p.height_spin), "Height")
+        self.assertEqual(_label_for(p, p.size_row), "Size")
         self.assertEqual(_label_for(p, p.offset_spin), "Offset")
         zoom_row = p.zoom_spin.parentWidget()
         zoom_label = p._main_form.labelForField(zoom_row)
         self.assertIsNotNone(zoom_label)
         self.assertEqual(zoom_label.text(), "Zoom")
-        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
-        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 6)
-        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 5)
-        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 4)
-        self.assertEqual(p._main_form.getWidgetPosition(p.format_combo)[0], 3)
-        self.assertEqual(p._main_form.getWidgetPosition(p.type_combo)[0], 2)
-        self.assertEqual(p._main_form.rowCount(), 8)
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 10)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 8)
+        self.assertEqual(p._main_form.getWidgetPosition(p.size_row)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.format_combo)[0], 5)
+        self.assertEqual(p._main_form.getWidgetPosition(p.type_combo)[0], 4)
+        self.assertEqual(p._main_form.rowCount(), 11)
         self.assertEqual(len(p._cond_row_labels), 5)
         self.assertTrue(all(label.isHidden() for label in p._cond_row_labels.values()))
         self.assertTrue(all(getattr(p, name).isHidden() for name, _ in p._COND_ROW_SPECS))
@@ -827,14 +827,17 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.assertIsNotNone(p._main_form.labelForField(zoom_row))
         self.assertIsNotNone(p._main_form.labelForField(p.type_combo))
         self.assertIsNotNone(p._main_form.labelForField(p.format_combo))
-        self.assertIsNotNone(p._main_form.labelForField(p.width_spin))
-        self.assertIsNotNone(p._main_form.labelForField(p.height_spin))
+        self.assertIsNotNone(p._main_form.labelForField(p.size_row))
         self.assertIsNotNone(p._main_form.labelForField(p.offset_spin))
+        # Width/Height live inside the merged Size row, sharing its label.
+        self.assertIs(p.width_spin.parentWidget(), p.size_row)
+        self.assertIs(p.height_spin.parentWidget(), p.size_row)
         preset_row = p.preset_combo.parentWidget()
-        self.assertIsNotNone(p._main_form.labelForField(preset_row))
-        self.assertEqual(_label_for(p, preset_row), "Preset")
-        self.assertEqual(p._main_form.getWidgetPosition(preset_row)[0], 0)
-        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 7)
+        # The section heading carries the "Preset" text; the selector row
+        # itself is label-less (QFormLayout spanning row).
+        self.assertIsNone(p._main_form.labelForField(preset_row))
+        self.assertEqual(p._main_form.getWidgetPosition(preset_row)[0], 1)
+        self.assertEqual(p._main_form.getWidgetPosition(zoom_row)[0], 10)
         self.assertIsNotNone(p.type_combo.nextInFocusChain())
         self.assertIsNotNone(p.format_combo.nextInFocusChain())
         # The widgets remain owned by the panel for later reinsertion, but are
@@ -847,13 +850,15 @@ class AdvancedVisibilityTests(unittest.TestCase):
         self.assertTrue(p.align_combo.isHidden())
         self.assertIsNone(_label_for(p, p.align_combo))
         p.set_format("YOnly")
-        self.assertEqual(p._main_form.rowCount(), 11)
-        self.assertEqual(p._main_form.getWidgetPosition(p.bit_depth_combo)[0], 4)
-        self.assertEqual(p._main_form.getWidgetPosition(p.align_combo)[0], 5)
-        self.assertEqual(p._main_form.getWidgetPosition(p.endian_combo)[0], 6)
-        self.assertEqual(p._main_form.getWidgetPosition(p.width_spin)[0], 7)
-        self.assertEqual(p._main_form.getWidgetPosition(p.height_spin)[0], 8)
-        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 9)
+        # 3 conditional rows + Geometry section + merged Size row + Offset +
+        # View section + Zoom => 14 rows total (was 11 before 0.5.10 P2).
+        self.assertEqual(p._main_form.rowCount(), 14)
+        self.assertEqual(p._main_form.getWidgetPosition(p.bit_depth_combo)[0], 6)
+        self.assertEqual(p._main_form.getWidgetPosition(p.align_combo)[0], 7)
+        self.assertEqual(p._main_form.getWidgetPosition(p.endian_combo)[0], 8)
+        self.assertEqual(p._main_form.getWidgetPosition(p.size_row)[0], 10)
+        self.assertEqual(p._main_form.getWidgetPosition(p.offset_spin)[0], 11)
+        self.assertEqual(p._main_form.getWidgetPosition(p.zoom_spin.parentWidget())[0], 13)
         # Switch back to a plain YUV format and verify the same hidden-row
         # invariant survives reinsertion/removal once more.
         p.set_format("YUYV")

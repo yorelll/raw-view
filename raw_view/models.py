@@ -1581,6 +1581,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             max-height: 30px;
             font-weight: 600;
         }}
+        QPushButton#accentButton[applyPrimary="true"] {{
+            min-height: 34px;
+            max-height: 34px;
+        }}
         QPushButton#accentButton:hover {{
             background: {p["button_hover_bg"]};
         }}
