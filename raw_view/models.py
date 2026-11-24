@@ -1590,6 +1590,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             margin-right: 2px;
             background: transparent;
             color: {p["text_secondary"]};
+            border-bottom: 2px solid transparent;
         }}
         /* qt-material also ships QTabBar::tab:top:selected / :top:hover, which
            are more specific than the plain pseudo-state selectors.  Drive the
@@ -1603,6 +1604,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QTabBar::tab:top:hover:!selected {{
             background: {p["accent_light"]};
             color: {p["text_color"]};
+            border-bottom: 2px solid transparent;
         }}
         QTabBar::close-button {{
             subcontrol-position: right;

@@ -602,15 +602,60 @@ class FrameSizeFormatTests(unittest.TestCase):
     def test_byte_formatter_is_single_source(self):
         """0.3.0-L-4 / 0.4.0-L-1 / 0.4.1-L-1：字节格式化收敛为一处。
 
-        主窗状态与 Convert/Batch 预览共用 ``image_utils._format_size``，
-        不再有独立的 ``_human_size`` 拷贝。控制面板不再展示字节数，因此
-        不再导入该 helper。
+        Convert 预览使用 ``image_utils._format_size``；主窗状态栏的字节数
+        由 app.py 内联格式化，Batch 不使用该 helper。控制面板不再展示字节
+        数，也不再导入它。这里同时守住“不得重新引入本地副本”。
         """
+        import ast
+        from pathlib import Path
+
         from raw_view.gui.image_utils import _format_size as shared
         import raw_view.gui.dialogs.convert as convert
+        import raw_view.gui.panels as panels
 
         self.assertIs(convert._format_size, shared, "convert 应复用共享 helper")
         self.assertFalse(hasattr(convert, "_human_size"), "_human_size 已删除")
+        self.assertFalse(
+            hasattr(panels, "_format_size"),
+            "panels 不应重新引入 _format_size",
+        )
+
+        gui_root = Path(panels.__file__).resolve().parent
+        local_names = {"_format_size", "_human_size"}
+        offenders: list[str] = []
+        for path in gui_root.rglob("*.py"):
+            if path.name == "image_utils.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in local_names
+                ):
+                    offenders.append(
+                        f"{path.relative_to(gui_root)}:{node.lineno}:{node.name}"
+                    )
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        node.targets
+                        if isinstance(node, ast.Assign)
+                        else [node.target]
+                    )
+                    for target in targets:
+                        name = None
+                        if isinstance(target, ast.Name):
+                            name = target.id
+                        elif isinstance(target, ast.Attribute):
+                            name = target.attr
+                        if name in local_names:
+                            offenders.append(
+                                f"{path.relative_to(gui_root)}:{node.lineno}:{name}"
+                            )
+        self.assertFalse(
+            offenders,
+            "raw_view/gui 下不应有第二个 _format_size/_human_size 定义: "
+            f"{offenders}",
+        )
 
     def test_apply_gate_disables_oversize_and_reenables(self):
         # UI-9 门禁：单帧超 512MB 禁用 Apply；参数改回合法时重新启用。
