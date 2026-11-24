@@ -191,7 +191,7 @@ class VariantSelector(QWidget):
                 cb.setChecked(True)
                 self._flash(cb)
                 return
-        cb = QCheckBox(f"{w}x{h}")
+        cb = QCheckBox(f"{w}×{h}")
         cb.setChecked(checked)
         if is_custom:
             cb.setProperty("customSize", True)
@@ -233,7 +233,7 @@ class VariantSelector(QWidget):
         for cb, w, h, is_custom in self._size_boxes:
             if is_custom and (child is cb or (child is not None and child.parent() is cb)):
                 delete_target = cb
-                delete_action = menu.addAction(f"Delete {w}x{h}")
+                delete_action = menu.addAction(f"Delete {w}×{h}")
                 break
         chosen = menu.exec_(frame.mapToGlobal(pos))
         if chosen is None:

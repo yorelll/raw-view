@@ -60,11 +60,13 @@ class FrameNavBar(QWidget):
         self.frame_spin.setFixedWidth(52)
         self.frame_spin.setFixedHeight(_NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
+        self.frame_spin.setProperty("mono", True)
         self.frame_spin.setEnabled(False)
         self.frame_spin.setAccessibleName("Current frame")
         self.frame_spin.setAccessibleDescription("Current frame number.")
 
         self._total_label = QLabel("/ 0")
+        self._total_label.setProperty("mono", True)
         self._total_label.setFixedHeight(_NAV_H)
         self._total_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._total_label.setAccessibleName("Total frames")

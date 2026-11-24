@@ -1440,8 +1440,25 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             font-size: 12px;
             font-weight: 500;
         }}
-        QLabel#monoLabel, QLabel[mono="true"] {{
+        QLabel#monoLabel, QLabel[mono="true"], QSpinBox[mono="true"] {{
             font-family: "Cascadia Mono", "Consolas", monospace;
+        }}
+        QWidget#readoutStrip {{
+            background: {p["panel_bg"]};
+            border: 1px solid {p["border_color"]};
+            border-radius: 6px;
+        }}
+        QLabel#readoutFormat {{
+            color: {p["text_color"]};
+            font-weight: 600;
+        }}
+        QLabel#readoutDetail {{
+            color: {p["text_secondary"]};
+            font-size: {max(font_size - 1, 10)}px;
+        }}
+        QLabel#readoutFrame {{
+            color: {p["text_secondary"]};
+            font-size: {max(font_size - 1, 10)}px;
         }}
         QComboBox, QSpinBox, QLineEdit, QAbstractSpinBox {{
             background: {p["input_bg"]};

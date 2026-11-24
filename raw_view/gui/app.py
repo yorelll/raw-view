@@ -233,6 +233,121 @@ class DropCentralWidget(QWidget):
         )
 
 
+#: 2x2 colour layout for each Bayer pattern (first row left→right, then second).
+_BAYER_LAYOUTS: dict[str, tuple[str, str, str, str]] = {
+    "RGGB": ("r", "g", "g", "b"),
+    "BGGR": ("b", "g", "g", "r"),
+    "GRBG": ("g", "r", "b", "g"),
+    "GBRG": ("g", "b", "r", "g"),
+}
+
+
+class _BayerSwatch(QWidget):
+    """Tiny 2x2 colour chip showing the active Bayer pattern."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._pattern = "RGGB"
+        self.setFixedSize(14, 14)
+        self.setAccessibleName("Bayer pattern colours")
+
+    def set_pattern(self, pattern: str) -> None:
+        if pattern != self._pattern:
+            self._pattern = pattern
+            self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        painter = QPainter(self)
+        palette = self.palette()
+        dark = palette.color(palette.Base).lightnessF() < 0.5
+        tokens = THEME_PALETTES["dark" if dark else "light"]
+        cells = _BAYER_LAYOUTS.get(self._pattern, _BAYER_LAYOUTS["RGGB"])
+        half_w = self.width() // 2
+        half_h = self.height() // 2
+        rects = (
+            (0, 0, half_w, half_h),
+            (half_w, 0, half_w, half_h),
+            (0, half_h, half_w, half_h),
+            (half_w, half_h, half_w, half_h),
+        )
+        for key, (x, y, w, h) in zip(cells, rects):
+            painter.fillRect(x, y, w, h, QColor(tokens[f"bayer_{key}"]))
+
+
+class ReadoutStrip(QWidget):
+    """30 px per-tab readout: Bayer chip, format, alignment, size, bytes, frame."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("readoutStrip")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(30)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(8)
+        self._swatch = _BayerSwatch()
+        self._format = QLabel("")
+        self._format.setObjectName("readoutFormat")
+        self._detail = QLabel("")
+        self._detail.setObjectName("readoutDetail")
+        self._frame = QLabel("")
+        self._frame.setObjectName("readoutFrame")
+        self._frame.setProperty("mono", True)
+        self._frame.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        layout.addWidget(self._swatch, 0, Qt.AlignVCenter)
+        layout.addWidget(self._format, 0, Qt.AlignVCenter)
+        layout.addWidget(self._detail, 0, Qt.AlignVCenter)
+        layout.addStretch(1)
+        layout.addWidget(self._frame, 0, Qt.AlignVCenter)
+
+    def set_data(
+        self,
+        options: DecodeOptions,
+        frame_bytes: int,
+        current_frame: int,
+        total_frames: int,
+    ) -> None:
+        """Populate from the item's live options (no decoding, no new state)."""
+        image_type = getattr(options, "image_type", "")
+        format_name = getattr(options, "format_name", "") or "—"
+        if image_type == "Standard Image":
+            self._swatch.setVisible(False)
+            self._format.setText("Standard Image")
+            self._detail.setText("")
+            self._detail.setVisible(False)
+        else:
+            is_raw = image_type == "RAW"
+            show_bayer = is_raw and getattr(
+                options, "preview_mode", "Bayer Color"
+            ) != "Grayscale"
+            self._swatch.setVisible(show_bayer)
+            if show_bayer:
+                self._swatch.set_pattern(
+                    getattr(options, "bayer_pattern", "RGGB") or "RGGB"
+                )
+            self._format.setText(format_name)
+            parts = []
+            # Alignment/endianness only describe multi-bit unpacking; they are
+            # meaningless for ordinary YUV layouts.
+            if is_raw or format_name.startswith("YOnly"):
+                parts.append(f"{getattr(options, 'alignment', 'msb')} · "
+                             f"{getattr(options, 'endianness', 'little')}")
+            parts.append(
+                f"{int(getattr(options, 'width', 0))}×"
+                f"{int(getattr(options, 'height', 0))}"
+            )
+            if frame_bytes > 0:
+                parts.append(f"{frame_bytes:,} B")
+            self._detail.setText(" · ".join(parts))
+            self._detail.setVisible(True)
+
+        total = max(1, int(total_frames or 1))
+        current = min(max(0, int(current_frame)), total - 1)
+        self._frame.setText(f"{current + 1} / {total}")
+
+
 _YUV_EXTS: dict[str, str] = {
     ".yuv": "YUYV",
     ".nv12": "NV12",
@@ -1208,6 +1323,22 @@ class MainWindow(QMainWindow):
             return 1
         return max(1, file_size // frame_size)
 
+    def _update_readout(self, item: ViewerItem) -> None:
+        """Refresh the per-tab readout strip from the item's live options."""
+        strip = getattr(item, "readout_strip", None)
+        if not _widget_alive(strip):
+            return
+        try:
+            frame_bytes = self._get_frame_size(item.options)
+        except Exception:  # defensive: a malformed option set must not crash
+            frame_bytes = 0
+        strip.set_data(
+            item.options,
+            frame_bytes,
+            getattr(item, "current_frame", 0),
+            getattr(item, "total_frames", 0),
+        )
+
     def _update_frame_display(self, item: ViewerItem) -> None:
         """Update frame nav bar and status bar from item state."""
         frame_nav = getattr(item, "frame_nav", None)
@@ -1222,6 +1353,7 @@ class MainWindow(QMainWindow):
             self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
         else:
             self.frame_status.setText("Frame: -")
+        self._update_readout(item)
 
     # ── UI-6：同目录文件组切换 ────────────────────────────────────────
 
@@ -1688,6 +1820,7 @@ class MainWindow(QMainWindow):
         # initialized.  A pinned host must still open a remembered capture with
         # the parameters the user last applied to that capture.
         self._apply_remembered_options(item, path)
+        self._update_readout(item)
 
         self.settings.add_recent_file(path)
         # Inside a multi-file batch these per-item refreshes are deferred to
@@ -1749,11 +1882,17 @@ class MainWindow(QMainWindow):
         item.frame_nav = FrameNavBar()
         item.frame_nav.frameChanged.connect(self._on_frame_changed)
 
-        # Container: ImageView + FrameNavBar
+        # Readout strip at the top of the tab (M7): a compact summary of the
+        # parameters the visible pixels were/are being decoded with.
+        item.readout_strip = ReadoutStrip()
+        self._update_readout(item)
+
+        # Container: ReadoutStrip + ImageView + FrameNavBar
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        layout.addWidget(item.readout_strip)
         layout.addWidget(item.view, 1)
         layout.addWidget(item.frame_nav)
         return container
@@ -2042,6 +2181,7 @@ class MainWindow(QMainWindow):
         container = self._build_item_page(item)
         self._apply_default_options(item, target_path)
         self._apply_remembered_options(item, target_path)
+        self._update_readout(item)
 
         # Ordering matters here and in _destroy_page: keep the new page hidden
         # while the old one is removed/destroyed, and show it only after it has
@@ -2902,6 +3042,7 @@ class MainWindow(QMainWindow):
             self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
         else:
             self.frame_status.setText("Frame: -")
+        self._update_readout(item)
 
     # ── Panel signal handlers ────────────────────────────────────────
 

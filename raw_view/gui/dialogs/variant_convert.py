@@ -660,7 +660,7 @@ class VariantConvertPage(QWidget):
             written, planned = result
         except Exception as exc:  # pylint: disable=broad-except
             QMessageBox.critical(
-                self, "Generate Variants Failed", f"❌ {exc}"
+                self, "Generate Variants Failed", f"Generation failed: {exc}"
             )
             return
         finally:
@@ -673,7 +673,7 @@ class VariantConvertPage(QWidget):
         if written:
             folder = str(Path(written[0]).parent)
             message = (
-                f"✅ Generated {len(written)} file(s) from {planned} "
+                f"Generated {len(written)} file(s) from {planned} "
                 f"planned variant(s).\nOutput folder:\n{folder}"
             )
         else:
@@ -789,7 +789,7 @@ class VariantConvertPage(QWidget):
             )
             detail = f"{exc}\n\n{hint}" if hint else str(exc)
             QMessageBox.critical(
-                self, "Generate Variants Failed", f"❌ {detail}"
+                self, "Generate Variants Failed", f"Generation failed: {detail}"
             )
             # Same contract as _generate_image(): None means "validation has
             # already shown exactly one message", so generate() must not append
@@ -846,7 +846,7 @@ class VariantConvertPage(QWidget):
             QMessageBox.critical(
                 self,
                 "Generate Variants",
-                "❌ Some variants could not be written:\n\n"
+                "Some variants could not be written:\n\n"
                 + "\n".join(failures),
             )
         return written, len(specs)

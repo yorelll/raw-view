@@ -156,9 +156,9 @@ def yuv_size_mismatch_hint(
     return (
         "Width/Height are the SOURCE frame size for a YUV input (they are not "
         "an output size). If this file is not "
-        f"{width}x{height}, enter its real frame dimensions; if the file has a "
+        f"{width}×{height}, enter its real frame dimensions; if the file has a "
         "header, set Source offset. For reference: "
-        f"{reference}; one {source_format} frame at {width}x{height} is "
+        f"{reference}; one {source_format} frame at {width}×{height} is "
         f"{frame_bytes} bytes."
     )
 
@@ -1370,8 +1370,8 @@ class ConvertDialog(QDialog):
                 except Exception:
                     fsize = 0
 
-            source_info = f"Source: {Path(input_path).name} ({src_w}x{src_h})"
-            output_info = f"Output specification: {out_w}x{out_h}"
+            source_info = f"Source: {Path(input_path).name} ({src_w}×{src_h})"
+            output_info = f"Output specification: {out_w}×{out_h}"
             frame_info = f"Frame size: {_format_size(fsize)} ({fsize:,} B)" if fsize > 0 else "Frame size: -"
             self._preview_info.setText(f"{source_info}\n{output_info}\n{frame_info}")
         except Exception:
@@ -1408,14 +1408,14 @@ class ConvertDialog(QDialog):
             detail = f"{exc}\n\n{hint}" if hint else str(exc)
             self._preview_info.setText(
                 f"Source: {Path(input_path).name} (YUV)\n"
-                f"Source spec: {source} {w}x{h}\n"
+                f"Source spec: {source} {w}×{h}\n"
                 f"Frame size: -\n{detail}"
             )
             return
         self._preview_info.setText(
             f"Source: {Path(input_path).name} (YUV)\n"
-            f"Source spec: {source} {w}x{h} (no resize)\n"
-            f"Target spec: {target} {w}x{h}\n"
+            f"Source spec: {source} {w}×{h} (no resize)\n"
+            f"Target spec: {target} {w}×{h}\n"
             f"Frame size: {_format_size(fsize)} ({fsize:,} B) x {frames} frame(s)"
         )
 
@@ -1448,7 +1448,7 @@ class ConvertDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Output file is in use",
-                f"❌ Could not write the output file:\n{output_path}\n\n"
+                f"Could not write the output file:\n{output_path}\n\n"
                 "The file may be open in another program (for example an "
                 "image or YUV viewer). Close the program that has the file "
                 "open and try again.\n\n"
@@ -1458,13 +1458,13 @@ class ConvertDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "Cannot write output",
-                f"❌ Cannot write to:\n{output_path}\n\n"
+                f"Cannot write to:\n{output_path}\n\n"
                 "Permission denied. Check that the file is not read-only and "
                 "that its folder is writable, or choose another output "
                 f"folder.\n\nDetails: {exc}",
             )
         else:
-            QMessageBox.critical(self, "Convert Failed", f"❌ {exc}")
+            QMessageBox.critical(self, "Convert Failed", str(exc))
 
     def _do_convert(self) -> None:
         # Validation only: no side effects before the size check / overwrite
@@ -1502,7 +1502,7 @@ class ConvertDialog(QDialog):
                 # refused it.
                 require_decode_size(spec.width, spec.height, frame_size(spec))
         except Exception as exc:
-            QMessageBox.critical(self, "Convert Failed", f"❌ {exc}")
+            QMessageBox.critical(self, "Convert Failed", str(exc))
             return
 
         # The source is read inside the conversion call.  Check it first so a
@@ -1515,7 +1515,7 @@ class ConvertDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "Cannot read input",
-                f"❌ Cannot read the input file:\n{input_path}\n\n"
+                f"Cannot read the input file:\n{input_path}\n\n"
                 "Check that the file exists and that you are allowed to read "
                 f"it.\n\nDetails: {exc}",
             )
