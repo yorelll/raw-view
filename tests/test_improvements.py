@@ -600,17 +600,15 @@ class FrameSizeFormatTests(unittest.TestCase):
         self.assertIn("GB", _format_size(2 * 1024 * 1024 * 1024))
 
     def test_byte_formatter_is_single_source(self):
-        """0.3.0-L-4 / 0.4.0-L-1 / 0.4.1-L-1：三份字节格式化并存已收敛为一处。
+        """0.3.0-L-4 / 0.4.0-L-1 / 0.4.1-L-1：字节格式化收敛为一处。
 
-        面板 Estimated frame、Convert/Batch 预览、主窗状态共用
-        ``image_utils._format_size``，不再有独立的 ``_human_size`` / panels 内
-        ``_format_size`` 拷贝。
+        主窗状态与 Convert/Batch 预览共用 ``image_utils._format_size``，
+        不再有独立的 ``_human_size`` 拷贝。控制面板不再展示字节数，因此
+        不再导入该 helper。
         """
         from raw_view.gui.image_utils import _format_size as shared
-        import raw_view.gui.panels as panels
         import raw_view.gui.dialogs.convert as convert
 
-        self.assertIs(panels._format_size, shared, "panels 应复用共享 helper")
         self.assertIs(convert._format_size, shared, "convert 应复用共享 helper")
         self.assertFalse(hasattr(convert, "_human_size"), "_human_size 已删除")
 

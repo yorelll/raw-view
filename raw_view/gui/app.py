@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
         open_btn.clicked.connect(self.open_file)
 
         vbox.addStretch(1)
-        vbox.addWidget(icon_label)
+        vbox.addWidget(icon_label, 0, Qt.AlignHCenter)
         vbox.addWidget(title)
         vbox.addWidget(hint)
         btn_row = QHBoxLayout()

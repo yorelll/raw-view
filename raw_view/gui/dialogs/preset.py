@@ -6,8 +6,6 @@ writes through :class:`~raw_view.models.AppSettings`.
 
 from __future__ import annotations
 
-import os
-
 from PyQt5.QtCore import QEvent, Qt, QSize
 from PyQt5.QtWidgets import (
     QComboBox,
@@ -30,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from raw_view.gui.panels import ControlPanel, _qta_icon
+from raw_view.gui.panels import _qta_icon
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,

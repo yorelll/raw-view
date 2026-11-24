@@ -409,6 +409,9 @@ THEME_PALETTES = {
         "input_bg": "#FFFFFF",
         "button_bg": "#1F6FC4",
         "button_hover_bg": "#1A5EA8",
+        # Text colour for outlined/secondary controls on hover.  This is a
+        # foreground token, not the solid accent button's hover fill.
+        "secondary_hover_text": "#1A5EA8",
         "button_text_color": "#FFFFFF",
         "accent": "#1F6FC4",
         "accent_light": "#E9F0FA",
@@ -418,7 +421,7 @@ THEME_PALETTES = {
         "danger": "#B3261E",
         # 2x2 Bayer swatch signature colours.
         "bayer_r": "#E05252",
-        "bayer_g": "#3AA85A",
+        "bayer_g": "#2F8C4B",
         "bayer_b": "#3B7FD4",
         # Frame navigation bar button palette (light theme).
         "nav_button_bg": "#FFFFFF",
@@ -444,6 +447,7 @@ THEME_PALETTES = {
         "input_bg": "#24272E",
         "button_bg": "#1F6FC4",
         "button_hover_bg": "#2A7FD8",
+        "secondary_hover_text": "#5B9BEA",
         "button_text_color": "#FFFFFF",
         "accent": "#5B9BEA",
         "accent_light": "#1D2A3B",
@@ -1587,13 +1591,18 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: transparent;
             color: {p["text_secondary"]};
         }}
-        QTabBar::tab:selected {{
+        /* qt-material also ships QTabBar::tab:top:selected / :top:hover, which
+           are more specific than the plain pseudo-state selectors.  Drive the
+           top variants with our tokens so the selected tab keeps text_color
+           and the accent underline. */
+        QTabBar::tab:top:selected {{
             background: {p["panel_bg"]};
             color: {p["text_color"]};
             border-bottom: 2px solid {p["accent"]};
         }}
-        QTabBar::tab:hover:!selected {{
+        QTabBar::tab:top:hover:!selected {{
             background: {p["accent_light"]};
+            color: {p["text_color"]};
         }}
         QTabBar::close-button {{
             subcontrol-position: right;
@@ -1634,7 +1643,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QPushButton#secondaryButton:hover {{
             background: {p["accent_light"]};
-            color: {p["button_hover_bg"]};
+            color: {p["secondary_hover_text"]};
         }}
         QPushButton#secondaryButton:disabled {{
             background: transparent;
@@ -1651,7 +1660,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             font-weight: 500;
         }}
         QPushButton#textButton:hover {{
-            color: {p["button_hover_bg"]};
+            color: {p["secondary_hover_text"]};
             text-decoration: underline;
         }}
         QPushButton#iconButton {{

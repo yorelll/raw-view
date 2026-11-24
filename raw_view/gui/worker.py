@@ -12,8 +12,6 @@ from raw_view.formats import (
     ImageSpec,
     decode_raw,
     decode_yuv,
-    expected_frame_size_raw,
-    expected_frame_size_yuv,
     raw_to_display_gray,
 )
 from raw_view.converter import bayer8_to_rgb
@@ -236,8 +234,6 @@ class DecodeWorker(QObject):
                 logger.error("No data configured for decode")
                 self.error.emit(self._generation, f"No data configured for decode ({self._describe_source()})")
                 return
-
-            from PyQt5.QtGui import QImage
 
             if self._format_name in YUV_BYTES_PER_PIXEL:
                 # ── YUV path ────────────────────────────────────────

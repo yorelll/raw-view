@@ -28,7 +28,6 @@ from raw_view.formats import (
     expected_frame_size_raw,
     expected_frame_size_yuv,
 )
-from raw_view.gui.image_utils import _format_size
 from raw_view.models import (
     ACTION_ICON_COLOR,
     BAYER_PATTERNS,

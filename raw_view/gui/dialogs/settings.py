@@ -13,7 +13,6 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
