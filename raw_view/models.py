@@ -379,7 +379,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.5.9"
+APP_VERSION = "0.5.10"
 
 ACTION_ICON_COLOR = "#4A90D9"
 ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
@@ -746,8 +746,12 @@ class AppSettings:
 
     @property
     def multi_variant_enabled(self) -> bool:
-        """When True, the Convert / Batch dialogs expose a multi-variant
-        generator (one source image → many format/bayer/size outputs)."""
+        """When True, the Convert dialog's Variant Convert page can generate
+        many format/bayer/size outputs from one source image.
+
+        Batch Convert always writes one target per input file, so this setting
+        does not change its UI (0.5.11.2 review M-2).
+        """
         return bool(self._store.value("convert/multi_variant", False, type=bool))
 
     @multi_variant_enabled.setter
@@ -1653,11 +1657,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QLabel#hintLabel {{
             color: {p["hint_text"]};
-            font-size: {max(font_size - 1, 10)}px;
+            font-size: {max(font_size - 2, 9)}px;
             background: transparent;
         }}
         QLabel#emptyTableHint {{
             color: {p["hint_text"]};
+            font-size: {max(font_size - 2, 9)}px;
             font-style: italic;
             background: transparent;
             border: none;
@@ -1689,12 +1694,15 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
 #   {raw_type}   — the raw type with spaces removed, e.g. "RAW10Packed"
 #
 #   ── Format-aware (YUV only) ──
-#   {yuv_type}   — YUV subformat in upper case (YUYV / NV12 / I420 / ...)
+#   {yuv_type}   — YUV subformat (YUYV / NV12 / I420 / ...); the YOnly
+#                  family keeps its canonical "YOnly<bit>" spelling
 #
 #   ── Combined short tag ──
 #   {format}     — for RAW with Bayer source: "{bayer}{bits}{packed}",
 #                  e.g. "BGGR10P"; for RAW gray source: "{raw_type}",
-#                  e.g. "RAW12"; for YUV: "{yuv_type}", e.g. "YUYV"
+#                  e.g. "RAW12"; for YUV: "{yuv_type}", e.g. "YUYV" or
+#                  "YOnly12"; for a YUV input transcoded to another YUV
+#                  layout: "{source}_to_{target}", e.g. "YUYV_to_NV16"
 #
 #   ── Optional, off by default ──
 #   {alignment}  — "lsb" / "msb" (RAW)
@@ -1718,6 +1726,21 @@ LEGACY_OUTPUT_TEMPLATES = frozenset({
 })
 
 
+def canonical_yuv_name(name: str) -> str:
+    """Return the canonical spelling of a YUV format name.
+
+    Ordinary layouts are upper-case (``YUYV`` / ``NV16``); the YOnly family
+    keeps the UI's mixed spelling (``YOnly12``, not ``YONLY12``), matching
+    ``raw_view.transcode`` and the format tables.  Empty stays empty.
+    """
+    cleaned = str(name or "").replace(" ", "")
+    if not cleaned:
+        return ""
+    if cleaned.upper().startswith("YONLY"):
+        return "YOnly" + cleaned[len("YOnly"):]
+    return cleaned.upper()
+
+
 def format_output_template(
     template: str,
     input_path: str,
@@ -1733,6 +1756,7 @@ def format_output_template(
     source_mode: str = "",
     alignment: str = "",
     endianness: str = "",
+    source_yuv_type: str = "",
 ) -> str:
     """Build an output filename from a template string.
 
@@ -1750,6 +1774,18 @@ def format_output_template(
         Optional; consumed by the format-aware placeholders. Unknown
         values resolve to empty strings, so unused placeholders just
         disappear without raising.
+    source_yuv_type
+        Source layout when the input already is a YUV file.  When both this
+        and *yuv_type* are set for a YUV target, ``{format}`` becomes
+        ``"{source}_to_{target}"`` (e.g. ``YUYV_to_NV16``) so a lossless
+        YUV -> YUV conversion is distinguishable from an image -> YUV one.
+        Empty (the default) leaves ``{format}`` as the plain ``{yuv_type}``
+        token.  Note this parameter only controls that ``{source}_to_{target}``
+        form: ``{yuv_type}`` itself is always rendered through
+        :func:`canonical_yuv_name`, so the YOnly family is spelled
+        ``YOnly12`` (not the historical all-caps ``YONLY12``) even when
+        *source_yuv_type* is empty.  An image -> YUV auto name therefore
+        changed from ``a_4x2_YONLY.yuv`` to ``a_4x2_YOnly.yuv``.
 
     Returns
     -------
@@ -1784,7 +1820,8 @@ def format_output_template(
         packed_flag = "P" if "Packed" in raw_type else ""
 
     raw_token = raw_type.replace(" ", "") if raw_type else ""
-    yuv_token = (yuv_type or "").upper()
+    yuv_token = canonical_yuv_name(yuv_type)
+    source_yuv_token = canonical_yuv_name(source_yuv_type)
 
     # {bayer} only renders when the source is actually a Bayer pattern.
     # Gray source images don't have a colour mosaic, so emitting the
@@ -1804,7 +1841,10 @@ def format_output_template(
             # so the filename still reflects bit depth and packed flag.
             format_tag = raw_token or "RAW"
     elif target_type == "YUV":
-        format_tag = yuv_token or "YUV"
+        if yuv_token and source_yuv_token:
+            format_tag = f"{source_yuv_token}_to_{yuv_token}"
+        else:
+            format_tag = yuv_token or "YUV"
     else:
         format_tag = ""
 
@@ -1825,6 +1865,35 @@ def format_output_template(
     name = name.replace("{endianness}", (endianness or "").lower())
 
     return str(out_dir / name)
+
+
+def resolve_output_dir(same_dir: bool, input_path: str, settings_dir: str) -> str:
+    """Decide the target output directory for a single-file conversion.
+
+    "Same directory as input" (the default in both Variant Convert and Batch
+    Convert) puts the output next to the source; otherwise the Settings default
+    directory name is used.  Convert has no such switch: it always writes next
+    to the input file.  Relative ``settings_dir`` values keep their meaning
+    ("relative to the input's directory"), matching
+    :func:`format_output_template`.
+
+    The same-directory branch returns an **absolute** parent: returning a
+    relative parent (``"dir"`` for ``dir/a.png``) made
+    :func:`format_output_template` treat it as relative to the input again and
+    produce ``dir/dir/a....raw`` (0.5.11.1 review L-5).
+
+    ``os.path.abspath`` is deliberate, not a shorthand for
+    ``Path.resolve()``: it keeps the path the user actually sees.  The two are
+    equivalent **only** for the defect this fixes (removing the relative
+    parent).  They differ elsewhere: ``resolve()`` expands Windows 8.3 short
+    names (``C:\\Users\\LAWREN~1`` -> the long form) and follows symbolic
+    links (the output would follow the link target instead of staying beside
+    the link the user selected), while ``abspath`` preserves both spellings
+    unchanged (0.5.11.2 review L-4).
+    """
+    if same_dir:
+        return str(Path(os.path.abspath(input_path)).parent)
+    return settings_dir
 
 
 def build_default_output_path(input_path: str, target_type: str, output_dir_name: str) -> str:

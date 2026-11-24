@@ -1,8 +1,9 @@
 """Checkbox grid for selecting multiple formats, bayer patterns, and sizes.
 
-Used by the Convert / Batch Convert dialogs when the multi-variant generator
-is enabled in Settings. A single source image can then be turned into many
-outputs at once (e.g. RAW8/RAW10/RAW12 × RGGB/BGGR × several resolutions).
+Used by the Convert dialog's Variant Convert page when the multi-variant
+generator is enabled in Settings. A single source image can then be turned into
+many outputs at once (e.g. RAW8/RAW10/RAW12 × RGGB/BGGR × several resolutions).
+Batch Convert no longer offers multi-variant generation.
 """
 
 from __future__ import annotations

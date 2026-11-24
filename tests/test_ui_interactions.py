@@ -2100,8 +2100,6 @@ class BatchProgressDialogTests(unittest.TestCase):
         from raw_view.models import AppSettings
 
         dlg = BatchConvertDialog(AppSettings())
-        # 关闭多变体分支，让 _run_batch 走单文件转换路径（进度框逻辑相同）
-        dlg._variant_selector = None
         return dlg
 
     def test_no_progress_dialog_at_construction(self):

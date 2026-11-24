@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.5.9** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.5.10** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -11,9 +11,9 @@ Python RAW/YUV 图像查看与格式转换工具。
 - YUV 查看：**YOnly**（YUV 4:0:0 灰度，单个格式 + Bit depth 配置 8/10/12/14/16——8 为 1 字节/像素，10/12/14/16 为 16-bit 存储，支持 LSB/MSB 对齐与大小端）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
-- **YUV 家族无损互转**：Convert / Batch Convert 对话框提供 **Input type** 下拉（Image / YUV；RAW 项置灰不可选）。选 **YUV** 时把已有 YUV 文件在同家族内只重排字节地转换成另一种布局（4:2:2：YUYV/UYVY/YVYU/VYUY/NV16/NV61；4:2:0：I420/YV12/NV12/NV21，42 个方向全部逐字节可还原），**不 resize**：Width/Height 变为**源帧尺寸**（**Source offset (bytes)** 用于跳过文件头/填充，等同 CLI `--offset`，目前仅 **Convert** 对话框提供；Batch 暂不支持，留待后续按文件建模）。源格式列表只列可转格式（不含 YOnly），目标格式按源格式家族过滤，**不可转的目标置灰并显示原因**；切换 Input type 会清空 Width/Height（**Convert** 还会清空 Source offset，两种输入下语义不同）。文件字节数不是整帧倍数时给出明确错误，多帧文件逐帧保留
+- **YUV 家族无损互转**：Convert / Batch Convert 对话框提供 **Input type** 下拉（Image / YUV；RAW 项置灰不可选）。选 **YUV** 时把已有 YUV 文件在同家族内只重排字节地转换成另一种布局（4:2:2：YUYV/UYVY/YVYU/VYUY/NV16/NV61；4:2:0：I420/YV12/NV12/NV21，42 个方向全部逐字节可还原），**不 resize**：Width/Height 变为**源帧尺寸**（**Source offset (bytes)** 用于跳过文件头/填充，等同 CLI `--offset`，目前仅 **Convert** 对话框提供；Batch 暂不支持，留待后续按文件建模）。源格式列表只列可转格式（不含 YOnly），目标格式按源格式家族过滤，**不可转的目标置灰并显示原因**；切换 Input type 会把 Width/Height 重置为 2560×1440 初始值（**Convert** 还会清空 Source offset，两种输入下语义不同）。文件字节数不是整帧倍数时给出明确错误，多帧文件逐帧保留。Convert 对话框顶部的 **Mode** 选择器另有 **Variant Convert** 模式，YUV 输入下可一次把同一家族内的多个目标布局全部无损输出（见 *多变体一键生成*）
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
-- **多变体一键生成**：可在 Settings 中开启 *Enable multi-variant generation*，之后 Convert / Batch Convert 对话框会出现勾选面板——一张图片一次生成多种 **format**（RAW8/10/12/… + YUV）× **bayer pattern**（RGGB/GRBG/GBRG/BGGR）× **size**（预设常用分辨率 + 自定义）的组合。YUV 无 Bayer，因此每个尺寸只出一个文件；RAW 灰度源（`source_mode=gray`）同样不按 Bayer 展开。默认关闭，即每次只生成一个文件
+- **多变体一键生成**：可在 Settings 中开启 *Enable multi-variant generation*，之后 **Convert 对话框顶部出现 Mode 选择器**（默认 `Convert`）。切到 `Variant Convert` 进入**独立的 Variant 页面**，与单文件 Convert 表单完全分开（不再混排）。Image 输入一次生成多种 **format**（RAW8/10/12/… + YUV）× **bayer pattern**（RGGB/GRBG/GBRG/BGGR）× **size**（预设常用分辨率 + 自定义）的组合；YUV 输入则按**同一色度家族**多选目标布局（例如 YUYV → UYVY/YVYU/VYUY/NV16/NV61 一次全出），不缩放、不变位深，跨家族目标置灰并说明原因。未开启该设置时，`Variant Convert` 显示为 `Variant Convert (enable in Settings)`，**置灰且不可选**。默认关闭，即每次只生成一个文件
 - **转换预览**：Convert 对话框中显示原图缩略图及目标格式帧大小信息
 - **输出模板命名**：支持丰富占位符（`{format}` `{bayer}` `{bits}` `{packed}` `{raw_type}` `{yuv_type}` `{alignment}` `{endianness}` 等），默认 `{input_stem}_{width}x{height}_{format}{ext}` → 例如 `image_2560x1440_BGGR10P.raw` / `image_1920x1080_YUYV.yuv`，可在 Settings 中自定义（详见 *输出文件名模板* 小节）
 - **CLI 模式**：支持命令行解码 RAW/YUV→PNG/JPEG（`python -m raw_view view`）、编码 image→RAW/YUV（`convert`）、批量模式（`batch`）、启动 GUI 并打开文件
@@ -23,7 +23,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - **同路径自动去重**：再次打开已打开的文件时不再产生第二个标签，而是用最新读取的内容覆盖原标签并**保持其位置**；批量打开中的重复路径同样只保留一份，且不会漏解码
 - **批量打开逐个解码**：一次打开/拖入多个文件（含拖入文件夹、CLI 启动多文件）时，**每个文件都会用自己的本体参数静默解码一次**，不再只有最后一个显示图像。解码由单 worker 串行排队、事件驱动推进：界面不阻塞，可随时切换/关闭标签（关闭排队的文件会被安全跳过，队列继续），单个文件失败只把该标签标为 `Decode failed`，不会弹窗也不影响其它文件。状态栏与每个标签各自的状态文案绑定，切到未解码的文件显示 `Not decoded yet`，绝不会残留上一个文件的 `Restored remembered parameters (...)`
 - 支持 Recent Files 最近文件列表
-- Convert 输出支持默认 `convert_out` 目录（可在 Settings 调整）与手动更改
+- Convert 页的输出只有一行 **`Output file`**：选中输入文件后，按 Settings 的输出模板自动填入**输入文件同目录**的完整路径，用户可直接编辑该路径或点 Browse 另选；之后修改格式/尺寸等参数不会覆盖手动改过的路径。Variant Convert 仍提供 *Same directory as input*（默认勾选）与可见的 *Output folder*（取消勾选后使用 Settings 的 *Default output folder*，默认 `convert_out`，相对名会建在每个输入文件所在目录下），勾选/取消勾选来回切换时输出位置始终可判断
 - 内置 Help：格式排列、Packed bit 规则与示例
 - 默认显示为 Fit to Window，可自行缩放
 - **帧导航**：图像下方提供 ⏮ 首帧 / ‹ 上帧 / 帧号输入框（`1 / N`）/ › 下帧 / ⏭ 末帧 控件；键盘 ←/↑ 上一帧、→/↓ 下一帧、Home 首帧、End 末帧；自动检测总帧数，帧号从 1 开始
@@ -102,23 +102,25 @@ raw-view batch -b jobs.json
 
 ## 设置（Settings）
 
-- `Default output folder`：转换默认输出子目录名（默认 `out`），旁边提供 **Browse...** 按钮选择文件夹
+- `Default output folder`：**Variant Convert / Batch Convert** 在取消勾选 *Same directory as input* 时使用的输出子目录名（默认 `convert_out`；相对名会在每个输入文件所在目录下创建）。Convert（单文件）始终写到输入文件同目录，不使用该设置。旁边提供 **Browse...** 按钮选择文件夹
 - `Output filename template`：输出文件命名模板（默认 `{input_stem}_{width}x{height}_{format}{ext}`），右侧 **Reset** 按钮（重置前二次确认）+ **ⓘ** 图标 hover 显示完整占位符列表；模板过长时字段悬停显示完整内容
 - `Saved image DPI`：导出 PNG/JPEG 的目标 DPI（默认 300，范围 72–2400）
 - `UI font size`：主界面字体大小（默认 13，范围 10–24 px）
 - `UI theme`：界面主题下拉框（`Light` / `Dark`，默认 `Dark`，基于 qt-material Material 蓝 + 自定义叠加层）
-- `Convert variants`：复选框，开启 *Enable multi-variant generation* 后，Convert / Batch Convert 对话框出现多选面板（旁有 **ⓘ** 说明），一张图片一次生成多种 format × bayer × size 组合（默认关闭，详见 *多变体一键生成* 小节）
+- `Convert variants`：复选框（*Enable multi-variant generation*）。开启后 Convert 对话框顶部出现 **Mode** 选择器（`Convert` / `Variant Convert`）：切到 Variant 页面后，图片输入可一次生成多种 format × bayer × size 组合，YUV 输入可一次输出同家族多个目标布局；未开启时 `Variant Convert` 显示 `Variant Convert (enable in Settings)` 并置灰不可选（默认关闭，详见 *多变体一键生成* 小节）
 - `Manage sensor presets`：文字链接，打开 Sensor 预设管理对话框（详见下文 *Sensor 预设*）
 - 存在未保存修改时关闭对话框（× / Esc / Cancel）会弹出 **保存 / 不保存 / 取消** 确认
 - 按钮统一为 主操作实心 / 次操作描边 两级样式，且与相邻输入框等高；工具栏图标基于 QtAwesome Font Awesome 图标集（PyQt5 兼容）
 
 ## 输出文件名模板
 
-Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串保存在 Settings 的 `Output filename template` 字段（QSettings key `convert/output_template`），默认值：
+Convert（单文件）、Batch Convert、Generate Variants 与 CLI 全部走同一个模板系统（Generate Variants 现位于 Convert 对话框顶部的 `Variant Convert` 模式页面）。模板字符串保存在 Settings 的 `Output filename template` 字段（QSettings key `convert/output_template`），默认值：
 
 ```
 {input_stem}_{width}x{height}_{format}{ext}
 ```
+
+输出目录由对话框单独决定，与模板无关。Convert（单文件）没有单独的目录选项：`Output file` 一行在选中输入文件后自动填入**输入文件同目录**的完整模板路径，可直接编辑。Variant Convert 与 Batch Convert 默认勾选 *Same directory as input*（写到输入文件旁边）；取消勾选后使用 Settings 的 *Default output folder*（相对名会建在每个输入文件所在目录下）。Variant 与 Batch 的 *Same directory as input* 勾选状态与输出目录控件始终可见/可判断，不会出现“取消勾选后不知道文件放哪”的情况。
 
 ### 占位符全集
 
@@ -130,16 +132,18 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 | `{ext}` | 输出文件扩展名（`.raw` / `.yuv` / `.png` / …） | — |
 | `{date}` | 当前日期 `YYYYMMDD` | — |
 | `{time}` | 当前时间 `HHMMSS` | — |
-| `{format}` | **简短综合标签**：RAW Bayer 源 → `{bayer}{bits}{packed}`，例 `BGGR10P`；RAW 灰度源 → `{raw_type}`，例 `RAW12`；YUV → `{yuv_type}`，例 `YUYV` | 未指定 target 时 |
+| `{format}` | **简短综合标签**：RAW Bayer 源 → `{bayer}{bits}{packed}`，例 `BGGR10P`；RAW 灰度源 → `{raw_type}`，例 `RAW12`；YUV（image 输入）→ `{yuv_type}`，例 `YUYV` / `YOnly12`；YUV 输入 → YUV 输出 → `{源}_to_{目标}`，例 `YUYV_to_NV16` | 未指定 target 时 |
 | `{bayer}` | Bayer 排列大写 `RGGB` / `BGGR` / `GRBG` / `GBRG` | RAW 灰度源 / YUV / 未指定时为空 |
 | `{bits}` | 位深度 `8` / `10` / `12` / `14` / `16` | YUV / 未知 RAW 类型时为空 |
 | `{packed}` | RAW packed 标记 `P` | 非 packed 格式时为空 |
 | `{raw_type}` | 原 RAW 类型去空格，例 `RAW10Packed` | YUV / 未指定时为空 |
-| `{yuv_type}` | YUV 子格式大写，例 `YUYV` / `NV12` | RAW / 未指定时为空 |
+| `{yuv_type}` | 目标 YUV 子格式，例 `YUYV` / `NV12`；YOnly 保留 `YOnly12` 写法 | RAW / 未指定时为空 |
 | `{alignment}` | `lsb` / `msb` | 未传时为空 |
 | `{endianness}` | `little` / `big` | 未传时为空 |
 
 > 占位符大小写敏感；未识别的占位符会原样保留。`{bayer}` 仅在源是 Bayer 模式（`source_mode = bayer`）时输出，灰度源不会写入误导性的 Bayer 名称。
+>
+> **命名变更（0.5.11 起）**：YOnly 家族统一使用规范拼写 `YOnly<bit>`（如 `YOnly12`），不再全大写。因此仅指定 `--yuv-type YOnly` 且省略 `-o` 时，CLI 自动输出名由旧的 `a_4x2_YONLY.yuv` 变为 `a_4x2_YOnly.yuv`；依赖旧自动文件名的脚本请相应更新（显式 `-o` 的路径不受影响）。
 
 ### 常用样例
 
@@ -150,6 +154,7 @@ Convert / Batch convert / CLI 全部走同一个模板系统。模板字符串�
 | `image_BGGR10P_msb_little_2560x1440.raw`（全细节） | `{input_stem}_{bayer}{bits}{packed}_{alignment}_{endianness}_{width}x{height}{ext}` |
 | `20260601_142500_image_RAW12.raw`（保留时间戳） | `{date}_{time}_{input_stem}_{format}{ext}` |
 | `image_1920x1080_YUYV.yuv` | `{input_stem}_{width}x{height}_{format}{ext}`（同默认） |
+| `a_2560x1440_YUYV_to_NV16.yuv`（YUV 无损互转，源 YUYV → 目标 NV16） | `{input_stem}_{width}x{height}_{format}{ext}`（同默认；`{format}` 自动展开为 `{源}_to_{目标}`） |
 
 > Tip：默认模板有意把 `{alignment}` / `{endianness}` 排除——大多数同事一眼想看的是"分辨率 + Bayer + bit 位 + 是否 packed"。如果你的工作流需要在文件名中区分大小端 / 对齐，按需把这两个占位符加进自定义模板即可。
 
@@ -237,24 +242,27 @@ Preset 管理对话框底部提供 **Import** 与 **Export** 两个按钮：
 
 ## 多变体一键生成
 
-一张源图想同时导出 RAW8 / RAW10 / RAW12、多个 Bayer 排列、多个分辨率时，无需重复操作。
+一张源图想同时导出 RAW8 / RAW10 / RAW12、多个 Bayer 排列、多个分辨率，或把一个 YUV 文件无损重排成同家族多个布局时，无需重复操作。
 
 1. 打开 **Settings**，勾选 **Enable multi-variant generation**，保存。
-2. 打开 **Convert...**（单文件）或 **Batch Convert...**（多文件），底部会出现勾选面板：
-   - **Formats (RAW)** / **Formats (YUV)**：勾选要生成的所有格式。
-   - **Bayer patterns**：仅对 RAW 且 `RAW source = bayer` 生效；灰度源与 YUV 会被忽略。
-   - **Sizes**：勾选常用分辨率；在该区域 **右键** 可 *Add custom size…* 添加自定义尺寸或删除已添加的自定义尺寸（自定义尺寸以蓝色标注，重复添加会高亮闪烁提示，标题旁 **ⓘ** 有说明）。
-3. Convert 对话框点 **Generate Variants**；Batch 对话框点 **Start Batch Convert**（每个输入文件都会展开成全部组合）。
+2. 打开 **Convert...**：对话框**顶部**的 **Mode** 选择器默认是 `Convert`；切到 `Variant Convert` 进入独立的 Variant 页面。两个模式是**两套完全分开的界面**——Variant 的勾选面板和 Generate 按钮不会出现在单文件 Convert 页面上。
+   - 若设置未开启，`Variant Convert` 项显示为 `Variant Convert (enable in Settings)`，**置灰且不可选**（不是只在点击后报错）。
+3. Variant 页面按输入类型显示不同能力：
+   - **Image 输入**：保留原有全部能力。**Formats (RAW)** / **Formats (YUV)** / **YOnly Bit Depth**：勾选要生成的所有格式；**Bayer patterns**：仅对 RAW 且 `RAW source = bayer` 生效；**Sizes**：勾选常用分辨率，在该区域 **右键** 可 *Add custom size…* 添加自定义尺寸或删除已添加的自定义尺寸（自定义尺寸以蓝色标注，重复添加会高亮闪烁提示，标题旁 **ⓘ** 有说明）。
+   - **YUV 输入**：**没有 Bayer、没有 Sizes、没有 Bit depth**（无损重排不缩放、不变更位深）。显示 **Source YUV format**、**Source offset (bytes)**、源帧 **Width/Height**，以及一个**目标 YUV 布局多选面板**：只允许同一色度家族（4:2:2 或 4:2:0）内的格式，可同时勾选多个目标（例如源 YUYV 可一次输出 UYVY / YVYU / VYUY / NV16 / NV61）。跨家族目标（如 4:2:2 ↔ 4:2:0）**置灰并显示原因**，不会出现“选完才报错”。
+4. 点击 **Generate Variants** 生成。**Batch Convert 不再支持多变体**：批量转换始终每个输入文件只产出一个目标（Image → 单一 RAW/YUV；YUV → 同一色度家族的单目标无损转换）。需要一次出多个格式时，请用 Convert 对话框的 `Variant Convert` 页面（一次只能处理一个输入文件）。
 
-生成规则示例：勾选 `RAW8` `RAW10` `YUYV` + `RGGB` `GRBG` + `2560x1440` `1920x1080`，得到：
+生成规则示例（Image）：勾选 `RAW8` `RAW10` `YUYV` + `RGGB` `GRBG` + `2560x1440` `1920x1080`，得到：
 
 - RAW8：2×2 = 4 个（两个 Bayer × 两个尺寸）
 - RAW10：4 个
 - YUYV：无 Bayer，只按尺寸 = 2 个
 
-共 10 个文件。文件命名沿用 *输出文件名模板*，默认模板已包含 `{format}`（含 Bayer + bit + packed），因此不会互相覆盖。输出目录为 Settings 中的默认转换目录（Batch 勾选 *Same directory as input* 时改为输入文件同目录）。
+共 10 个文件。YUV Variant 示例：源 `YUYV` 4×2 一次输出 5 个同家族文件，命名 `clip_4x2_YUYV_to_UYVY.yuv`、`..._to_NV16.yuv` 等，内容与单文件无损互转逐字节一致。
 
-> 关闭该设置后，Convert / Batch 恢复默认行为——每次只生成一个文件。
+文件命名沿用 *输出文件名模板*，默认模板包含 `{format}`（Bayer + bit + packed，YUV 输入→YUV 输出时为 `{源}_to_{目标}`）与 `{width}x{height}`，因此不同 Bayer / 位深 / 尺寸 / 目标布局不会互相覆盖。输出目录：Variant 页面默认勾选 *Same directory as input*（写到输入文件旁边），取消勾选后使用可见的 *Output folder*；Batch 同样有可见的 *Output folder*。多输出遇到同名文件时弹出 **Skip / Rename (_1) / Overwrite** 确认，并带 **Do this for all remaining files** 复选框——勾选后本次 Variant 操作的剩余冲突不再询问，操作结束即重置，不会影响下一次操作。
+
+> 关闭该设置后，Convert 恢复默认行为——每次只生成一个文件。Batch Convert 无论该设置是否开启都保持单目标，不受影响。
 
 ## FourCC 查找工具
 
@@ -348,7 +356,7 @@ raw-view.exe batch -b spec.json
 - **建议的本地打包**：双击仓库根目录 `release.bat`。脚本会先运行全量测试，再生成单文件 exe、解压即用 zip 与 SHA-256 校验和（详见 `docs/release_exe.md`）。
 - **手动本地打包**：`pyinstaller --noconfirm --clean --distpath dist --workpath build raw-view.spec`
   （仓库根目录的 spec 一次产出四个 exe；`release.bat` 与 CI 用的是同一份）。
-- **GitHub Actions 自动发布**：推送形如 `v0.5.9` 的 tag 后自动构建并发布到 Releases（见下）。
+- **GitHub Actions 自动发布**：推送形如 `v0.5.10` 的 tag 后自动构建并发布到 Releases（见下）。
 
 ## 发布与下载
 

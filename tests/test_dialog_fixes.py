@@ -38,6 +38,11 @@ from raw_view.gui.dialogs.convert import (
     DEFAULT_CONVERT_WIDTH as CONVERT_DEFAULT_WIDTH,
 )
 from raw_view.gui.imageview import _clamp_zoom_percent, _fit_scale_percent
+from raw_view.models import (
+    DEFAULT_OUTPUT_TEMPLATE,
+    canonical_yuv_name,
+    format_output_template,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,12 +56,15 @@ class BatchConvertFixesTests(unittest.TestCase):
     """H-4：批量转换输出目录与 Settings 默认目录统一。"""
 
     def test_resolve_output_dir_same_dir_true(self):
-        # 勾选 “Same directory as input” → 输出到输入文件同目录
-        # 用平台路径（不用 Windows 字面量），保证 Windows/Linux 均通过。
+        # 勾选 “Same directory as input” → 输出到输入文件同目录。
+        # 返回绝对父目录，避免相对路径被 format_output_template 再拼一层
+        # （0.5.11.1 review L-5）。
         input_path = os.path.join("workspace", "images", "frame.png")
-        expected = os.path.join("workspace", "images")
-        self.assertEqual(_norm(resolve_output_dir(True, input_path, "convert_out")),
-                         _norm(expected))
+        resolved = resolve_output_dir(True, input_path, "convert_out")
+        self.assertTrue(os.path.isabs(resolved), resolved)
+        self.assertEqual(
+            _norm(resolved), _norm(Path(os.path.abspath(input_path)).parent)
+        )
 
     def test_resolve_output_dir_same_dir_false(self):
         # 未勾选 → 落到 Settings 默认输出目录名
@@ -66,10 +74,13 @@ class BatchConvertFixesTests(unittest.TestCase):
         )
 
     def test_resolve_output_dir_same_dir_true_posix(self):
-        # 平台路径语义下同样成立（结构与 POSIX 期望一致）
+        # 平台路径语义下同样成立（结构与 POSIX 期望一致）；绝对化后
+        # Windows 会补上当前盘符，因此期望值也用同一解析得到。
+        resolved = resolve_output_dir(True, "/workspace/images/scan.bmp", "out")
+        self.assertTrue(os.path.isabs(resolved), resolved)
         self.assertEqual(
-            _norm(resolve_output_dir(True, "/workspace/images/scan.bmp", "out")),
-            _norm("/workspace/images"),
+            _norm(resolved),
+            _norm(Path(os.path.abspath("/workspace/images/scan.bmp")).parent),
         )
 
     def test_resolve_output_dir_settings_dir_used_when_not_same_dir(self):
@@ -78,6 +89,221 @@ class BatchConvertFixesTests(unittest.TestCase):
             resolve_output_dir(False, "/workspace/images/frame.png", "custom_out/foo"),
             "custom_out/foo",
         )
+
+
+class OutputNamingTests(unittest.TestCase):
+    """0.5.11 B1: one template drives Convert / Batch / CLI.
+
+    ``{format}`` = ``{bayer}{bits}{packed}`` / ``{raw_type}`` / ``{yuv_type}``
+    for image input, and ``{source}_to_{target}`` for a YUV -> YUV transcode.
+    """
+
+    def _name(self, filename, target_type, **kwargs):
+        out = format_output_template(
+            DEFAULT_OUTPUT_TEMPLATE,
+            os.path.join("images", filename),
+            2560,
+            1440,
+            target_type,
+            output_dir="images",
+            **kwargs,
+        )
+        return os.path.basename(out)
+
+    def test_image_to_raw10_bayer(self):
+        self.assertEqual(
+            self._name(
+                "a.png", "RAW", raw_type="RAW10",
+                bayer_pattern="RGGB", source_mode="bayer",
+            ),
+            "a_2560x1440_RGGB10.raw",
+        )
+        self.assertEqual(
+            self._name(
+                "a.png", "RAW", raw_type="RAW10",
+                bayer_pattern="BGGR", source_mode="bayer",
+            ),
+            "a_2560x1440_BGGR10.raw",
+        )
+
+    def test_image_to_raw10_gray_uses_raw_type(self):
+        self.assertEqual(
+            self._name(
+                "a.png", "RAW", raw_type="RAW10",
+                bayer_pattern="BGGR", source_mode="gray",
+            ),
+            "a_2560x1440_RAW10.raw",
+        )
+
+    def test_image_to_yuv(self):
+        self.assertEqual(
+            self._name("a.png", "YUV", yuv_type="YUYV"),
+            "a_2560x1440_YUYV.yuv",
+        )
+        self.assertEqual(
+            self._name("a.png", "YUV", yuv_type="YOnly12"),
+            "a_2560x1440_YOnly12.yuv",
+        )
+
+    def test_yuv_to_yuv_names_both_layouts(self):
+        self.assertEqual(
+            self._name(
+                "a.yuv", "YUV", yuv_type="NV16", source_yuv_type="YUYV",
+            ),
+            "a_2560x1440_YUYV_to_NV16.yuv",
+        )
+        # Lower-case/space-padded input is canonicalised, not copied verbatim.
+        self.assertEqual(
+            self._name(
+                "a.yuv", "YUV", yuv_type="nv16", source_yuv_type="yu yv",
+            ),
+            "a_2560x1440_YUYV_to_NV16.yuv",
+        )
+
+    def test_source_yuv_type_is_ignored_for_non_yuv_targets(self):
+        self.assertEqual(
+            self._name(
+                "a.yuv", "RAW", raw_type="RAW10",
+                bayer_pattern="RGGB", source_mode="bayer",
+                source_yuv_type="YUYV",
+            ),
+            "a_2560x1440_RGGB10.raw",
+        )
+
+    def test_relative_output_dir_is_relative_to_the_input(self):
+        out = format_output_template(
+            DEFAULT_OUTPUT_TEMPLATE,
+            os.path.join("images", "a.png"), 2560, 1440, "YUV",
+            output_dir="convert_out", yuv_type="YUYV",
+        )
+        self.assertEqual(
+            _norm(out),
+            _norm(os.path.join("images", "convert_out", "a_2560x1440_YUYV.yuv")),
+        )
+
+    def test_same_directory_with_a_relative_input_does_not_double_the_folder(self):
+        """L-5: ``dir/a.png`` + Same directory must land in ``dir``, not ``dir/dir``."""
+        import shutil
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="rv-relative-out-")
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(tmp)
+            input_path = os.path.join("dir", "a.png")
+            out_dir = resolve_output_dir(True, input_path, "convert_out")
+            self.assertTrue(os.path.isabs(out_dir), out_dir)
+            out = format_output_template(
+                DEFAULT_OUTPUT_TEMPLATE,
+                input_path, 4, 4, "RAW",
+                output_dir=out_dir,
+                raw_type="RAW8",
+                bayer_pattern="RGGB",
+                source_mode="bayer",
+            )
+            parent = _norm(os.path.dirname(out))
+            self.assertEqual(
+                parent, _norm(Path(os.path.abspath(input_path)).parent)
+            )
+            self.assertNotIn(
+                _norm(os.path.join("dir", "dir")), _norm(out),
+                f"相对输入被重复拼接了一层目录: {out}",
+            )
+        finally:
+            os.chdir(old_cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_canonical_yuv_names(self):
+        self.assertEqual(canonical_yuv_name("yuyv"), "YUYV")
+        self.assertEqual(canonical_yuv_name(" yu yv "), "YUYV")
+        self.assertEqual(canonical_yuv_name("YONLY12"), "YOnly12")
+        self.assertEqual(canonical_yuv_name("yonly8"), "YOnly8")
+        self.assertEqual(canonical_yuv_name("YOnly"), "YOnly")
+        self.assertEqual(canonical_yuv_name(""), "")
+
+
+class DocumentationConsistencyTests(unittest.TestCase):
+    """0.5.11 M-3: user docs must describe the behaviour that actually ships."""
+
+    def test_readme_describes_current_convert_defaults(self):
+        text = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        # Input type resets dimensions; it no longer clears them.
+        self.assertIn("重置为 2560×1440", text)
+        self.assertNotIn("切换 Input type 会清空 Width/Height", text)
+        # Convert defaults to the input's directory, not convert_out; it has
+        # one auto-filled, editable Output file row and no directory option.
+        self.assertIn("输入文件同目录", text)
+        self.assertIn("Output file", text)
+        self.assertIn("可直接编辑", text)
+        self.assertIn("Convert（单文件）没有单独的目录选项", text)
+        # YUV -> YUV naming is documented.
+        self.assertIn("{源}_to_{目标}", text)
+        # One template drives every consumer.
+        self.assertIn("Convert（单文件）、Batch Convert、Generate Variants 与 CLI", text)
+
+    def test_help_content_describes_current_convert_defaults(self):
+        from raw_view import help_content as hc
+
+        html = hc.HELP_HTML
+        self.assertIn("next to the input file", html)
+        self.assertIn("Default output folder", html)
+        self.assertIn("Output filename template", html)
+        # Convert's single editable Output file row (U-2).
+        flat = " ".join(html.split())
+        self.assertIn("one <b>Output file</b> row", flat)
+        self.assertIn("fully editable", flat)
+
+    def test_docs_describe_the_two_convert_modes(self):
+        """V6: the mode selector and the YUV Variant boundary must be documented."""
+        from raw_view import help_content as hc
+
+        readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        html = " ".join(hc.HELP_HTML.split())
+        for text in (readme, html):
+            self.assertIn("Variant Convert", text)
+            self.assertIn("Variant Convert (enable in Settings)", text)
+            self.assertIn("Mode", text)
+        # YUV Variant capability boundary: same family only, no resize.
+        self.assertIn("same chroma family", html)
+        self.assertIn("同一色度家族", readme)
+        self.assertIn("no resize", html)
+
+    def test_help_says_batch_convert_is_single_target(self):
+        """L-6: the in-app Help must explain the lost Batch multi-variant mode."""
+        from raw_view import help_content as hc
+
+        html = " ".join(hc.HELP_HTML.split())
+        self.assertIn("single-target", html)
+        self.assertIn("one input file at a time", html)
+        self.assertIn("Variant Convert", html)
+
+    def test_resolve_output_dir_docstring_states_the_abspath_limits(self):
+        """L-4: the docstring must not claim abspath and resolve() are equal."""
+        from raw_view.models import resolve_output_dir
+
+        doc = " ".join((resolve_output_dir.__doc__ or "").split())
+        self.assertIn("8.3", doc)
+        self.assertIn("symbolic links", doc)
+        self.assertNotIn("both produce the same absolute parent", doc)
+
+    def test_readme_default_output_folder_is_convert_out(self):
+        """0.5.11.3 L-5: the README default was still the old ``out``."""
+        text = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("默认 `convert_out`", text)
+        self.assertNotIn("默认 `out`", text, "README 仍把默认目录写成 `out`")
+        # The setting belongs to Variant/Batch; Convert always writes beside
+        # the input and has no "Same directory as input" switch.
+        self.assertIn("**Variant Convert / Batch Convert**", text)
+        self.assertIn("Convert（单文件）始终写到输入文件同目录", text)
+
+    def test_resolve_output_dir_docstring_attributes_same_directory_correctly(self):
+        """0.5.11.3 L-5: Convert no longer has the Same-directory switch."""
+        from raw_view.models import resolve_output_dir
+
+        doc = " ".join((resolve_output_dir.__doc__ or "").split())
+        self.assertIn("Variant Convert and Batch Convert", doc)
+        self.assertNotIn("both Convert and Batch", doc)
+        self.assertIn("Convert has no such switch", doc)
 
 
 class RawFormatListTests(unittest.TestCase):

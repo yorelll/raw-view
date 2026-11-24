@@ -85,6 +85,9 @@ HELP_HTML = """
 <li>420: I420, YV12, NV12, NV21</li>
 <li>422: YUYV, UYVY, YVYU, VYUY, NV16, NV61</li>
 </ul>
+<p>422: chroma is subsampled horizontally 2:1 &mdash; one U/V pair covers two
+horizontal pixels &mdash; with full vertical resolution (a 4:2:2 frame is
+2 bytes per pixel).</p>
 <h3>Image Conversion Rules</h3>
 <p>PNG/JPEG/BMP are loaded as BGR and optionally resized.</p>
 <ul>
@@ -110,6 +113,33 @@ reversible. Set <b>Input type</b> to <b>YUV</b>.</p>
 <li><b>Source offset (bytes)</b> (Convert dialog only; Batch does not offer it
     yet) skips a file header or padding before the first frame; the remaining
     byte count must still be a whole number of frames.</li>
+</ul>
+<h3>Convert Dialog Modes</h3>
+<ul>
+<li>The Convert dialog has a <b>Mode</b> selector at the top: <b>Convert</b>
+    (one file, one output) or <b>Variant Convert</b> (many outputs). They are
+    separate pages &mdash; options from one mode never appear in the other.</li>
+<li><b>Variant Convert</b> requires <b>Enable multi-variant generation</b> in
+    Settings. Otherwise the entry reads <b>Variant Convert (enable in
+    Settings)</b> and is greyed out and not selectable.</li>
+<li><b>Batch Convert</b> stays single-target: every input file always writes
+    exactly one output, even when multi-variant generation is enabled. To turn
+    one source into several outputs, use the Convert dialog's <b>Variant
+    Convert</b> mode instead (one input file at a time).</li>
+<li><b>Image input</b>: pick any number of RAW/YUV formats, Bayer patterns and
+    sizes; every combination becomes one file. <b>Same directory as input</b>
+    (default) or the visible <b>Output folder</b> decides where they land.
+    The single-file <b>Convert</b> page has only one <b>Output file</b> row: it
+    is auto-filled next to the input file and stays editable.</li>
+<li><b>YUV input</b>: pick several targets from the <b>same chroma family</b>
+    (4:2:2 or 4:2:0). The output is a lossless byte rearrangement &mdash; no
+    resize, no bit-depth change &mdash; so Width/Height are the source frame
+    size and Source offset applies. Targets from the other family are greyed
+    out with the reason.</li>
+<li>If an output file already exists, Variant Convert asks Skip / Rename (_1) /
+    Overwrite with a <b>Do this for all remaining files</b> checkbox. That
+    choice applies only to the current Variant operation and is reset when it
+    ends.</li>
 </ul>
 <h3>Sensor presets</h3>
 <ul>
@@ -173,7 +203,15 @@ files at once decodes <b>every</b> file (each with its own parameters), queued o
 stays responsive; a failing file only marks its own tab as <code>Decode failed</code> and never blocks
 the rest. Switching tabs always shows that tab's own status text, and a tab that has not been decoded
 yet says <code>Not decoded yet</code> instead of repeating the previous file's message.</li>
-<li>Conversion input supports drag-and-drop; output defaults to the folder configured in <b>Settings</b> (默认 <code>convert_out</code>，可自定义).</li>
+<li>Conversion input supports drag-and-drop. The single-file <b>Convert</b> page has one
+<b>Output file</b> row, auto-filled next to the input file from the template and fully editable
+(typing a path is never overwritten by later parameter changes). The <b>Variant Convert</b> mode
+(Convert dialog's top Mode selector) and Batch Convert instead offer <b>Same directory as input</b>
+(default) or the folder named in <b>Settings</b> (<b>Default output folder</b>, default
+<code>convert_out</code>, relative names are created inside each input's folder); they show the
+destination both when the box is checked (next to each input) and unchecked (the folder field +
+hint), so the location is never hidden. File names follow the single
+<b>Output filename template</b> used by Convert, Batch Convert, Generate Variants and the CLI.</li>
 <li>Saved image DPI can be configured in <b>Settings</b> for high-resolution exports.</li>
 </ul>
 """

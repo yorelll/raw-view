@@ -37,6 +37,15 @@ class SettingsDialog(QDialog):
 
         self.output_dir_edit = QLineEdit(settings.default_output_dirname)
         self.template_edit = QLineEdit(settings.output_template)
+        # Accurate scope: this template drives single-file Convert, Batch
+        # Convert, Generate Variants and the CLI.  (0.5.11 review M-3.)
+        self.template_edit.setAccessibleName("Output filename template")
+        self.template_edit.setAccessibleDescription(
+            "Applies to Convert, Batch Convert, Generate Variants and the CLI. "
+            "Default output folder: same directory as the input (Variant "
+            "Convert / Batch 'Same directory as input'); otherwise Settings → "
+            "Default output folder."
+        )
         # "Reset" snaps the template field back to the current built-in
         # default. Useful for users who upgraded from an older build and
         # never noticed their stored template was a stale earlier default.
@@ -50,12 +59,17 @@ class SettingsDialog(QDialog):
         # Full placeholder reference is shown on hover of an ⓘ icon instead of
         # a wall of small text below the field.
         template_help_text = (
+            "Used by Convert, Batch Convert, Generate Variants and the CLI.\n"
+            "The output folder is chosen separately: 'Same directory as input' "
+            "(Variant Convert / Batch) or Settings → Default output folder.\n\n"
             "Placeholders:\n"
             "  {input_stem} {width} {height} {ext}\n"
             "  {format} {bayer} {bits} {packed} {raw_type} {yuv_type}\n"
             "  {alignment} {endianness} {date} {time}\n\n"
             "Default: {input_stem}_{width}x{height}_{format}{ext}\n"
-            "  e.g. image_2560x1440_BGGR10P.raw"
+            "  e.g. image_2560x1440_BGGR10P.raw\n"
+            "  YUV -> YUV: {format} becomes {source}_to_{target}\n"
+            "  (e.g. image_2560x1440_YUYV_to_NV16.yuv)"
         )
         self.template_help_icon = self._info_icon(template_help_text)
         self.template_help_icon.setObjectName("templateHelp")
@@ -117,7 +131,8 @@ class SettingsDialog(QDialog):
         variant_help = self._info_icon(
             "Generate many outputs from one source image at once:\n"
             "different formats × bayer patterns × sizes.\n"
-            "Adds a checkbox grid to the Convert and Batch Convert dialogs."
+            "Adds the 'Variant Convert' mode to the Convert dialog.\n"
+            "Batch Convert stays single-target per file."
         )
         variant_help.setObjectName("variantHelp")
         variant_row = QHBoxLayout()

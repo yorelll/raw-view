@@ -6,13 +6,15 @@ YUV file (lossless byte rearrangement inside one chroma-sampling family).
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtGui import QBrush, QColor, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -24,17 +26,17 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from raw_view.converter import (
-    generate_image_variants,
     image_file_to_raw,
     image_file_to_yuv,
     load_bgr_image,
-    plan_image_variants,
     resolve_output_path_collision,
 )
 from raw_view.formats import (
@@ -45,11 +47,15 @@ from raw_view.formats import (
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
+    THEME_PALETTES,
     format_output_template,
+    normalize_ui_theme,
+    resolve_output_dir,
 )
+from raw_view.gui.dialogs.variant_convert import VariantConvertPage
 from raw_view.gui.image_utils import _format_size, qimage_from_rgb
 from raw_view.gui.panels import ControlPanel
-from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+from raw_view.gui.widgets import FileDropLineEdit
 from raw_view.transcode import YUV_TRANSCODE_FORMATS
 
 
@@ -64,17 +70,79 @@ DEFAULT_CONVERT_HEIGHT = 1440
 INPUT_FILE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
 
 
+def _is_file_in_use_error(exc: BaseException) -> bool:
+    """True only for OS errors caused by another program holding the target.
+
+    Windows spells a sharing/lock violation ``WinError 32``/``33``; POSIX uses
+    ``EBUSY``.  ``EACCES``/``EPERM``/``WinError 5`` are *permission* problems,
+    not "somebody has the file open": reporting those as an open file sends the
+    user off to close a program that is not running (0.5.11 review M-2).
+    """
+    if getattr(exc, "winerror", None) in (32, 33):
+        return True
+    return getattr(exc, "errno", None) == errno.EBUSY
+
+
+def _is_permission_denied_error(exc: BaseException) -> bool:
+    """True for "you are not allowed to read/write here" OS errors."""
+    if _is_file_in_use_error(exc):
+        return False
+    if isinstance(exc, PermissionError):
+        return True
+    return getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM)
+
+
+def yuv_size_mismatch_hint(
+    input_path: str,
+    source_format: str,
+    width: int,
+    height: int,
+    offset: int = 0,
+) -> str:
+    """Actionable guidance for a YUV file whose size is not a whole frame.
+
+    Width/Height are the *source frame* dimensions for a YUV input, but the
+    default 2560x1440 makes almost every real file fail the "integer multiple of
+    one frame" check — and the raw transcoder error never says that changing
+    Width/Height is the fix (0.5.11 review M-1).  Return text that names the
+    three actions (real frame size, header -> Source offset, Width/Height is not
+    an output size) plus the file's byte count and one frame's byte count at the
+    entered dimensions, so the right value can be worked out.  Empty string when
+    the size already fits, so callers can append it unconditionally.
+    """
+    try:
+        total = int(os.path.getsize(input_path))
+        frame_bytes = int(expected_frame_size_yuv(source_format, width, height))
+    except (OSError, ValueError, KeyError):
+        return ""
+    if frame_bytes <= 0:
+        return ""
+    payload = total - max(int(offset), 0)
+    if payload > 0 and payload % frame_bytes == 0:
+        return ""
+    if offset:
+        reference = (
+            f"this file is {total} bytes; after the {int(offset)}-byte Source "
+            f"offset, {payload} bytes remain"
+        )
+    else:
+        reference = f"this file is {total} bytes"
+    return (
+        "Width/Height are the SOURCE frame size for a YUV input (they are not "
+        "an output size). If this file is not "
+        f"{width}x{height}, enter its real frame dimensions; if the file has a "
+        "header, set Source offset. For reference: "
+        f"{reference}; one {source_format} frame at {width}x{height} is "
+        f"{frame_bytes} bytes."
+    )
+
+
 class ConvertDialog(QDialog):
     """Modal dialog for converting an image or YUV file to RAW/YUV."""
 
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
-        # True while _generate_variants() is pumping events and writing files.
-        # _sync_controls_locked() must not re-enable the button during that
-        # window, otherwise a mid-run edit lets the user start a second,
-        # overlapping generation (0.5.10.1 review M-1).
-        self._generating_variants = False
         self.setWindowTitle("Convert File")
         self.setMinimumWidth(520)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
@@ -92,7 +160,9 @@ class ConvertDialog(QDialog):
         self.output_edit.setAccessibleDescription(
             "Path for the RAW or YUV output file."
         )
-        self.output_edit.setPlaceholderText("Output path — auto-filled from the template if left blank")
+        self.output_edit.setPlaceholderText(
+            "Output path — auto-filled from the input name if left blank"
+        )
 
         # ── Input source ──────────────────────────────────────────────
         # "Image" = historical behaviour (decode PNG/JPG/BMP, resize to the
@@ -112,6 +182,11 @@ class ConvertDialog(QDialog):
         raw_input_item = self.input_type.model().item(2)
         if raw_input_item is not None:
             raw_input_item.setEnabled(False)
+        # setEnabled(False) blocks selection but qt-material does not paint the
+        # item grey, so a reserved entry looked selectable (user report).  Set
+        # the theme's disabled text colour explicitly and refresh it whenever
+        # the palette/style changes.
+        self._refresh_reserved_input_item()
         self.input_type.setAccessibleName("Input type")
         self.input_type.setAccessibleDescription(
             "Image: decode a PNG/JPG/BMP and encode it. "
@@ -167,8 +242,10 @@ class ConvertDialog(QDialog):
         self.width.setRange(1, 65535)
         self.width.setValue(DEFAULT_CONVERT_WIDTH)
 
-        # P1-6：会话内"全部覆盖"开关（选中后本对话框不再逐个询问覆盖）。
-        self._overwrite_all = False
+        # Collision choice made with "Do this for all remaining files".
+        # Scoped to one operation and reset at the start of every Convert /
+        # Generate Variants run; it must never leak into the next operation.
+        self._operation_collision_choice: str | None = None
 
         self.height = QSpinBox()
         self.height.setRange(1, 65535)
@@ -185,15 +262,13 @@ class ConvertDialog(QDialog):
             "YUV input only."
         )
 
+        # Auto output path currently in the field, and the input path it was
+        # rendered for.  The pair is what distinguishes "same input file, user
+        # typed a custom name" (keep it) from "another input file" (reset to
+        # the new automatic path) and lets a value typed back to the automatic
+        # name resume following parameter changes (N-1).
         self._auto_output_path = ""
-
-        # Help text for YUV formats
-        self._yuv_note = QLabel(
-            "YOnly: full-resolution grayscale (4:0:0); "
-            "YUV420: U/V 2x2 downsample; YUV422: horizontal 2:1 downsample"
-        )
-        self._yuv_note.setWordWrap(True)
-        self._yuv_note.setVisible(False)
+        self._auto_input = ""
 
         # ── Preview area ─────────────────────────────────────────────
         preview_group = QFrame()
@@ -228,6 +303,10 @@ class ConvertDialog(QDialog):
             "Target dimensions and estimated encoded frame size."
         )
         self._preview_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        # Long YUV errors carry actionable guidance; without wrapping the label
+        # grew to ~3145 px and pushed the useful part out of view (0.5.11
+        # review M-1).  Wrapping keeps the dialog at its normal width.
+        self._preview_info.setWordWrap(True)
 
         preview_content.addWidget(self._preview_thumb)
         preview_content.addWidget(self._preview_info, 1)
@@ -285,7 +364,6 @@ class ConvertDialog(QDialog):
         form.addRow("Bayer pattern", self.bayer_pattern)
         form.addRow("Width", self.width)
         form.addRow("Height", self.height)
-        form.addRow("", self._yuv_note)
 
         # QFormLayout hides only the field, never the row label.  Cache every
         # conditional row's label so _apply_cond_rows() can move both together;
@@ -303,7 +381,6 @@ class ConvertDialog(QDialog):
                 self.endian,
                 self.raw_source_mode,
                 self.bayer_pattern,
-                self._yuv_note,
             )
         }
         self._cond_row_labels = {
@@ -337,9 +414,6 @@ class ConvertDialog(QDialog):
                     (self.bayer_pattern, "Bayer pattern"),
                 ),
             ),
-            (
-                None, ((self._yuv_note, ""),),
-            ),
         )
 
         # CONVERT is the primary action; disabled until an input is chosen.
@@ -352,59 +426,91 @@ class ConvertDialog(QDialog):
             lambda t: btn_run.setEnabled(bool(t.strip()))
         )
 
-        # ── Scrollable content ────────────────────────────────────────
-        # Wrap the form + preview + (optional) variant selector in a scroll
-        # area so the dialog never grows past the screen. The action buttons
-        # live outside the scroll area and stay pinned at the bottom.
+        # ── Convert page (single-file workflow only) ─────────────────
+        # Wrap the form + preview in a scroll area so the dialog never grows
+        # past the screen. The action button lives outside the scroll area and
+        # stays pinned at the bottom of this page.
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.addLayout(form)
         content_layout.addWidget(preview_group)
 
-        # ── Multi-variant generator (opt-in via Settings) ────────────────
-        self._variant_selector: VariantSelector | None = None
-        btn_variants: QPushButton | None = None
-        if self._settings.multi_variant_enabled:
-            variant_group = QFrame()
-            variant_group.setObjectName("card")
-            variant_group.setFrameShape(QFrame.StyledPanel)
-            variant_layout = QVBoxLayout(variant_group)
-            variant_layout.setContentsMargins(8, 8, 8, 8)
-            self._variant_selector = VariantSelector()
-            variant_layout.addWidget(self._variant_selector)
-            self.setMinimumWidth(620)
-            content_layout.addWidget(variant_group)
-            btn_variants = QPushButton("Generate Variants")
-            btn_variants.setObjectName("secondaryButton")
-            btn_variants.clicked.connect(self._generate_variants)
-            self._btn_variants = btn_variants
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
 
-        # ── Pinned action buttons ─────────────────────────────────────
-        row = QHBoxLayout()
-        row.addStretch(1)
-        if btn_variants is not None:
-            row.addWidget(btn_variants)
-        row.addWidget(btn_run)
+        self._convert_page = QWidget()
+        convert_page_layout = QVBoxLayout(self._convert_page)
+        convert_page_layout.setContentsMargins(0, 0, 0, 0)
+        convert_page_layout.addWidget(scroll, 1)
+        convert_row = QHBoxLayout()
+        convert_row.addStretch(1)
+        convert_row.addWidget(btn_run)
+        convert_page_layout.addLayout(convert_row)
+
+        # ── Variant page (independent UI) ────────────────────────────
+        # Variant generation is a separate workflow with its own input,
+        # destination and action button; it is NOT appended to the Convert
+        # form any more (user report: the two workflows were mixed together).
+        self._variant_page = VariantConvertPage(settings, self)
+        self._variant_page.generate_button.setObjectName("secondaryButton")
+
+        # ── Mode selector (top of the dialog) ────────────────────────
+        # Default is Convert.  "Variant Convert" is disabled (and painted grey)
+        # while the feature is off, with the reason in the label itself, so the
+        # user does not have to guess why it cannot be selected.
+        self._VARIANT_MODE_INDEX = 1
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems(["Convert", "Variant Convert"])
+        self.mode_selector.setAccessibleName("Conversion mode")
+        # The disabled entry's text ("Variant Convert (enable in Settings)")
+        # is wider than the dialog; a QComboBox reports that text as its
+        # minimum size, which made QFormLayout collapse the Mode label column
+        # instead of aligning the combo with the form fields.  Let the combo
+        # shrink to the field column (its tooltip keeps the full reason).
+        self.mode_selector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.mode_selector.setCurrentIndex(0)
+        self._sync_mode_item()
+        self.mode_selector.currentIndexChanged.connect(self._on_mode_changed)
+
+        # The Mode selector stays outside the page stack (it must remain
+        # visible on both pages), but it has to line up with the Convert form:
+        # a bare QHBoxLayout put the combo at x=74 while every form field
+        # starts at x=238 (user report: "Mode 与 Input file 没有对齐").
+        # A fixed-width "Mode" label reproduces the page form's label column;
+        # ``_sync_mode_row_alignment()`` keeps that width equal to the form's
+        # live label column (it grows/shrinks when conditional rows appear),
+        # so both the label and the combo land in the same columns.
+        self._mode_label = QLabel("Mode")
+        self._mode_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._mode_form = QFormLayout()
+        self._mode_form.addRow(self._mode_label, self.mode_selector)
+
+        self._stack = QStackedWidget()
+        self._stack.setAccessibleName("Conversion pages")
+        self._stack.addWidget(self._convert_page)
+        self._stack.addWidget(self._variant_page)
+        self._stack.setCurrentIndex(0)
+        if self._settings.multi_variant_enabled:
+            self.setMinimumWidth(620)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(scroll, 1)
-        layout.addLayout(row)
+        layout.addLayout(self._mode_form)
+        layout.addWidget(self._stack, 1)
 
         # Cap the dialog height to the available screen so the buttons never
-        # get pushed off-screen, then size to the content within that cap.
+        # get pushed off-screen, then size to the *current* page within that
+        # cap.  QStackedWidget.sizeHint() is the maximum over all pages, so it
+        # would let the tall Variant page stretch the Convert page.
         # NB: self.width / self.height are QSpinBox attributes on this dialog,
         # so QWidget.width()/height() are shadowed — use sizeHint() instead.
         screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
             max_h = int(screen.availableGeometry().height() * 0.9)
             self.setMaximumHeight(max_h)
-            hint = self.sizeHint()
+            hint = self._stack.currentWidget().sizeHint()
             self.resize(hint.width(), min(hint.height(), max_h))
 
         # Signals
@@ -454,9 +560,11 @@ class ConvertDialog(QDialog):
         """Switching the input type resets the dimensions and re-syncs controls.
 
         Width/height mean different things per input type (output size for an
-        image, source frame size for YUV), so carrying a value across would
-        resize the wrong way.  The user confirmed they must be cleared rather
-        than carried over.
+        image, source frame size for YUV), so carrying the *previous* value
+        across would apply it to the wrong notion.  Both modes start from the
+        documented 2560x1440 guess; for a YUV input it is only an initial
+        value, and a file whose size does not match is reported when Convert
+        starts rather than silently producing garbage (user request).
         """
         # A source offset belongs to the previous input kind; start clean.
         self.offset.setValue(0)
@@ -466,15 +574,8 @@ class ConvertDialog(QDialog):
             # unless the selection somehow drifted).
             if self._input_format() not in YUV_TRANSCODE_FORMATS:
                 self.input_yuv_type.setCurrentText(YUV_TRANSCODE_FORMATS[0])
-            # Source frame dimensions: nothing sensible can be inherited from
-            # the image path's default, so drop to the minimum and make the user
-            # enter the real geometry.
-            self.width.setValue(1)
-            self.height.setValue(1)
-        else:
-            # Back to the documented image-convert default.
-            self.width.setValue(DEFAULT_CONVERT_WIDTH)
-            self.height.setValue(DEFAULT_CONVERT_HEIGHT)
+        self.width.setValue(DEFAULT_CONVERT_WIDTH)
+        self.height.setValue(DEFAULT_CONVERT_HEIGHT)
         self._sync_controls()
         self._sync_default_output()
         self._update_preview()
@@ -539,26 +640,12 @@ class ConvertDialog(QDialog):
             self.endian: show_align_endian,
             self.raw_source_mode: show_raw,
             self.bayer_pattern: show_raw and is_bayer,
-            self._yuv_note: not is_raw,
         })
+        # The form's label column now has its final width for this state;
+        # keep the dialog-level Mode row in the same columns.
+        self._sync_mode_row_alignment()
         self.yuv_type.setEnabled(True if is_yuv_input else not is_raw)
         self._refresh_target_formats()
-        # Multi-variant generation fans one IMAGE out into many formats; it has
-        # no meaning for a YUV source, so grey the trigger out up front instead
-        # of failing after the user picks it.
-        btn_variants = getattr(self, "_btn_variants", None)
-        if btn_variants is not None:
-            # Keep it disabled while generation is running: this sync is
-            # reachable from any control the user can edit during the
-            # processEvents() pumps, and re-enabling would allow a second
-            # concurrent generation (0.5.10.1 review M-1).
-            btn_variants.setEnabled(
-                not is_yuv_input and not self._generating_variants
-            )
-            btn_variants.setToolTip(
-                "Variants are generated from an image; not available for a YUV input."
-                if is_yuv_input else ""
-            )
         # Width/height mean "source frame size" (parse only) for a YUV input and
         # "output size" (resize) for an image; say which in the tooltips.
         self._sync_dimension_hints()
@@ -652,8 +739,244 @@ class ConvertDialog(QDialog):
                 field.setEnabled(True)
                 insert_at = position + 1
 
+    def _sync_mode_row_alignment(self) -> None:
+        """Match the Mode row columns to the *visible* page's label column.
+
+        ``QFormLayout`` sizes its label column from the widest *currently
+        present* label, so hiding conditional rows (Source offset, Bayer
+        pattern, ...) narrows it.  The Mode row lives above the stack and is
+        not part of either page form, so copy the live width onto its label;
+        the combo then starts exactly where every field of *that page* does.
+        Without this the Mode combo sat at x=74 while ``Input file``'s field
+        started at x=238 (user report).
+
+        The anchor must follow the current page: copying the Convert form's
+        width while the Variant page (a much narrower form: only Input file /
+        Input type) was visible left the combo 19-47 px to the right of that
+        page's own Input file field (0.5.11.3 review L-1).
+        """
+        label = getattr(self, "_mode_label", None)
+        if label is None:
+            return
+        form = getattr(self, "_form", None)
+        stack = getattr(self, "_stack", None)
+        variant_page = getattr(self, "_variant_page", None)
+        if stack is not None and variant_page is not None:
+            if stack.currentWidget() is variant_page:
+                form = getattr(variant_page, "_top_form", None)
+        if form is None:
+            return
+        widest = 0
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.LabelRole)
+            row_label = item.widget() if item is not None else None
+            if row_label is not None:
+                widest = max(widest, row_label.sizeHint().width())
+        if widest > 0 and (
+            label.minimumWidth() != widest or label.maximumWidth() != widest
+        ):
+            # The form's column can grow (YUV-only rows appear) and shrink
+            # again (they are removed); pinning both edges forces a real
+            # re-layout, whereas a minimum-width-only change left a stale
+            # label column here.
+            label.setFixedWidth(widest)
+            label.updateGeometry()
+
     def _is_yuv_input(self) -> bool:
         return self.input_type.currentText() == "YUV"
+
+    def _refresh_reserved_input_item(self) -> None:
+        """Paint "RAW (coming soon)" with the current theme's disabled colour.
+
+        The item stays disabled (flags unchanged), but qt-material renders an
+        enabled-looking entry otherwise.  ``text_secondary`` is the same token
+        the stylesheet uses for every disabled control.
+        """
+        combo = getattr(self, "input_type", None)
+        settings = getattr(self, "_settings", None)
+        if combo is None or settings is None:
+            return
+        item = combo.model().item(2)
+        if item is None:
+            return
+        palette = THEME_PALETTES[normalize_ui_theme(settings.ui_theme)]
+        item.setForeground(QBrush(QColor(palette["text_secondary"])))
+
+    def _sync_mode_item(self) -> None:
+        """Label/enable/grey the "Variant Convert" mode entry.
+
+        When multi-variant generation is off the entry must be genuinely
+        disabled *and* look disabled: ``setEnabled(False)`` alone leaves
+        qt-material painting it like a normal entry (the same defect the RAW
+        reserved item had).  ``text_secondary`` is the theme's disabled token.
+        """
+        combo = getattr(self, "mode_selector", None)
+        if combo is None:
+            return
+        index = getattr(self, "_VARIANT_MODE_INDEX", 1)
+        item = combo.model().item(index)
+        if item is None:
+            return
+        enabled = bool(self._settings.multi_variant_enabled)
+        blocked = combo.blockSignals(True)
+        try:
+            if enabled:
+                item.setText("Variant Convert")
+                item.setEnabled(True)
+                # Drop the disabled paint so the enabled entry uses the
+                # normal text colour again.
+                item.setData(None, Qt.ForegroundRole)
+                combo.setItemData(index, None, Qt.ToolTipRole)
+            else:
+                item.setText("Variant Convert (enable in Settings)")
+                item.setEnabled(False)
+                palette = THEME_PALETTES[
+                    normalize_ui_theme(self._settings.ui_theme)
+                ]
+                item.setForeground(
+                    QBrush(QColor(palette["text_secondary"]))
+                )
+                combo.setItemData(
+                    index,
+                    "Variant Convert is off. Enable 'multi-variant generation' "
+                    "in Settings, then reopen this dialog.",
+                    Qt.ToolTipRole,
+                )
+        finally:
+            combo.blockSignals(blocked)
+        # The disabled entry's text is wider than the combo (which is pinned to
+        # the form field column); widen only the popup view so the reason is
+        # readable in full (0.5.11.3 review L-2).
+        self._sync_mode_popup_width()
+
+    def _sync_mode_popup_width(self) -> None:
+        """Widen the Mode popup's item view to fit the longest entry.
+
+        ``QSizePolicy.Ignored`` keeps the combo itself in the form's field
+        column (needed by ``_sync_mode_row_alignment``), but Qt makes the
+        popup the same width as the combo; the disabled entry
+        ``Variant Convert (enable in Settings)`` was then elided to
+        ``Variant Convert (enable in S...`` (0.5.11.3 review L-2).  The view is
+        a child of the popup, not of the form, so its minimum width widens the
+        popup without moving the combo.
+
+        Recomputed whenever the entry text changes (enable/disable) or the
+        style/font changes (``_refresh_reserved_items``), so the width follows
+        the UI font size.
+        """
+        combo = getattr(self, "mode_selector", None)
+        if combo is None:
+            return
+        view = combo.view()
+        if view is None:
+            return
+        combo.ensurePolished()
+        view.ensurePolished()
+        metrics = view.fontMetrics()
+        widest = max(
+            (
+                metrics.horizontalAdvance(combo.itemText(index))
+                for index in range(combo.count())
+            ),
+            default=0,
+        )
+        # The item view's frame costs ~12 px (measured: view 473 / viewport
+        # 461); 24 px keeps the full text inside the viewport at every font
+        # size with room for the item delegate's margins.
+        wanted = widest + 24
+        if view.minimumWidth() != wanted:
+            view.setMinimumWidth(wanted)
+            view.updateGeometry()
+
+    def _on_mode_changed(self, index: int) -> None:
+        """Switch the visible page and carry the chosen input across.
+
+        The input file is a dialog-level concept, not a page-local one: a user
+        who picked ``a.png`` (or a YUV file) on one page and then switches mode
+        wants to work on the same file, not browse for it again (0.5.11.1
+        review M-1).  Only an empty target field is filled, so switching back
+        to a page the user already configured never overwrites their choice.
+        """
+        if (
+            index == getattr(self, "_VARIANT_MODE_INDEX", 1)
+            and not self._settings.multi_variant_enabled
+        ):
+            combo = self.mode_selector
+            blocked = combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(0)
+            finally:
+                combo.blockSignals(blocked)
+            index = 0
+        previous = self._stack.currentWidget()
+        self._stack.setCurrentIndex(index)
+        # The anchor form changed with the page; realign before the next paint
+        # so the Mode row matches the page the user is now looking at.
+        self._sync_mode_row_alignment()
+        self._carry_input_between_pages(previous, self._stack.currentWidget())
+
+    def _carry_input_between_pages(self, source, target) -> None:
+        """Copy the selected input (and its type) to an empty target page."""
+        if source is None or source is target:
+            return
+        source_variant = source is self._variant_page
+        target_variant = target is self._variant_page
+        source_input = (
+            self._variant_page.input_edit if source_variant else self.input_edit
+        )
+        target_input = (
+            self._variant_page.input_edit if target_variant else self.input_edit
+        )
+        if target_input.text().strip():
+            return
+        path = source_input.text().strip()
+        if not path:
+            return
+
+        source_type = (
+            self._variant_page.input_type if source_variant else self.input_type
+        )
+        target_type = (
+            self._variant_page.input_type if target_variant else self.input_type
+        )
+        yuv_input = source_type.currentText() == "YUV"
+        target_input.setText(path)
+        # Setting the input type re-runs the page's reset slot (which resets
+        # Width/Height and Source offset), so copy those values *afterwards*.
+        if target_type.currentText() != source_type.currentText():
+            target_type.setCurrentText(source_type.currentText())
+        if not yuv_input:
+            return
+
+        source_yuv = (
+            self._variant_page.input_yuv_type
+            if source_variant else self.input_yuv_type
+        )
+        target_yuv = (
+            self._variant_page.input_yuv_type
+            if target_variant else self.input_yuv_type
+        )
+        target_yuv.setCurrentText(source_yuv.currentText())
+        source_page = self._variant_page if source_variant else self
+        target_page = self._variant_page if target_variant else self
+        target_page.width.setValue(source_page.width.value())
+        target_page.height.setValue(source_page.height.value())
+        target_page.offset.setValue(source_page.offset.value())
+
+    def _refresh_reserved_items(self) -> None:
+        """Repaint every theme-dependent disabled entry (mode + RAW inputs)."""
+        self._refresh_reserved_input_item()
+        self._sync_mode_item()
+        page = getattr(self, "_variant_page", None)
+        if page is not None:
+            page.refresh_disabled_items()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 — Qt override
+        super().changeEvent(event)
+        if event.type() in (QEvent.PaletteChange, QEvent.StyleChange):
+            refresh = getattr(self, "_refresh_reserved_items", None)
+            if refresh is not None:
+                refresh()
 
     def _input_format(self) -> str:
         """Source YUV sub-format (only meaningful when input type is YUV)."""
@@ -736,65 +1059,168 @@ class ConvertDialog(QDialog):
             self.yuv_type.currentText(), self.bit_depth_combo.currentText()
         )
 
-    def _sync_default_output(self) -> None:
-        input_path = self.input_edit.text().strip()
-        if not input_path:
-            return
-        target_type = self.target_type.currentText()
-        template = self._settings.output_template
-        path = format_output_template(
-            template,
+    def _default_output_path(self, input_path: str) -> str:
+        """Render the Settings template for the current conversion.
+
+        Convert, Batch and the CLI share one template system.  ``{format}``
+        expands to the target token for image input and to
+        ``"{source}_to_{target}"`` for a YUV -> YUV conversion, which keeps
+        different Bayer patterns, sizes and layouts on distinct filenames
+        (0.5.11 review L-3).
+        """
+        yuv_input = self._is_yuv_input()
+        if yuv_input:
+            target_type = "YUV"
+            yuv_type = self.yuv_type.currentText()
+            source_yuv_type = self._input_format()
+        else:
+            target_type = self.target_type.currentText()
+            yuv_type = (
+                self._resolve_yuv_fmt() if target_type == "YUV" else ""
+            )
+            source_yuv_type = ""
+        # Convert has no "Same directory as input" switch any more: the default
+        # output is always the complete path next to the input file, rendered
+        # through the shared template.  The user can edit Output file directly
+        # (a manual edit is protected from later parameter changes by
+        # _auto_output_path / _on_output_edited).
+        out_dir = resolve_output_dir(
+            True,
+            input_path,
+            self._settings.default_output_dirname,
+        )
+        return format_output_template(
+            self._settings.output_template,
             input_path,
             self.width.value(),
             self.height.value(),
             target_type,
-            output_dir=self._settings.default_output_dirname,
-            raw_type=self.raw_type.currentText(),
-            yuv_type=self._resolve_yuv_fmt(),
+            output_dir=out_dir,
+            raw_type=self.raw_type.currentText() if target_type == "RAW" else "",
+            yuv_type=yuv_type,
             bayer_pattern=self.bayer_pattern.currentText(),
             source_mode=self.raw_source_mode.currentText(),
             alignment=self.align.currentText(),
             endianness=self.endian.currentText(),
+            source_yuv_type=source_yuv_type,
         )
+
+    def _sync_default_output(self) -> None:
+        """Keep Output file in step with the input and the current parameters.
+
+        Rules (user request, N-1):
+
+        * **A different input file always resets** the field to that file's
+          automatic path, even if the user typed a custom name for the previous
+          file — an old custom name must never be carried to a new input.
+        * **Within one input file** a custom name is kept, but the decision is
+          a live *value* comparison: while the text still equals the last
+          automatic path, parameter changes keep updating it.  Typing a custom
+          name and deleting it back to the automatic value therefore resumes
+          following (the old one-shot flag made that permanent).
+        * Path spelling is not identity: ``a.png`` and ``A.png`` (Windows) or a
+          relative and an absolute spelling of the same file are the *same*
+          input, so the custom name survives (0.5.11.4 L-1).
+        * Clearing the field, or a half-typed path that is not a file yet, is
+          not a file switch: ``_auto_input`` is left untouched, so pasting and
+          retyping the same path character by character behave identically
+          (0.5.11.4 L-2).
+        """
+        input_path = self.input_edit.text().strip()
+        if not input_path:
+            # Clearing is not a switch; keep _auto_input so retyping the same
+            # file is still recognised as "same input".
+            return
+        path = self._default_output_path(input_path)
+        if not path:
+            return
+        same_input = bool(self._auto_input) and self._same_input_file(
+            input_path, self._auto_input
+        )
+        if not same_input and not os.path.isfile(input_path):
+            # A half-typed path (``C``, ``C:``, ``C:\\…``) is not a new input
+            # file yet.  Do not reset the custom name and do not overwrite
+            # ``_auto_input``: otherwise each keystroke would look like a file
+            # switch and retyping a path would lose the manual name, while
+            # pasting it would keep it (0.5.11.4 L-2).
+            return
         current = self.output_edit.text().strip()
-        if path and (not current or current == self._auto_output_path):
-            self._auto_output_path = path
-            self.output_edit.setText(path)
+        if same_input and current and current != self._auto_output_path:
+            # Same file, user-supplied value: leave it alone.
+            return
+        self._auto_input = input_path
+        self._auto_output_path = path
+        self.output_edit.setText(path)
+
+    @staticmethod
+    def _same_input_file(first: str, second: str) -> bool:
+        """Whether two path spellings refer to the same input file (L-1).
+
+        ``normcase`` folds Windows drive/back-slash/case differences and
+        ``abspath`` resolves relative spellings, so ``a.png`` / ``A.png`` and
+        ``sub\\a.png`` / ``./sub/a.png`` compare equal.  The user's original
+        spelling is still what gets rendered into the output path.
+        """
+        def key(path: str) -> str:
+            return os.path.normcase(os.path.abspath(path))
+
+        return key(first) == key(second)
 
     def _on_output_edited(self) -> None:
-        self._auto_output_path = ""
+        """Manual edits need no marker bookkeeping any more (N-1).
+
+        The follow/keep decision is the live comparison in
+        :meth:`_sync_default_output` (``current == _auto_output_path``), so this
+        slot deliberately does **not** clear the automatic path: clearing it
+        used to make "edit the path, then delete it back to the auto value"
+        permanently disable automatic updates.
+        """
 
     # ── P1-6 覆盖确认 ───────────────────────────────────────────────────
 
-    def _confirm_output_collision(self, output_path: str) -> str | None:
-        """目标已存在时询问用户：跳过 / 覆盖 / 全部覆盖 / 自动重命名。
+    def _confirm_output_collision(
+        self, output_path: str, *, allow_sticky: bool = False
+    ) -> str | None:
+        """目标已存在时询问用户：跳过 / 覆盖 / 自动重命名。
 
         返回最终写入路径；None 表示用户选择跳过，调用方应中止本次写出。
+        单文件 Convert 一次只处理一个文件，“Do this for all remaining
+        files”没有任何作用域，因此默认不显示该复选框（0.5.11 review L-2）；
+        将来的多输出场景可传 ``allow_sticky=True`` 启用（勾选后本次操作剩余
+        文件沿用同一选择，操作结束时清空，绝不泄漏到下一次操作）。
         """
         if not os.path.exists(output_path):
             return output_path
-        if getattr(self, "_overwrite_all", False):
-            return output_path
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("Output file exists")
-        box.setText(
-            f"Output already exists:\n{output_path}\n\n"
-            "How do you want to continue?"
-        )
-        skip_b = box.addButton("Skip", QMessageBox.RejectRole)
-        keep_b = box.addButton("Rename (_1)", QMessageBox.ActionRole)
-        ovw_b = box.addButton("Overwrite", QMessageBox.AcceptRole)
-        ovw_all_b = box.addButton("Overwrite All", QMessageBox.AcceptRole)
-        box.setDefaultButton(ovw_b)
-        box.exec_()
-        clicked = box.clickedButton()
-        if clicked is skip_b:
+        choice = self._operation_collision_choice
+        if choice is None:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Output file exists")
+            box.setText(
+                f"Output already exists:\n{output_path}\n\n"
+                "How do you want to continue?"
+            )
+            skip_b = box.addButton("Skip", QMessageBox.RejectRole)
+            keep_b = box.addButton("Rename (_1)", QMessageBox.ActionRole)
+            ovw_b = box.addButton("Overwrite", QMessageBox.AcceptRole)
+            box.setDefaultButton(keep_b)
+            sticky = None
+            if allow_sticky:
+                sticky = QCheckBox("Do this for all remaining files", box)
+                box.setCheckBox(sticky)
+            box.exec_()
+            clicked = box.clickedButton()
+            if clicked is skip_b:
+                choice = "skip"
+            elif clicked is keep_b:
+                choice = "rename"
+            else:
+                choice = "overwrite"
+            if sticky is not None and sticky.isChecked():
+                self._operation_collision_choice = choice
+        if choice == "skip":
             return None
-        if clicked is ovw_all_b:
-            self._overwrite_all = True
-            return output_path
-        if clicked is keep_b:
+        if choice == "rename":
             return resolve_output_path_collision(output_path, on_existing="rename")
         return output_path
 
@@ -890,10 +1316,14 @@ class ConvertDialog(QDialog):
             fsize = frame_size(spec)
             frames = frame_count(Path(input_path).stat().st_size, spec)
         except (TranscodeError, OSError) as exc:
+            hint = yuv_size_mismatch_hint(
+                input_path, source, w, h, self.offset.value()
+            )
+            detail = f"{exc}\n\n{hint}" if hint else str(exc)
             self._preview_info.setText(
                 f"Source: {Path(input_path).name} (YUV)\n"
                 f"Source spec: {source} {w}x{h}\n"
-                f"Frame size: -\n{exc}"
+                f"Frame size: -\n{detail}"
             )
             return
         self._preview_info.setText(
@@ -904,6 +1334,9 @@ class ConvertDialog(QDialog):
         )
 
     def _convert(self) -> None:
+        # A "do this for all remaining files" choice belongs to one operation
+        # only; reset it before anything can ask about a collision.
+        self._operation_collision_choice = None
         # Busy feedback: disable the button and show progress text so the user
         # knows work is happening (conversion is synchronous).
         self._set_convert_busy(True)
@@ -913,32 +1346,50 @@ class ConvertDialog(QDialog):
         finally:
             self._set_convert_busy(False)
 
+    def _report_output_error(
+        self, exc: BaseException, output_path: str, *, in_use: bool = True
+    ) -> None:
+        """Report a failure to write the target with the right cause.
+
+        "Open in another program" is reserved for a real sharing/lock
+        violation; a read-only file or folder gets its own permission message
+        (0.5.11 review M-2).
+        """
+        if in_use and _is_file_in_use_error(exc):
+            # Windows refuses to replace a file another program has open.
+            # Tell the user exactly what to close instead of surfacing a
+            # bare "[WinError 32]" (user request).
+            QMessageBox.warning(
+                self,
+                "Output file is in use",
+                f"❌ Could not write the output file:\n{output_path}\n\n"
+                "The file may be open in another program (for example an "
+                "image or YUV viewer). Close the program that has the file "
+                "open and try again.\n\n"
+                f"Details: {exc}",
+            )
+        elif _is_permission_denied_error(exc):
+            QMessageBox.critical(
+                self,
+                "Cannot write output",
+                f"❌ Cannot write to:\n{output_path}\n\n"
+                "Permission denied. Check that the file is not read-only and "
+                "that its folder is writable, or choose another output "
+                f"folder.\n\nDetails: {exc}",
+            )
+        else:
+            QMessageBox.critical(self, "Convert Failed", f"❌ {exc}")
+
     def _do_convert(self) -> None:
+        # Validation only: no side effects before the size check / overwrite
+        # prompt, so an impossible request cannot leave an empty folder (N2).
         try:
             input_path = self.input_edit.text().strip()
             target_type = self.target_type.currentText()
             yuv_input = self._is_yuv_input()
             output_path = self.output_edit.text().strip()
             if not output_path:
-                template = self._settings.output_template
-                output_path = format_output_template(
-                    template,
-                    input_path,
-                    self.width.value(),
-                    self.height.value(),
-                    target_type,
-                    output_dir=self._settings.default_output_dirname,
-                    raw_type=self.raw_type.currentText(),
-                    # YUV input: {format} must name the TARGET layout.
-                    yuv_type=(
-                        self.yuv_type.currentText() if yuv_input
-                        else self._resolve_yuv_fmt()
-                    ),
-                    bayer_pattern=self.bayer_pattern.currentText(),
-                    source_mode=self.raw_source_mode.currentText(),
-                    alignment=self.align.currentText(),
-                    endianness=self.endian.currentText(),
-                )
+                output_path = self._default_output_path(input_path)
             if not input_path:
                 raise ValueError("input path is required")
             if not output_path:
@@ -964,18 +1415,45 @@ class ConvertDialog(QDialog):
                 # NV16 frame used to land on disk through the GUI while the CLI
                 # refused it.
                 require_decode_size(spec.width, spec.height, frame_size(spec))
+        except Exception as exc:
+            QMessageBox.critical(self, "Convert Failed", f"❌ {exc}")
+            return
 
+        # The source is read inside the conversion call.  Check it first so a
+        # missing/unreadable input is reported as an input problem, never as
+        # "the output file may be open in another program" (0.5.11 review M-2).
+        try:
+            with open(input_path, "rb"):
+                pass
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Cannot read input",
+                f"❌ Cannot read the input file:\n{input_path}\n\n"
+                "Check that the file exists and that you are allowed to read "
+                f"it.\n\nDetails: {exc}",
+            )
+            return
+
+        # Creating the output folder is not a file-sharing operation: a
+        # read-only parent is a permission problem, so never classify it as
+        # "in use" (0.5.11 review M-2).
+        try:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._report_output_error(exc, output_path, in_use=False)
+            return
 
-            # P1-6 覆盖确认：目标已存在时弹"跳过/覆盖/全部覆盖/重命名"。
-            # 返回 None 表示用户选择跳过 → 直接结束本次转换。
-            resolved = self._confirm_output_collision(output_path)
-            if resolved is None:
-                self._set_convert_busy(False)
-                return
-            output_path = resolved
+        # P1-6 覆盖确认：目标已存在时弹"跳过/覆盖/全部覆盖/重命名"。
+        # 返回 None 表示用户选择跳过 → 直接结束本次转换。
+        resolved = self._confirm_output_collision(output_path)
+        if resolved is None:
+            self._set_convert_busy(False)
+            return
+        output_path = resolved
 
-            frame_count = None
+        frame_count = None
+        try:
             if yuv_input:
                 from raw_view.transcode import transcode_file
 
@@ -1006,107 +1484,33 @@ class ConvertDialog(QDialog):
                     alignment=self.align.currentText(),
                     endianness=self.endian.currentText(),
                 )
-            self.output_edit.setText(output_path)
-            try:
-                size = Path(output_path).stat().st_size
-                size_str = f" ({_format_size(size)})"
-            except OSError:
-                size_str = ""
-            if frame_count is not None:
-                size_str = f" ({frame_count} frame(s){size_str})"
-            QMessageBox.information(
-                self, "Convert",
-                f"\u2705 Converted:\n{output_path}{size_str}",
-            )
         except Exception as exc:
-            QMessageBox.critical(self, "Convert Failed", f"\u274c {exc}")
-
-    def _generate_variants(self) -> None:
-        """Generate every selected format/bayer/size combination from the input."""
-        if self._variant_selector is None:
+            if _is_file_in_use_error(exc) or _is_permission_denied_error(exc):
+                self._report_output_error(exc, output_path)
+            else:
+                detail = str(exc)
+                if yuv_input:
+                    # A size mismatch is almost always a wrong Width/Height,
+                    # not a corrupt file; say how to fix it (0.5.11 M-1).
+                    hint = yuv_size_mismatch_hint(
+                        input_path, self._input_format(),
+                        self.width.value(), self.height.value(),
+                        self.offset.value(),
+                    )
+                    if hint:
+                        detail = f"{detail}\n\n{hint}"
+                QMessageBox.critical(self, "Convert Failed", f"\u274c {detail}")
             return
-        # Defence in depth: the button is disabled for the whole run, but a
-        # programmatic/re-entrant click must never start a second overlapping
-        # generation writing the same output folder (0.5.10.1 review M-1).
-        if self._generating_variants:
-            return
-        input_path = self.input_edit.text().strip()
-        if not input_path or not Path(input_path).is_file():
-            QMessageBox.warning(self, "Generate Variants", "Please choose a valid input image.")
-            return
-        formats = self._variant_selector.selected_formats()
-        sizes = self._variant_selector.selected_sizes()
-        bayer = self._variant_selector.selected_bayer()
-        if not formats:
-            QMessageBox.warning(self, "Generate Variants", "Select at least one format.")
-            return
-        if not sizes:
-            QMessageBox.warning(self, "Generate Variants", "Select at least one size.")
-            return
-        source_mode = self.raw_source_mode.currentText()
-        alignment = self.align.currentText()
-        endianness = self.endian.currentText()
-        plans = plan_image_variants(
-            input_path, formats, sizes, bayer,
-            source_mode=source_mode, alignment=alignment, endianness=endianness,
-            output_dir=self._settings.default_output_dirname,
-            template=self._settings.output_template,
-        )
-        # ``_generating_variants`` keeps _sync_controls_locked() (reachable
-        # from every control edit during the event pumps below) from
-        # re-enabling the button mid-run.
-        self._generating_variants = True
-        self._btn_variants.setEnabled(False)
-        self._btn_variants.setText(f"Generating 0/{len(plans)}…")
-        QApplication.processEvents()
 
-        written: list[str] = []
-        done = {"n": 0}
-
-        def _progress(_path: str) -> None:
-            done["n"] += 1
-            self._btn_variants.setText(f"Generating {done['n']}/{len(plans)}…")
-            QApplication.processEvents()
-
-        # P1-6\uff1a\u591a\u53d8\u4f53\u76ee\u6807\u5df2\u5b58\u5728\u65f6\u6309\u5df2\u9009\u7b56\u7565\u5904\u7406\u3002\u9ed8\u8ba4 "rename"\uff08\u4e0d\u8986\u76d6\u4e0d\u4e22
-        # \u6587\u4ef6\uff09\uff1b\u7528\u6237\u5728\u5f53\u524d\u4f1a\u8bdd\u91cc\u9009\u4e86"\u5168\u90e8\u8986\u76d6"\u5219\u8986\u76d6\u3002
-        collision_policy = "overwrite" if self._overwrite_all else "rename"
-        rewritten: dict[str, str] = {}
-
-        def _map_output(out: str) -> str:
-            if out in rewritten:
-                return rewritten[out]
-            resolved = resolve_output_path_collision(out, on_existing=collision_policy)
-            if resolved != out:
-                # \u6a21\u677f\u7b97\u51fa\u7684\u65e7\u6587\u4ef6\u6240\u5728\u5e8f\u53f7\u53ef\u80fd\u53cd\u590d\u51fa\u73b0\u540c\u4e00\u540d\u5b57 \u2192 \u8bb0\u5fc6\u4e00\u6b21\u6620\u5c04
-                rewritten[out] = resolved
-            return resolved
-
+        self.output_edit.setText(output_path)
         try:
-            written = generate_image_variants(
-                input_path, formats, sizes, bayer,
-                source_mode=source_mode, alignment=alignment, endianness=endianness,
-                output_dir=self._settings.default_output_dirname,
-                template=self._settings.output_template,
-                on_output=_progress,
-                output_paths=_map_output,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Generate Variants Failed", f"\u274c {exc}")
-            return
-        finally:
-            # Clear the run flag BEFORE deriving the final state, then derive
-            # it from the CURRENT input type: generation pumps events, so the
-            # user may have switched to YUV mid-run.  Re-enabling unconditionally
-            # left a clickable button whose tooltip said "not available for a
-            # YUV input" (0.5.10 review L-4).
-            self._generating_variants = False
-            self._btn_variants.setText("Generate Variants")
-            self._btn_variants.setEnabled(not self._is_yuv_input())
-        out_dir = str(Path(written[0]).parent) if written else "-"
+            size = Path(output_path).stat().st_size
+            size_str = f" ({_format_size(size)})"
+        except OSError:
+            size_str = ""
+        if frame_count is not None:
+            size_str = f" ({frame_count} frame(s){size_str})"
         QMessageBox.information(
-            self,
-            "Generate Variants",
-            f"\u2705 Generated {len(written)} file(s) from {len(plans)} planned variant(s).\n"
-            f"Output folder:\n{out_dir}",
+            self, "Convert",
+            f"\u2705 Converted:\n{output_path}{size_str}",
         )

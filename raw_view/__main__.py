@@ -1136,12 +1136,14 @@ def _run_convert_yuv(args: argparse.Namespace) -> None:
 
     output_path = args.output
     if not output_path:
-        # {format} 渲染为目标布局；尺寸仍是源帧尺寸（本轮不改变几何）。
+        # {format} 渲染为 "{源}_to_{目标}"（如 YUYV_to_NV16），与 GUI 的命名
+        # 规则一致；尺寸仍是源帧尺寸（本轮不改变几何）。
         output_path = format_output_template(
             "{input_stem}_{width}x{height}_{format}{ext}",
             args.input, width, height, "YUV",
             output_dir=CONVERT_OUT_DIR,
             yuv_type=target_format,
+            source_yuv_type=source_format,
         )
 
     logger.info(
@@ -1672,6 +1674,12 @@ def _run_batch(args: argparse.Namespace) -> None:
                 source_mode=params.get("source_mode", ""),
                 alignment=params.get("alignment", ""),
                 endianness=params.get("endianness", ""),
+                # YUV -> YUV rearrange: {format} must read "source_to_target"
+                # (same naming rule as the single-file command and the GUI).
+                source_yuv_type=(
+                    transcode_spec.source_format
+                    if transcode_spec is not None else ""
+                ),
             )
             # 未显式指定 output_dir（JSON 全局/entry 均未给）时，保持旧行为：把
             # 自动输出放到输入文件同目录。显式 output 不可能走到这里（上方分支已
