@@ -229,9 +229,9 @@ class FourCCDialog(QDialog):
         btn_row.addStretch(1)
         btn_row.addWidget(close_btn)
 
-        # Status label
+        # Status label (theme token via the shared stylesheet).
         self._status_label = QLabel()
-        self._status_label.setStyleSheet("color: #64748B;")
+        self._status_label.setProperty("role", "hint")
 
         # Main layout
         layout = QVBoxLayout(self)

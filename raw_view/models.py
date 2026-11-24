@@ -391,75 +391,85 @@ ACTION_ICON_NAMES = {
     "help": "fa5s.question-circle",
 }
 
-# Indigo / violet palette, tuned to harmonize with the qt-material
-# light_purple / dark_purple base themes. These values feed the thin QSS
-# overlay in ``build_ui_stylesheet`` (cards, panels, accents) that sits on
-# top of the qt-material base.
+# Neutral graphite "sensor workbench" palette with a single blue accent and
+# the 2x2 Bayer signature colours.  These values feed the thin QSS overlay in
+# ``build_ui_stylesheet`` (cards, panels, accents) that sits on top of the
+# qt-material base.  Keys are referenced by tests; add keys, never rename.
 THEME_PALETTES = {
     "light": {
-        "main_bg": "#F4F6FA",
-        "text_color": "#212121",
-        "text_secondary": "#6B7280",
-        # Hint/help text sits on the qt-material QDialog window (#E6E8EE in the
-        # light theme), not always on a white card.  ``text_secondary`` only
-        # reaches 3.95:1 there; this darker token reaches 6.04:1 while keeping
-        # the same visual role (0.5.10.1 review M-2).
-        "hint_text": "#55555B",
+        "main_bg": "#F2F3F5",
+        "text_color": "#1A1C20",
+        "text_secondary": "#5A6069",
+        # Hint/help text sits on the qt-material QDialog window, not always on
+        # a white card; this darker token keeps >=4.5:1 on the measured
+        # backgrounds (0.5.10.1 review M-2).
+        "hint_text": "#4E535C",
         "panel_bg": "#FFFFFF",
-        "border_color": "#D5D9E3",
+        "border_color": "#DCDEE3",
         "input_bg": "#FFFFFF",
-        "button_bg": "#1976D2",
-        "button_hover_bg": "#1565C0",
+        "button_bg": "#1F6FC4",
+        "button_hover_bg": "#1A5EA8",
         "button_text_color": "#FFFFFF",
-        "accent": "#1976D2",
-        "accent_light": "#E3F2FD",
-        "card_shadow": "rgba(30,27,46,0.08)",
-        "success": "#2E7D32",
-        "warning": "#F59E0B",
+        "accent": "#1F6FC4",
+        "accent_light": "#E9F0FA",
+        "card_shadow": "rgba(26,28,32,0.08)",
+        "success": "#2F7D46",
+        "warning": "#A25B06",
+        "danger": "#B3261E",
+        # 2x2 Bayer swatch signature colours.
+        "bayer_r": "#E05252",
+        "bayer_g": "#3AA85A",
+        "bayer_b": "#3B7FD4",
         # Frame navigation bar button palette (light theme).
         "nav_button_bg": "#FFFFFF",
-        "nav_button_border": "#D5D9E3",
-        "nav_button_text": "#212121",
-        "nav_button_hover_bg": "#E3F2FD",
-        "nav_button_hover_border": "#1976D2",
-        "nav_button_hover_text": "#1565C0",
-        "nav_button_pressed_bg": "#D5D9E3",
-        "nav_button_pressed_border": "#9AA0AC",
-        "nav_button_pressed_text": "#000000",
-        "nav_button_disabled_bg": "#F1F3F8",
-        "nav_button_disabled_border": "#E5E8EF",
-        "nav_button_disabled_text": "#B0B6C4",
+        "nav_button_border": "#DCDEE3",
+        "nav_button_text": "#1A1C20",
+        "nav_button_hover_bg": "#E9F0FA",
+        "nav_button_hover_border": "#1F6FC4",
+        "nav_button_hover_text": "#1A5EA8",
+        "nav_button_pressed_bg": "#DCDEE3",
+        "nav_button_pressed_border": "#5A6069",
+        "nav_button_pressed_text": "#1A1C20",
+        "nav_button_disabled_bg": "#F2F3F5",
+        "nav_button_disabled_border": "#DCDEE3",
+        "nav_button_disabled_text": "#5A6069",
     },
     "dark": {
-        "main_bg": "#171A24",
-        "text_color": "#E8EAED",
-        "text_secondary": "#9AA0AC",
-        # Dark hint text on #171A24 (dialog) / #21242F (card): 6.61:1 / 5.89:1.
-        "hint_text": "#9AA0AC",
-        "panel_bg": "#21242F",
-        "border_color": "#3A3D4E",
-        "input_bg": "#2A2D3E",
-        "button_bg": "#1976D2",
-        "button_hover_bg": "#1E88E5",
+        "main_bg": "#121417",
+        "text_color": "#E7E9EC",
+        "text_secondary": "#9AA1AA",
+        "hint_text": "#9AA1AA",
+        "panel_bg": "#1A1D22",
+        "border_color": "#32363D",
+        "input_bg": "#24272E",
+        "button_bg": "#1F6FC4",
+        "button_hover_bg": "#2A7FD8",
         "button_text_color": "#FFFFFF",
-        "accent": "#4A90D9",
-        "accent_light": "#26304A",
+        "accent": "#5B9BEA",
+        "accent_light": "#1D2A3B",
         "card_shadow": "rgba(0,0,0,0.35)",
         "success": "#66BB6A",
-        "warning": "#FBBF24",
-        # Frame navigation bar button palette (dark theme).
-        "nav_button_bg": "#2A2D4A",
-        "nav_button_border": "#3A3D5C",
-        "nav_button_text": "#C8CCDC",
-        "nav_button_hover_bg": "#363A5E",
-        "nav_button_hover_border": "#5B6080",
-        "nav_button_hover_text": "#E8EAED",
-        "nav_button_pressed_bg": "#1E2035",
-        "nav_button_pressed_border": "#2A2D4A",
+        "warning": "#E0A32E",
+        "danger": "#E57373",
+        # 2x2 Bayer swatch signature colours.
+        "bayer_r": "#F87171",
+        "bayer_g": "#4ADE80",
+        "bayer_b": "#60A5FA",
+        # Frame navigation bar button palette (dark theme).  The pressed
+        # surface keeps a cool blue cast that matches the accent; the literal
+        # is also pinned by FramenavThemingTests.
+        "nav_button_bg": "#24272E",
+        "nav_button_border": "#32363D",
+        "nav_button_text": "#E7E9EC",
+        "nav_button_hover_bg": "#1D2A3B",
+        "nav_button_hover_border": "#5B9BEA",
+        "nav_button_hover_text": "#5B9BEA",
+        "nav_button_pressed_bg": "#2A2D4A",
+        "nav_button_pressed_border": "#5B9BEA",
         "nav_button_pressed_text": "#FFFFFF",
-        "nav_button_disabled_bg": "#1E2035",
-        "nav_button_disabled_border": "#2A2D4A",
-        "nav_button_disabled_text": "#4A5070",
+        "nav_button_disabled_bg": "#1A1D22",
+        "nav_button_disabled_border": "#24272E",
+        "nav_button_disabled_text": "#5A6069",
     },
 }
 
@@ -1385,6 +1395,11 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: 1px solid {p["border_color"]};
             border-radius: 12px;
         }}
+        QFrame#subcard {{
+            background: transparent;
+            border: 1px solid {p["border_color"]};
+            border-radius: 8px;
+        }}
         QFrame#groupDivider {{
             background: {p["border_color"]};
             border: none;
@@ -1394,12 +1409,48 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             color: {p["text_color"]};
             background: transparent;
         }}
+        QLabel[role="formLabel"] {{
+            color: {p["text_secondary"]};
+            font-size: 12px;
+        }}
+        QLabel[role="hint"] {{
+            color: {p["hint_text"]};
+        }}
+        QLabel#sectionLabel {{
+            color: {p["text_color"]};
+            font-size: 11px;
+            font-weight: 500;
+            background: transparent;
+        }}
+        QLabel#emptyStateTitle {{
+            color: {p["text_color"]};
+            font-size: {font_size + 4}px;
+            font-weight: 600;
+        }}
+        QLabel#aboutTitle {{
+            color: {p["text_color"]};
+            font-size: {font_size + 5}px;
+            font-weight: 600;
+        }}
+        QLabel#aboutVersion {{
+            color: {p["text_secondary"]};
+        }}
+        QLabel#groupTitle {{
+            color: {p["text_color"]};
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        QLabel#monoLabel, QLabel[mono="true"] {{
+            font-family: "Cascadia Mono", "Consolas", monospace;
+        }}
         QComboBox, QSpinBox, QLineEdit, QAbstractSpinBox {{
             background: {p["input_bg"]};
             color: {p["text_color"]};
             border: 1px solid {p["border_color"]};
             border-radius: 6px;
-            padding: 4px 8px;
+            padding: 0px 8px;
+            min-height: 28px;
+            max-height: 28px;
         }}
         QComboBox:focus, QSpinBox:focus, QLineEdit:focus, QAbstractSpinBox:focus {{
             border: 1px solid {p["accent"]};
@@ -1407,14 +1458,19 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QComboBox:disabled, QSpinBox:disabled, QLineEdit:disabled,
         QAbstractSpinBox:disabled {{
             color: {p["text_secondary"]};
-            background: {p["accent_light"]};
+            background: {p["input_bg"]};
+            border: 1px solid {p["border_color"]};
         }}
         QComboBox {{
             combobox-popup: 0;
         }}
         QComboBox::drop-down {{
-            width: 22px;
+            width: 24px;
             border-left: 1px solid {p["border_color"]};
+        }}
+        QComboBox::down-arrow {{
+            width: 12px;
+            height: 12px;
         }}
         QSplitter#mainSplitter::handle:horizontal {{
             background: transparent;
@@ -1440,29 +1496,52 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: 1px solid {p["accent"]};
             image: none;
         }}
-        QScrollArea {{
+        QCheckBox[customSize="true"] {{
+            color: {p["accent"]};
+            font-weight: 500;
+        }}
+        QCheckBox[flash="true"] {{
+            background: {p["accent_light"]};
+            border-radius: 4px;
+        }}
+        QScrollArea, QScrollArea > QWidget > QWidget {{
             border: none;
             background: transparent;
         }}
+        QMenuBar, QToolBar {{
+            background: {p["panel_bg"]};
+            color: {p["text_color"]};
+            border: none;
+            border-bottom: 1px solid {p["border_color"]};
+        }}
+        QStatusBar {{
+            background: {p["panel_bg"]};
+            color: {p["text_secondary"]};
+            border: none;
+            border-top: 1px solid {p["border_color"]};
+        }}
+        QStatusBar::item {{
+            border: none;
+        }}
         QSlider::groove:horizontal {{
-            height: 6px;
+            height: 4px;
             background: {p["border_color"]};
-            border-radius: 3px;
+            border-radius: 2px;
         }}
         QSlider::sub-page:horizontal {{
             background: {p["accent"]};
-            border-radius: 3px;
+            border-radius: 2px;
         }}
         QSlider::add-page:horizontal {{
             background: {p["border_color"]};
-            border-radius: 3px;
+            border-radius: 2px;
         }}
         QSlider::handle:horizontal {{
-            background: #FFFFFF;
+            background: {p["panel_bg"]};
             border: 2px solid {p["accent"]};
             width: 14px;
             height: 14px;
-            margin: -5px 0;
+            margin: -7px 0;
             border-radius: 9px;
         }}
         QSlider::handle:horizontal:hover {{
@@ -1475,8 +1554,11 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QTabBar::tab {{
             padding: 10px 14px 14px 16px;
             margin-right: 2px;
+            background: transparent;
+            color: {p["text_secondary"]};
         }}
         QTabBar::tab:selected {{
+            background: {p["panel_bg"]};
             color: {p["text_color"]};
             border-bottom: 2px solid {p["accent"]};
         }}
@@ -1493,8 +1575,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["button_bg"]};
             color: {p["button_text_color"]};
             border: none;
-            border-radius: 8px;
-            padding: 9px 18px;
+            border-radius: 6px;
+            padding: 0px 16px;
+            min-height: 30px;
+            max-height: 30px;
             font-weight: 600;
         }}
         QPushButton#accentButton:hover {{
@@ -1508,8 +1592,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: transparent;
             color: {p["accent"]};
             border: 1px solid {p["accent"]};
-            border-radius: 8px;
-            padding: 8px 16px;
+            border-radius: 6px;
+            padding: 0px 14px;
+            min-height: 28px;
+            max-height: 28px;
             font-weight: 600;
         }}
         QPushButton#secondaryButton:hover {{
@@ -1519,8 +1605,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: transparent;
             color: {p["accent"]};
             border: none;
-            padding: 8px 12px;
-            font-weight: 600;
+            padding: 0px 10px;
+            min-height: 30px;
+            max-height: 30px;
+            font-weight: 500;
         }}
         QPushButton#textButton:hover {{
             color: {p["button_hover_bg"]};
@@ -1535,6 +1623,41 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton#iconButton:hover {{
             background: {p["accent_light"]};
             border: 1px solid {p["accent"]};
+        }}
+        QToolButton#presetFilterButton, QToolButton#pinButton {{
+            background: {p["panel_bg"]};
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 0px;
+            margin: 0px;
+        }}
+        /* Keep 2px on the right for the InstantPopup indicator, otherwise the
+           icon+indicator group drifts off-centre (FilterButtonRenderingTests). */
+        QToolButton#presetFilterButton {{
+            padding: 0px 2px 0px 0px;
+        }}
+        QToolButton#presetFilterButton:hover, QToolButton#pinButton:hover {{
+            background: {p["accent_light"]};
+            border: 1px solid {p["accent"]};
+        }}
+        QToolButton#presetFilterButton:pressed, QToolButton#pinButton:pressed,
+        QToolButton#presetFilterButton:checked, QToolButton#pinButton:checked {{
+            background: {p["accent_light"]};
+            border: 1px solid {p["accent"]};
+        }}
+        QPushButton#dangerButton {{
+            background: transparent;
+            color: {p["danger"]};
+            border: 1px solid {p["danger"]};
+            border-radius: 6px;
+            padding: 0px 14px;
+            min-height: 28px;
+            max-height: 28px;
+            font-weight: 600;
+        }}
+        QPushButton#dangerButton:hover {{
+            background: {p["danger"]};
+            color: {p["button_text_color"]};
         }}
         /*
          * Help icons are deliberately borderless in every native state.  The
@@ -1567,18 +1690,6 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: transparent;
             border: none;
             outline: none;
-        }}
-        QPushButton#dangerButton {{
-            background: transparent;
-            color: #E53935;
-            border: 1px solid #E53935;
-            border-radius: 8px;
-            padding: 8px 16px;
-            font-weight: 600;
-        }}
-        QPushButton#dangerButton:hover {{
-            background: #E53935;
-            color: #FFFFFF;
         }}
         QLabel#previewThumb {{
             background: {p["accent_light"]};

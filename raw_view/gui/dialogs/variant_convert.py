@@ -99,7 +99,7 @@ class YuvVariantSelector(QWidget):
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Target YUV formats (same chroma family)")
-        title.setStyleSheet("font-weight: bold; border: none;")
+        title.setObjectName("groupTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
         root.addLayout(title_row)

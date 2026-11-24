@@ -108,13 +108,13 @@ class AboutDialog(QDialog):
         layout.setSpacing(8)
 
         title = QLabel("RAW/YUV Viewer")
+        title.setObjectName("aboutTitle")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 18px; font-weight: 700;")
         layout.addWidget(title)
 
         version = QLabel(f"Version {APP_VERSION}")
+        version.setObjectName("aboutVersion")
         version.setAlignment(Qt.AlignCenter)
-        version.setStyleSheet("color: #9AA0AC;")
         layout.addWidget(version)
 
         desc = QLabel(

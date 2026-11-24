@@ -63,6 +63,7 @@ from raw_view.models import (
     THEME_XML,
     DecodeOptions,
     SensorPreset,
+    THEME_PALETTES,
     ViewerItem,
     build_ui_stylesheet,
     is_supported_preset_format_for_type,
@@ -150,6 +151,9 @@ class DropCentralWidget(QWidget):
         super().__init__(parent)
         self._drag_hover = False
         self.setAcceptDrops(True)
+        # The QSS overlay paints ``QWidget#centralRoot``; without this Qt
+        # skips the background for plain QWidget subclasses.
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
     # ── drag-drop event handlers ────────────────────────────────────
 
@@ -194,25 +198,34 @@ class DropCentralWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        palette = self.palette()
+        dark = palette.color(palette.Base).lightnessF() < 0.5
+        tokens = THEME_PALETTES["dark" if dark else "light"]
+        accent = QColor(tokens["accent"])
+        secondary = QColor(tokens["text_secondary"])
+        base_size = self.font().pixelSize()
+        if base_size <= 0:
+            base_size = max(13, self.font().pointSize())
+
         # Border highlight
         pen = painter.pen()
-        pen.setColor(QColor("#3B82F6"))
+        pen.setColor(accent)
         pen.setWidth(4)
         painter.setPen(pen)
         painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 12, 12)
 
         # Center label
-        painter.setPen(QColor("#3B82F6"))
+        painter.setPen(accent)
         font = painter.font()
-        font.setPointSize(16)
+        font.setPixelSize(base_size + 5)
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(self.rect(), Qt.AlignCenter, "Drop files or folders here")
 
-        font.setPointSize(10)
+        font.setPixelSize(max(base_size - 2, 9))
         font.setBold(False)
         painter.setFont(font)
-        painter.setPen(QColor("#94A3B8"))
+        painter.setPen(secondary)
         painter.drawText(
             self.rect().adjusted(0, 40, 0, 0),
             Qt.AlignCenter,
@@ -580,6 +593,24 @@ class MainWindow(QMainWindow):
         self._refresh_recent_files_menu()
         self.panel.set_enabled(False)
 
+    def _render_empty_icon(self) -> None:
+        """Re-render the empty-state glyph with the active theme token."""
+        label = self.__dict__.get("_empty_icon_label")
+        if label is None:
+            return
+        theme = getattr(getattr(self, "settings", None), "ui_theme", None)
+        if theme not in ("light", "dark"):
+            palette = self.palette()
+            theme = "dark" if palette.color(palette.Base).lightnessF() < 0.5 else "light"
+        color = THEME_PALETTES[theme]["text_secondary"]
+        try:
+            import qtawesome as qta
+
+            label.setPixmap(qta.icon("fa5s.image", color=color).pixmap(72, 72))
+        except Exception:
+            # Never use an emoji as a fallback (project-wide UI rule).
+            label.setText("Image")
+
     def _build_empty_state(self) -> QWidget:
         """Placeholder shown in the viewer area before any file is opened."""
         widget = QWidget()
@@ -590,24 +621,18 @@ class MainWindow(QMainWindow):
 
         icon_label = QLabel()
         icon_label.setAlignment(Qt.AlignCenter)
-        try:
-            import qtawesome as qta
-
-            pix = qta.icon("fa5s.image", color="#B9B4D0").pixmap(72, 72)
-            icon_label.setPixmap(pix)
-        except Exception:
-            icon_label.setText("🖼")
+        self._empty_icon_label = icon_label
+        self._render_empty_icon()
 
         title = QLabel("No image loaded")
         title.setAlignment(Qt.AlignCenter)
         title.setObjectName("emptyStateTitle")
-        title.setStyleSheet("font-size: 18px; font-weight: 700;")
 
         hint = QLabel("Open a RAW / YUV / image file, or drag and drop it here")
         hint.setAlignment(Qt.AlignCenter)
         hint.setObjectName("statusPlaceholder")
 
-        open_btn = QPushButton("Open File...")
+        open_btn = QPushButton("Open File…")
         open_btn.setObjectName("accentButton")
         open_btn.setMinimumWidth(200)
         open_btn.clicked.connect(self.open_file)
@@ -628,16 +653,32 @@ class MainWindow(QMainWindow):
         """Show the tabbed views when items exist, else the empty state."""
         self.center_stack.setCurrentIndex(1 if self.items else 0)
 
-    _STATE_DOT_COLORS = {
-        "idle": "#9E9E9E",
-        "busy": "#F59E0B",
-        "ok": "#2E7D32",
-        "error": "#D32F2F",
+    _STATE_DOT_TOKENS = {
+        "idle": "text_secondary",
+        "busy": "warning",
+        "ok": "success",
+        "error": "danger",
     }
+
+    def _state_dot_color(self, kind: str) -> str:
+        """Theme-aware status-dot colour (refreshed with the product theme).
+
+        Test stubs use ``MainWindow.__new__`` without calling ``__init__``, so
+        the settings object is read from the instance dict (touching an unset
+        Qt attribute raises RuntimeError, not AttributeError).
+        """
+        settings = self.__dict__.get("settings")
+        theme = getattr(settings, "ui_theme", "light")
+        if theme not in THEME_PALETTES:
+            theme = "light"
+        token = self._STATE_DOT_TOKENS.get(kind, "text_secondary")
+        return THEME_PALETTES[theme].get(token, THEME_PALETTES[theme]["text_secondary"])
 
     def _set_state(self, text: str, kind: str = "idle") -> None:
         """Update the status-bar state label with a colored status dot."""
-        dot = self._STATE_DOT_COLORS.get(kind, "#9E9E9E")
+        self._state_text = text
+        self._state_kind = kind
+        dot = self._state_dot_color(kind)
         self.state_status.setText(f'<span style="color:{dot};">&#9679;</span> {text}')
 
     def _set_item_state(self, item: ViewerItem | None, text: str, kind: str = "idle") -> None:
@@ -1031,6 +1072,12 @@ class MainWindow(QMainWindow):
         if refresh is not None:
             self._refresh_pin_state()
             refresh()
+        # Status-dot HTML and the empty-state glyph carry palette colours in
+        # inline HTML/pixmaps, so re-render them after every theme switch.
+        kind = self.__dict__.get("_state_kind")
+        if kind is not None and self.__dict__.get("state_status") is not None:
+            self._set_state(self.__dict__.get("_state_text", ""), kind)
+        self._render_empty_icon()
 
     def _apply_theme_impl(self) -> None:
         font_size = self.settings.ui_font_size

@@ -35,6 +35,7 @@ from raw_view.models import (
     PRESET_CATEGORY_ALL,
     PRESET_CATEGORY_CHOICES,
     SensorPreset,
+    THEME_PALETTES,
     filter_sensor_presets_by_category,
     is_supported_preset_format_for_type,
     normalize_preset_format_name,
@@ -160,12 +161,8 @@ class ControlPanel(QWidget):
     _PRESET_PLACEHOLDER = "Select a preset"
     # Hint shown instead when the active selection is hidden by the filter.
     _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
-    # Three-state pin colours.  Light/dark variants are chosen per theme so every
-    # state keeps >=3:1 contrast against the panel background.
-    _PIN_MATCH_LIGHT = "#1976D2"
-    _PIN_MATCH_DARK = "#4A90D9"
-    _PIN_PENDING_LIGHT = "#B45309"
-    _PIN_PENDING_DARK = "#FBBF24"
+    # Three-state pin colours come from THEME_PALETTES (accent / warning); see
+    # _pin_icon_color().  No per-widget colour constants live here.
 
     RAW_FORMATS = [
         "RAW8",
@@ -202,6 +199,8 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(340)
         self.setObjectName("controlPanel")
+        # Required for the QSS `QWidget#controlPanel` surface to paint.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         # 面板整体启用态（供帧大小门禁判断是否干预 Apply）；初始启用。
         # _apply_cond_rows 的幂等短路直接比较控件当前真实状态（是否在表单中
         # + isEnabled），不需要额外的状态字段——见该方法的注释（0.5.1 M-1）。
@@ -211,6 +210,9 @@ class ControlPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(0)  # no border
+        # The viewport must not paint its own surface, otherwise the panel card
+        # background is hidden behind a white/grey rectangle.
+        scroll.viewport().setAutoFillBackground(False)
         content = QWidget()
         content.setObjectName("controlPanelContent")
 
@@ -251,21 +253,10 @@ class ControlPanel(QWidget):
         self.preset_filter_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.preset_filter_btn.setIconSize(QSize(16, 16))
         self.preset_filter_btn.setFixedSize(30, 30)
-        # qt-material's global ``QToolButton`` rule adds ``margin: 3px``,
-        # ``padding: 3px`` AND ``border-left/right: 12px solid`` — 36px of
-        # horizontal chrome inside a 30px button (v0.5.2 issue 1).  The icon's
-        # content rect went negative and was clipped away entirely; only the
-        # InstantPopup menu indicator survived, which is why the button looked
-        # like a lone triangle in the lower area.  An ID-scoped rule resets the
-        # chrome (the pin button does the same, which is why only the filter
-        # button was broken) and keeps 2px of symmetric room for the indicator.
-        self.preset_filter_btn.setStyleSheet(
-            "QToolButton#presetFilterButton { padding: 0px 2px 0px 0px;"
-            " border: 1px solid transparent; border-radius: 6px; }"
-            "QToolButton#presetFilterButton:hover { background: rgba(74,144,217,0.18);"
-            " border: 1px solid rgba(74,144,217,0.55); }"
-            "QToolButton#presetFilterButton:pressed { background: rgba(74,144,217,0.30); }"
-        )
+        # qt-material's global ``QToolButton`` rule adds margins and 12px side
+        # borders that clipped the icon.  ``build_ui_stylesheet`` resets that
+        # chrome for ``#presetFilterButton`` / ``#pinButton`` in both themes.
+
         self._preset_filter_menu = QMenu(self.preset_filter_btn)
         self._preset_filter_menu.setObjectName("presetFilterMenu")
         self._preset_filter_group = QActionGroup(self._preset_filter_menu)
@@ -322,14 +313,8 @@ class ControlPanel(QWidget):
         self.pin_btn.setIconSize(QSize(14, 14))
         self.pin_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.pin_btn.setFixedSize(30, 30)
-        # A subtle hover/pressed surface guarantees the icon separates from the
-        # panel background in both themes (qt-material supplies the base look).
-        self.pin_btn.setStyleSheet(
-            "QToolButton#pinButton { border: 1px solid transparent; border-radius: 6px; }"
-            "QToolButton#pinButton:hover { background: rgba(74,144,217,0.18);"
-            " border: 1px solid rgba(74,144,217,0.55); }"
-            "QToolButton#pinButton:pressed { background: rgba(74,144,217,0.30); }"
-        )
+        # Hover/pressed/checked surfaces come from the shared stylesheet; the
+        # icon colour (accent / warning) is refreshed by refresh_pin_theme().
         self._pin_matches_current = False
         self.pin_btn.toggled.connect(self._on_pin_toggled)
         self.refresh_pin_theme()
@@ -988,14 +973,14 @@ class ControlPanel(QWidget):
     def _pin_icon_color(self) -> str:
         """Theme-aware icon colour for the current three-state pin."""
         palette = self.palette()
-        dark = self._is_dark_palette(palette)
+        tokens = THEME_PALETTES["dark" if self._is_dark_palette(palette) else "light"]
         state = self.pin_state()
         if state == "off":
             # Body text colour: bright grey on dark themes, dark grey on light.
-            return palette.color(palette.Text).name()
+            return tokens["text_color"]
         if state == "match":
-            return self._PIN_MATCH_DARK if dark else self._PIN_MATCH_LIGHT
-        return self._PIN_PENDING_DARK if dark else self._PIN_PENDING_LIGHT
+            return tokens["accent"]
+        return tokens["warning"]
 
     def refresh_pin_theme(self) -> None:
         """Re-derive the pin icon colour from the current palette.

@@ -279,8 +279,8 @@ class ConvertDialog(QDialog):
         preview_layout.setSpacing(6)
 
         preview_title = QLabel("Source preview")
+        preview_title.setObjectName("groupTitle")
         preview_title.setAccessibleName("Source preview")
-        preview_title.setStyleSheet("font-weight: bold; font-size: 12px;")
         preview_title.setAlignment(Qt.AlignLeft)
 
         preview_content = QHBoxLayout()

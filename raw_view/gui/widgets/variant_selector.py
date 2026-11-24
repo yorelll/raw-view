@@ -28,8 +28,8 @@ from PyQt5.QtWidgets import (
 from raw_view.formats import RAW_BITS, YUV_BYTES_PER_PIXEL
 from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS, COMMON_SIZES
 
-# Custom (user-added) sizes are tinted so they stand out from the presets.
-_CUSTOM_SIZE_COLOR = "#5B8DEF"
+# Custom (user-added) sizes are tinted through the stylesheet's
+# QCheckBox[customSize="true"] rule (accent token).
 
 
 def _info_icon(tooltip: str) -> QPushButton:
@@ -116,7 +116,7 @@ class VariantSelector(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         label = QLabel(title)
-        label.setStyleSheet("font-weight: bold; border: none;")
+        label.setObjectName("groupTitle")
         row.addWidget(label)
         if help_text:
             row.addWidget(_info_icon(help_text))
@@ -194,10 +194,18 @@ class VariantSelector(QWidget):
         cb = QCheckBox(f"{w}x{h}")
         cb.setChecked(checked)
         if is_custom:
-            cb.setStyleSheet(f"color: {_CUSTOM_SIZE_COLOR}; font-weight: 600;")
+            cb.setProperty("customSize", True)
             cb.setToolTip("Custom size — right-click to delete")
         self._size_boxes.append((cb, w, h, is_custom))
         self._relayout_sizes()
+
+    @staticmethod
+    def _polish(cb: QCheckBox) -> None:
+        """Re-apply dynamic-property selectors after a property change."""
+        style = cb.style()
+        style.unpolish(cb)
+        style.polish(cb)
+        cb.update()
 
     def _delete_size(self, target: QCheckBox) -> None:
         self._size_boxes = [t for t in self._size_boxes if t[0] is not target]
@@ -207,10 +215,14 @@ class VariantSelector(QWidget):
 
     def _flash(self, cb: QCheckBox) -> None:
         """Briefly highlight an existing checkbox to signal 'already added'."""
-        original = cb.styleSheet()
-        cb.setStyleSheet(f"color: {_CUSTOM_SIZE_COLOR}; font-weight: 700; "
-                         "background: rgba(91,141,239,0.25); border-radius: 4px;")
-        QTimer.singleShot(450, lambda: cb.setStyleSheet(original))
+        cb.setProperty("flash", True)
+        self._polish(cb)
+
+        def _clear() -> None:
+            cb.setProperty("flash", False)
+            self._polish(cb)
+
+        QTimer.singleShot(450, _clear)
 
     def _show_size_menu(self, frame: QFrame, pos) -> None:
         menu = QMenu(self)
