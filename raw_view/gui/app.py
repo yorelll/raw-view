@@ -794,7 +794,7 @@ class MainWindow(QMainWindow):
         # ── Tools ──
         tools_menu = menu.addMenu("Tools")
         self.convert_action = QAction(
-            self._menu_icon(ACTION_ICON_NAMES["convert"]), "Convert Image...", self
+            self._menu_icon(ACTION_ICON_NAMES["convert"]), "Convert...", self
         )
         self.convert_action.triggered.connect(self.open_convert_dialog)
         self.batch_convert_action = QAction(
@@ -844,8 +844,12 @@ class MainWindow(QMainWindow):
         # are easy to tell apart.
         self.open_action.setToolTip("Open file (Ctrl+O)")
         self.save_action.setToolTip("Save current view as image (Ctrl+S)")
-        self.convert_action.setToolTip("Convert one image to RAW/YUV")
-        self.batch_convert_action.setToolTip("Batch convert multiple images")
+        self.convert_action.setToolTip(
+            "Convert a file to RAW/YUV (image or YUV input)"
+        )
+        self.batch_convert_action.setToolTip(
+            "Batch convert multiple files (images or YUV)"
+        )
         for action, icon_name in [
             (self.open_action, ACTION_ICON_NAMES["open"]),
             (self.save_action, ACTION_ICON_NAMES["save"]),

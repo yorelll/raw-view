@@ -400,6 +400,11 @@ THEME_PALETTES = {
         "main_bg": "#F4F6FA",
         "text_color": "#212121",
         "text_secondary": "#6B7280",
+        # Hint/help text sits on the qt-material QDialog window (#E6E8EE in the
+        # light theme), not always on a white card.  ``text_secondary`` only
+        # reaches 3.95:1 there; this darker token reaches 6.04:1 while keeping
+        # the same visual role (0.5.10.1 review M-2).
+        "hint_text": "#55555B",
         "panel_bg": "#FFFFFF",
         "border_color": "#D5D9E3",
         "input_bg": "#FFFFFF",
@@ -429,6 +434,8 @@ THEME_PALETTES = {
         "main_bg": "#171A24",
         "text_color": "#E8EAED",
         "text_secondary": "#9AA0AC",
+        # Dark hint text on #171A24 (dialog) / #21242F (card): 6.61:1 / 5.89:1.
+        "hint_text": "#9AA0AC",
         "panel_bg": "#21242F",
         "border_color": "#3A3D4E",
         "input_bg": "#2A2D3E",
@@ -1643,6 +1650,17 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QWidget#frameNavBar QLabel {{
             color: {p["text_secondary"]};
             font-size: 13px;
+        }}
+        QLabel#hintLabel {{
+            color: {p["hint_text"]};
+            font-size: {max(font_size - 1, 10)}px;
+            background: transparent;
+        }}
+        QLabel#emptyTableHint {{
+            color: {p["hint_text"]};
+            font-style: italic;
+            background: transparent;
+            border: none;
         }}
         QLabel#statusPlaceholder {{
             color: {p["text_secondary"]};

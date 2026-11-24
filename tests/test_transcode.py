@@ -587,6 +587,28 @@ class CliBackwardCompatibilityTests(unittest.TestCase):
 
 # ── 7. GUI: Convert dialog input-type behaviour ──────────────────────
 
+def _form_field_sequence(dialog, names: dict) -> list:
+    """Named widgets in the order they currently occupy ``dialog._form``.
+
+    Rows are compared by widget identity, not by label text: some rows carry an
+    empty label (QFormLayout then has no LabelRole item) and ``insertRow`` may
+    re-create label wrappers.  Composite fixed rows (Input/Output file) are not
+    in *names* and are skipped; the conditional fields plus the fixed fields
+    they anchor against are enough to lock the user-visible order.
+    """
+    from PyQt5.QtWidgets import QFormLayout
+
+    by_widget_id = {id(widget): name for name, widget in names.items()}
+    sequence = []
+    for row in range(dialog._form.rowCount()):
+        item = dialog._form.itemAt(row, QFormLayout.FieldRole)
+        widget = item.widget() if item is not None else None
+        name = by_widget_id.get(id(widget))
+        if name is not None:
+            sequence.append(name)
+    return sequence
+
+
 class _DialogTestBase(unittest.TestCase):
     """Real dialogs, L3 leak guard armed, teardown through destroy_widget."""
 
@@ -622,6 +644,96 @@ class ConvertDialogInputTypeTests(_DialogTestBase):
         labels = [dialog.input_type.itemText(i) for i in range(dialog.input_type.count())]
         self.assertEqual(labels[:2], ["Image", "YUV"])
         self.assertIn("RAW", labels[2], "RAW 预留项应可见（置灰）而非消失")
+
+    def test_raw_input_choice_is_really_disabled(self):
+        """D3: "RAW (coming soon)" must be disabled, not merely tooltipped.
+
+        The comment used to claim the entry was greyed while nothing called
+        setEnabled(False); selecting it then fell through to the image branch.
+        """
+        from PyQt5.QtCore import Qt
+
+        dialog = self.make_convert_dialog()
+        item = dialog.input_type.model().item(2)
+        self.assertIsNotNone(item)
+        self.assertFalse(item.isEnabled())
+        self.assertEqual(int(item.flags()) & int(Qt.ItemIsEnabled), 0)
+
+    def test_yuv_sources_exclude_yonly_and_every_one_has_a_target(self):
+        """D4: a source format that converts to nothing is a dead end."""
+        dialog = self.make_convert_dialog()
+        sources = [
+            dialog.input_yuv_type.itemText(i)
+            for i in range(dialog.input_yuv_type.count())
+        ]
+        targets = [
+            dialog.yuv_type.itemText(i)
+            for i in range(dialog.yuv_type.count())
+        ]
+        self.assertNotIn("YOnly", sources, "YOnly 源会让所有目标置灰（死路）")
+        # Membership matters, not list order: reordering the family list is a
+        # valid refactor.  Every source still has to reach a target (below).
+        self.assertEqual(set(sources), set(T.YUV_TRANSCODE_FORMATS))
+        for source in sources:
+            self.assertTrue(
+                any(T.reject_reason(source, target) is None for target in targets),
+                f"{source} 必须至少有一个可转目标",
+            )
+
+    def test_input_type_hint_explains_both_modes(self):
+        """P1: explain Image vs YUV before the user has to choose."""
+        dialog = self.make_convert_dialog()
+        image_hint = dialog._input_hint.text().lower()
+        self.assertIn("image", image_hint)
+        self.assertIn("output size", image_hint)
+        dialog.input_type.setCurrentText("YUV")
+        yuv_hint = dialog._input_hint.text().lower()
+        self.assertIn("lossless", yuv_hint)
+        self.assertIn("source frame size", yuv_hint)
+        self.assertNotIn("output size", yuv_hint)
+        dialog.input_type.setCurrentText("Image")
+        self.assertIn("output size", dialog._input_hint.text().lower())
+
+    def test_naming_does_not_claim_image_only(self):
+        """D2: title/placeholder/accessible name admit YUV input too."""
+        dialog = self.make_convert_dialog()
+        self.assertNotIn("image", dialog.windowTitle().lower())
+        self.assertEqual(dialog.input_edit.accessibleName(), "Input file")
+        text = (
+            dialog.input_edit.placeholderText()
+            + " "
+            + dialog.input_edit.accessibleDescription()
+        ).lower()
+        self.assertIn("yuv", text)
+
+    def test_browse_input_filter_offers_all_files(self):
+        """D1: a YUV source may have any suffix, so All Files must be listed."""
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        dialog = self.make_convert_dialog()
+        with mock.patch.object(
+            convert_mod.QFileDialog, "getOpenFileName", return_value=("", "")
+        ) as picker:
+            dialog._browse_input()
+        args = picker.call_args[0]
+        self.assertIn("All Files", args[3])
+        self.assertNotIn("image", args[1].lower())
+
+    def test_variant_generation_is_greyed_for_yuv_input(self):
+        """Product rule: grey out what cannot apply, do not fail after choice."""
+        import raw_view.gui.dialogs.convert as convert_mod
+        from raw_view.models import AppSettings
+
+        _ensure_app()
+        settings = AppSettings()
+        settings.multi_variant_enabled = True
+        self.addCleanup(setattr, settings, "multi_variant_enabled", False)
+        dialog = convert_mod.ConvertDialog(settings)
+        self._dialogs.append(dialog)
+        self.assertIsNotNone(dialog._btn_variants)
+        self.assertTrue(dialog._btn_variants.isEnabled())
+        dialog.input_type.setCurrentText("YUV")
+        self.assertFalse(dialog._btn_variants.isEnabled())
 
     def test_image_is_default_and_keeps_output_semantics(self):
         dialog = self.make_convert_dialog()
@@ -713,6 +825,381 @@ class ConvertDialogInputTypeTests(_DialogTestBase):
         self.assertTrue(all(model.item(i).isEnabled() for i in range(dialog.yuv_type.count())))
         self.assertTrue(dialog.target_type.isEnabled())
 
+    def test_switching_to_yuv_hides_and_disables_align_endian(self):
+        """M-1: Alignment/Endianness must not survive the switch to YUV input.
+
+        ``is_raw`` used to be read before the target was pinned to YUV; the
+        re-entrant sync triggered by the pin was swallowed by the guard, so the
+        stale ``is_raw=True`` kept both dropdowns visible and enabled even
+        though transcoding ignores them.
+        """
+        dialog = self.make_convert_dialog()
+        self.assertEqual(dialog.target_type.currentText(), "RAW")
+        self.assertTrue(dialog.align.isVisibleTo(dialog))
+        self.assertTrue(dialog.align.isEnabled())
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual(dialog.target_type.currentText(), "YUV")
+        for widget in (dialog.align, dialog.endian):
+            self.assertFalse(widget.isVisibleTo(dialog), "YUV 输入下不得残留控件")
+            self.assertFalse(widget.isEnabled(), "不可见的控件不得可操作")
+
+    def test_conditional_row_labels_hide_with_their_fields(self):
+        """H-1: a hidden conditional field must not leave a dangling label.
+
+        QFormLayout only hides the field.  Every conditional row is checked as
+        a (field, label) pair across the meaningful states, so a regression in
+        any single row fails here.
+        """
+        dialog = self.make_convert_dialog()
+
+        def expected(*, input_yuv=False, raw=False, yonly=False, bayer=True):
+            show_raw = raw and not input_yuv
+            show_bit = (not raw) and yonly and not input_yuv
+            show_align = raw or show_bit
+            return {
+                dialog.input_yuv_type: input_yuv,
+                dialog.offset: input_yuv,
+                dialog.raw_type: show_raw,
+                dialog.bit_depth_combo: show_bit,
+                dialog.align: show_align,
+                dialog.endian: show_align,
+                dialog.raw_source_mode: show_raw,
+                dialog.bayer_pattern: show_raw and bayer,
+            }
+
+        names = {
+            "input_type": dialog.input_type,
+            "input_hint": dialog._input_hint,
+            "input_yuv_type": dialog.input_yuv_type,
+            "offset": dialog.offset,
+            "target": dialog.target_type,
+            "raw_type": dialog.raw_type,
+            "yuv_type": dialog.yuv_type,
+            "bit_depth": dialog.bit_depth_combo,
+            "align": dialog.align,
+            "endian": dialog.endian,
+            "raw_source": dialog.raw_source_mode,
+            "bayer": dialog.bayer_pattern,
+            "width": dialog.width,
+            "height": dialog.height,
+            "yuv_note": dialog._yuv_note,
+        }
+
+        def expected_order(*, input_yuv=False, raw=False, yonly=False, bayer=True):
+            """Canonical order declared by ``_cond_row_groups`` in __init__."""
+            show_raw = raw and not input_yuv
+            show_bit = (not raw) and yonly and not input_yuv
+            show_align = raw or show_bit
+            order = ["input_type", "input_hint"]
+            if input_yuv:
+                order += ["input_yuv_type", "offset"]
+            order += ["target"]
+            if show_raw:
+                order += ["raw_type"]
+            order += ["yuv_type"]
+            if show_bit:
+                order += ["bit_depth"]
+            if show_align:
+                order += ["align", "endian"]
+            if show_raw:
+                order += ["raw_source"]
+                if bayer:
+                    order += ["bayer"]
+            order += ["width", "height"]
+            if not raw:
+                order += ["yuv_note"]
+            return order
+
+        def check(state, **kwargs):
+            wanted = expected(**kwargs)
+            for field, want in wanted.items():
+                label = dialog._cond_row_labels[field]
+                self.assertEqual(
+                    field.isVisibleTo(dialog), want,
+                    f"{state}: field {label.text()!r} visibility",
+                )
+                self.assertEqual(
+                    label.isVisibleTo(dialog), want,
+                    f"{state}: label {label.text()!r} left dangling",
+                )
+            # The note row has no label widget (addRow("", ...)), but its row
+            # must still leave the layout when hidden.
+            note_visible = not kwargs.get("raw", False)
+            self.assertEqual(
+                dialog._yuv_note.isVisibleTo(dialog), note_visible,
+                f"{state}: YUV note visibility",
+            )
+            # L-1: hidden rows must be *removed*, not merely hidden.  With
+            # setVisible only, QFormLayout keeps one 6px gap per hidden row and
+            # rowCount stays at the full 8 fixed + 9 conditional.
+            visible_cond = sum(1 for want in wanted.values() if want)
+            if note_visible:
+                visible_cond += 1
+            self.assertEqual(
+                dialog._form.rowCount(), 8 + visible_cond,
+                f"{state}: hidden rows must not reserve layout height",
+            )
+            # L-1 (0.5.10.2): lock the actual row *order*, not just the count.
+            # Deleting the ``anchor_row += 1`` makes rows inserted in the same
+            # group land in reverse order (e.g. Source offset before Input YUV
+            # format) while every visibility/rowCount assertion above still
+            # passes.
+            self.assertEqual(
+                _form_field_sequence(dialog, names),
+                expected_order(**kwargs),
+                f"{state}: conditional rows must keep their declared order",
+            )
+
+        # Default: Image input, Target=RAW, bayer source.
+        self.assertEqual(dialog.target_type.currentText(), "RAW")
+        check("default Image/RAW/bayer", raw=True, bayer=True)
+
+        dialog.target_type.setCurrentText("YUV")  # yuv_type default is YOnly
+        check("Image/YUV/YOnly", raw=False, yonly=True)
+
+        dialog.yuv_type.setCurrentText("NV12")
+        check("Image/YUV/NV12", raw=False, yonly=False)
+
+        dialog.input_type.setCurrentText("YUV")
+        check("YUV input", input_yuv=True, raw=False, yonly=False)
+
+        dialog.input_type.setCurrentText("Image")
+        dialog.target_type.setCurrentText("RAW")
+        dialog.raw_source_mode.setCurrentText("gray")
+        check("Image/RAW/gray", raw=True, bayer=False)
+
+    def test_sync_keeps_keyboard_focus_on_a_still_visible_field(self):
+        """M-1 (0.5.10.2): hiding every conditional row steals focus.
+
+        ``_apply_cond_rows`` used to detach *all* conditional rows and then
+        re-insert the visible ones.  ``setVisible(False)`` on the focused
+        widget moves focus to the next widget in the chain and re-showing does
+        not restore it; for Convert the focus jumped from ``RAW source`` to the
+        Width spin box, so a following Up/Down silently edited Width.
+        """
+        app = _ensure_app()
+        dialog = self.make_convert_dialog()
+        dialog.show()
+        app.processEvents()
+        # ``raw_source_mode`` stays visible in the post-sync state (Image/RAW),
+        # so a correct sync must leave it untouched.
+        dialog.raw_source_mode.setFocus()
+        app.processEvents()
+        self.assertIs(
+            app.focusWidget(), dialog.raw_source_mode,
+            "precondition: the field must own focus before the sync",
+        )
+        dialog._sync_controls_locked()
+        app.processEvents()
+        self.assertIs(
+            app.focusWidget(), dialog.raw_source_mode,
+            "a still-visible field must keep keyboard focus across a sync",
+        )
+
+    def test_sync_keeps_an_open_yuv_source_popup_open(self):
+        """M-1 (0.5.10.2): hiding the focused combo closes its popup.
+
+        ``QComboBox`` emits ``currentTextChanged`` while the user arrows
+        through the popup; the re-entrant sync used to hide the combo, which
+        closes the popup after the very first Down key press.  Keeping the row
+        where it is is the only fix -- a focus restore cannot reopen the popup.
+        """
+        app = _ensure_app()
+        dialog = self.make_convert_dialog()
+        dialog.show()
+        dialog.input_type.setCurrentText("YUV")
+        app.processEvents()
+        combo = dialog.input_yuv_type
+        self.assertTrue(combo.isVisible())
+        combo.showPopup()
+        app.processEvents()
+        self.assertTrue(
+            combo.view().isVisible(), "precondition: the popup must be open",
+        )
+        try:
+            dialog._sync_controls_locked()
+            app.processEvents()
+            self.assertTrue(
+                combo.view().isVisible(),
+                "a sync must not close the YUV source format popup",
+            )
+        finally:
+            combo.hidePopup()
+            app.processEvents()
+
+    def test_switching_input_type_resets_source_offset(self):
+        """L-2: an offset belongs to the previous input kind; switching clears it."""
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.offset.setValue(6)
+        self.assertEqual(dialog.offset.value(), 6)
+        dialog.input_type.setCurrentText("Image")
+        self.assertEqual(dialog.offset.value(), 0, "切换输入类型必须清空 offset")
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual(dialog.offset.value(), 0)
+        # Changing the source layout keeps the offset: still a YUV source.
+        dialog.offset.setValue(6)
+        dialog.input_yuv_type.setCurrentText("NV16")
+        self.assertEqual(dialog.offset.value(), 6, "改源格式不应清空 offset")
+
+
+def _contrast_ratio(fg: str, bg: str) -> float:
+    """WCAG 2.x relative-luminance contrast ratio for two ``#RRGGBB`` colours."""
+
+    def _channel(value: int) -> float:
+        c = value / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    def _luminance(color: str) -> float:
+        color = color.lstrip("#")
+        r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
+        return 0.2126 * _channel(r) + 0.7152 * _channel(g) + 0.0722 * _channel(b)
+
+    hi, lo = sorted((_luminance(fg), _luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _apply_product_theme(app, theme: str, font_size: int) -> None:
+    """Mirror ``MainWindow._apply_theme_impl`` exactly.
+
+    The hint background is a *layered* result: the qt-material base theme
+    paints the QDialog window (#E6E8EE / #171A24), then our overlay only
+    recolours the label.  Applying ``build_ui_stylesheet`` alone (as the old
+    test did) therefore used the wrong background and hid a sub-4.5:1 hint
+    (0.5.10.1 review M-2).
+    """
+    from qt_material import apply_stylesheet
+
+    from raw_view.gui.app import resource_path
+    from raw_view.models import MATERIAL_EXTRA, THEME_XML, build_ui_stylesheet
+
+    theme_file = resource_path(
+        os.path.join("assets", THEME_XML.get(theme, THEME_XML["dark"]))
+    )
+    apply_stylesheet(
+        app, theme=theme_file, invert_secondary=False, extra=MATERIAL_EXTRA
+    )
+    app.setStyleSheet(
+        f"{app.styleSheet()}\n{build_ui_stylesheet(theme, font_size)}"
+    )
+
+
+def _rendered_background(widget, ancestor) -> str:
+    """Most common pixel colour behind *widget* in the real product render.
+
+    Sampling the widget's own rect (rather than reading a palette token or
+    guessing ``panel_bg``) follows the actual paint stack: the hint label is
+    transparent, so what the user sees is whatever its card/dialog painted.
+    """
+    from collections import Counter
+
+    from PyQt5.QtCore import QPoint
+
+    image = ancestor.grab().toImage()
+    rect = widget.rect()
+    step_x = max(1, rect.width() // 24)
+    step_y = max(1, rect.height() // 12)
+    samples = Counter()
+    for x in range(1, rect.width(), step_x):
+        for y in range(1, rect.height(), step_y):
+            point = widget.mapTo(ancestor, QPoint(x, y))
+            samples[image.pixelColor(point).name()] += 1
+    return samples.most_common(1)[0][0].lower()
+
+
+class DialogHintThemeTests(_DialogTestBase):
+    """M-4 / 0.5.10.1 M-2: hint text follows theme, font size and real contrast."""
+
+    def test_input_hint_uses_theme_token_and_follows_font_size(self):
+        from PyQt5.QtGui import QPalette
+
+        from raw_view.models import THEME_PALETTES
+
+        app = _ensure_app()
+        old_qss = app.styleSheet()
+        self.addCleanup(app.setStyleSheet, old_qss)
+
+        dialog = self.make_convert_dialog()
+        dialog.show()
+        app.processEvents()
+        self.assertEqual(
+            dialog._input_hint.styleSheet(), "",
+            "提示文字不得用 widget 级 QSS 硬编码颜色/字号",
+        )
+        for theme in ("light", "dark"):
+            token = THEME_PALETTES[theme]["hint_text"]
+            for font_size in (10, 13, 20, 24):
+                _apply_product_theme(app, theme, font_size)
+                app.processEvents()
+                hint = dialog._input_hint
+                hint.ensurePolished()
+                self.assertEqual(
+                    hint.palette().color(QPalette.WindowText).name(),
+                    token.lower(),
+                    f"{theme}/{font_size}: 提示文字必须使用主题 hint_text",
+                )
+                self.assertEqual(
+                    hint.font().pixelSize(),
+                    max(font_size - 1, 10),
+                    f"{theme}/{font_size}: 提示字号必须跟随 ui/font_size",
+                )
+                background = _rendered_background(hint, dialog)
+                # If this ever equals panel_bg the test has lost its real
+                # background basis (the old 3.95:1 false-green, M-2).
+                self.assertNotEqual(
+                    background, THEME_PALETTES[theme]["panel_bg"].lower(),
+                    f"{theme}/{font_size}: 必须按提示的实际绘制背景断言，"
+                    "不能用 panel_bg",
+                )
+                ratio = _contrast_ratio(token, background)
+                self.assertGreaterEqual(
+                    ratio, 4.5,
+                    f"{theme}/{font_size}: {token} on real background "
+                    f"{background} = {ratio:.2f}:1 低于 WCAG AA",
+                )
+
+    def test_batch_empty_hint_uses_theme_token(self):
+        from PyQt5.QtGui import QPalette
+
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings, THEME_PALETTES
+
+        app = _ensure_app()
+        old_qss = app.styleSheet()
+        self.addCleanup(app.setStyleSheet, old_qss)
+
+        dialog = BatchConvertDialog(AppSettings())
+        self._dialogs.append(dialog)
+        dialog.show()
+        app.processEvents()
+        self.assertEqual(dialog._empty_hint.styleSheet(), "")
+        for theme in ("light", "dark"):
+            token = THEME_PALETTES[theme]["hint_text"]
+            for font_size in (10, 13, 20, 24):
+                _apply_product_theme(app, theme, font_size)
+                app.processEvents()
+                for hint in (dialog._empty_hint, dialog._input_hint):
+                    hint.ensurePolished()
+                    self.assertEqual(
+                        hint.palette().color(QPalette.WindowText).name(),
+                        token.lower(),
+                        f"{theme}/{font_size}: {hint.objectName()} 必须使用 hint_text",
+                    )
+                    background = _rendered_background(hint, dialog)
+                    ratio = _contrast_ratio(token, background)
+                    self.assertGreaterEqual(
+                        ratio, 4.5,
+                        f"{theme}/{font_size}: {hint.objectName()} on real "
+                        f"background {background} = {ratio:.2f}:1 低于 WCAG AA",
+                    )
+                # The empty-table hint sits directly on the dialog window, not
+                # on a card; assert its real background is not panel_bg.
+                empty_bg = _rendered_background(dialog._empty_hint, dialog)
+                self.assertNotEqual(
+                    empty_bg, THEME_PALETTES[theme]["panel_bg"].lower(),
+                    f"{theme}/{font_size}: 空表提示背景不是 panel_bg",
+                )
+
 
 class ConvertDialogYuvConvertTests(_DialogTestBase):
     """Drive the actual conversion path (message boxes suppressed)."""
@@ -726,6 +1213,77 @@ class ConvertDialogYuvConvertTests(_DialogTestBase):
     def tearDown(self):
         shutil.rmtree(self._tmp, ignore_errors=True)
         super().tearDown()
+
+    def test_offset_control_only_for_yuv_input(self):
+        """D5: the offset field is meaningful for YUV input only."""
+        dialog = self.make_convert_dialog()
+        self.assertFalse(dialog.offset.isVisibleTo(dialog))
+        self.assertFalse(dialog.offset.isEnabled())
+        # L-3: the row label must disappear together with the field.
+        self.assertFalse(dialog._offset_label.isVisibleTo(dialog))
+        dialog.input_type.setCurrentText("YUV")
+        self.assertTrue(dialog.offset.isVisibleTo(dialog))
+        self.assertTrue(dialog.offset.isEnabled())
+        self.assertTrue(dialog._offset_label.isVisibleTo(dialog))
+        self.assertEqual(dialog.offset.value(), 0)
+        dialog.input_type.setCurrentText("Image")
+        self.assertFalse(dialog.offset.isVisibleTo(dialog))
+        self.assertFalse(dialog.offset.isEnabled())
+        self.assertFalse(dialog._offset_label.isVisibleTo(dialog))
+
+    def test_changing_offset_refreshes_preview(self):
+        """L-1: editing offset must re-run the preview's frame count.
+
+        The file is 6 header bytes + one 12-byte I420 frame.  Without an offset
+        the preview must report the trailing bytes; with offset=6 it must report
+        exactly one frame.
+        """
+        header = b"HEADER"
+        Path(self._src).write_bytes(header + _i420_bytes())
+        dialog = self.make_convert_dialog()
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        dialog.input_edit.setText(self._src)
+
+        self.assertIn("trailing", dialog._preview_info.text(),
+                      "offset=0 时应提示非整帧")
+        dialog.offset.setValue(len(header))
+        self.assertIn("1 frame(s)", dialog._preview_info.text(),
+                      "改 offset 后预览必须刷新帧数")
+        self.assertIn(f"{len(_i420_bytes()):,} B", dialog._preview_info.text())
+        dialog.offset.setValue(0)
+        self.assertIn("trailing", dialog._preview_info.text(),
+                      "offset 清零后预览必须回到非整帧提示")
+
+    def test_offset_skips_leading_bytes_and_affects_output(self):
+        """D5: a header before the frame must be skippable (CLI parity)."""
+        import raw_view.gui.dialogs.convert as convert_mod
+
+        header = b"HEADER"  # 6 bytes; without offset the size is not a frame multiple
+        Path(self._src).write_bytes(header + _i420_bytes())
+        dialog = self.make_convert_dialog()
+        out = os.path.join(self._tmp, "out.nv12")
+        dialog.input_type.setCurrentText("YUV")
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        dialog.offset.setValue(len(header))
+        dialog.input_edit.setText(self._src)
+        dialog.output_edit.setText(out)
+        with mock.patch.object(convert_mod.QMessageBox, "information"), \
+             mock.patch.object(convert_mod.QMessageBox, "critical") as critical:
+            dialog._do_convert()
+        critical.assert_not_called()
+        self.assertEqual(
+            Path(out).read_bytes(),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+            "offset 应跳过文件头，输出等价于无头帧的转换",
+        )
+        self.assertEqual(Path(out).stat().st_size, len(_i420_bytes()))
 
     def test_convert_writes_transcoded_file(self):
         import raw_view.gui.dialogs.convert as convert_mod
@@ -844,6 +1402,95 @@ class ConvertDialogYuvConvertTests(_DialogTestBase):
         self.assertFalse(os.path.exists(out))
 
 
+    def test_variant_button_stays_disabled_if_input_switches_to_yuv_mid_run(self):
+        """L-4: the finally block must not re-enable a YUV-disabled button.
+
+        Generation pumps events, so the user can switch to YUV while it runs.
+        Re-enabling unconditionally left a clickable button whose tooltip said
+        "not available for a YUV input".
+        """
+        import raw_view.gui.dialogs.convert as convert_mod
+        from raw_view.models import AppSettings
+
+        _ensure_app()
+        settings = AppSettings()
+        settings.multi_variant_enabled = True
+        self.addCleanup(setattr, settings, "multi_variant_enabled", False)
+        dialog = convert_mod.ConvertDialog(settings)
+        self._dialogs.append(dialog)
+        self.assertIsNotNone(dialog._btn_variants)
+        dialog.input_edit.setText(self._src)
+
+        def _switch_to_yuv_and_finish(*_args, **_kwargs):
+            dialog.input_type.setCurrentText("YUV")
+            return []
+
+        with mock.patch.object(convert_mod, "plan_image_variants", return_value=["p1"]), \
+             mock.patch.object(
+                 convert_mod, "generate_image_variants",
+                 side_effect=_switch_to_yuv_and_finish,
+             ), \
+             mock.patch.object(convert_mod.QMessageBox, "information"):
+            dialog._generate_variants()
+
+        self.assertEqual(dialog.input_type.currentText(), "YUV")
+        self.assertFalse(
+            dialog._btn_variants.isEnabled(),
+            "YUV 输入下按钮必须保持置灰（tooltip 已说明不可用）",
+        )
+        self.assertIn("YUV", dialog._btn_variants.toolTip())
+
+    def test_variant_button_stays_disabled_and_cannot_reenter_mid_run(self):
+        """0.5.10.1 M-1: editing a control mid-run must not re-enable the button.
+
+        ``_generate_variants`` pumps events while writing, so any control edit
+        reaches ``_sync_controls_locked``.  Before ``_generating_variants`` the
+        sync re-enabled the button (text still "Generating 0/1…"), and a second
+        click started an overlapping generation writing the same folder.
+        """
+        import raw_view.gui.dialogs.convert as convert_mod
+        from raw_view.models import AppSettings
+
+        _ensure_app()
+        settings = AppSettings()
+        settings.multi_variant_enabled = True
+        self.addCleanup(setattr, settings, "multi_variant_enabled", False)
+        dialog = convert_mod.ConvertDialog(settings)
+        self._dialogs.append(dialog)
+        dialog.input_edit.setText(self._src)
+
+        generate_calls: list[int] = []
+        observed: dict[str, object] = {}
+
+        def _mid_run(*_args, **_kwargs):
+            generate_calls.append(1)
+            # A user-editable control that triggers _sync_controls.
+            dialog.raw_source_mode.setCurrentText("gray")
+            observed["enabled"] = dialog._btn_variants.isEnabled()
+            observed["text"] = dialog._btn_variants.text()
+            # A second click must be a no-op (re-entry guard).
+            dialog._generate_variants()
+            return []
+
+        with mock.patch.object(
+            convert_mod, "plan_image_variants", return_value=["p1"]
+        ) as plan, mock.patch.object(
+            convert_mod, "generate_image_variants", side_effect=_mid_run
+        ), mock.patch.object(convert_mod.QMessageBox, "information"):
+            dialog._generate_variants()
+
+        self.assertFalse(
+            observed["enabled"],
+            "生成期间改控件后按钮必须仍为 disabled",
+        )
+        self.assertEqual(observed["text"], "Generating 0/1…")
+        self.assertEqual(len(generate_calls), 1, "不得重入第二轮生成")
+        self.assertEqual(plan.call_count, 1, "重入时不得重新规划")
+        # Normal completion restores the image-input state.
+        self.assertTrue(dialog._btn_variants.isEnabled())
+        self.assertEqual(dialog._btn_variants.text(), "Generate Variants")
+
+
 class BatchConvertDialogInputTypeTests(_DialogTestBase):
     """The batch dialog must offer the same input-type semantics as Convert."""
 
@@ -870,6 +1517,92 @@ class BatchConvertDialogInputTypeTests(_DialogTestBase):
         labels = [dialog.input_type.itemText(i) for i in range(dialog.input_type.count())]
         self.assertEqual(labels[:2], ["Image", "YUV"])
 
+    def test_raw_input_choice_is_really_disabled(self):
+        """D3: same disabled reserved entry as ConvertDialog."""
+        from PyQt5.QtCore import Qt
+
+        dialog = self._make()
+        item = dialog.input_type.model().item(2)
+        self.assertIsNotNone(item)
+        self.assertFalse(item.isEnabled())
+        self.assertEqual(int(item.flags()) & int(Qt.ItemIsEnabled), 0)
+
+    def test_yuv_sources_exclude_yonly_and_every_one_has_a_target(self):
+        """D4: no source format may leave every target greyed out."""
+        dialog = self._make()
+        sources = [
+            dialog.input_yuv_type.itemText(i)
+            for i in range(dialog.input_yuv_type.count())
+        ]
+        targets = [
+            dialog.yuv_type.itemText(i)
+            for i in range(dialog.yuv_type.count())
+        ]
+        self.assertNotIn("YOnly", sources)
+        # Membership matters, not list order: reordering the family list is a
+        # valid refactor.  Every source still has to reach a target (below).
+        self.assertEqual(set(sources), set(T.YUV_TRANSCODE_FORMATS))
+        for source in sources:
+            self.assertTrue(
+                any(T.reject_reason(source, target) is None for target in targets),
+                f"{source} 必须至少有一个可转目标",
+            )
+
+    def test_input_type_hint_explains_both_modes(self):
+        dialog = self._make()
+        self.assertIn("output size", dialog._input_hint.text().lower())
+        dialog.input_type.setCurrentText("YUV")
+        yuv_hint = dialog._input_hint.text().lower()
+        self.assertIn("lossless", yuv_hint)
+        self.assertIn("source frame size", yuv_hint)
+
+    def test_naming_does_not_claim_image_only(self):
+        """D2: the batch dialog also accepts YUV files."""
+        dialog = self._make()
+        self.assertNotIn("image", dialog.windowTitle().lower())
+        self.assertEqual(dialog.input_edit.accessibleName(), "Files to convert")
+        text = (
+            dialog.input_edit.placeholderText()
+            + " "
+            + dialog.input_edit.accessibleDescription()
+        ).lower()
+        self.assertIn("yuv", text)
+
+    def test_browse_files_filter_offers_all_files(self):
+        """D1 parity: YUV files with arbitrary suffixes stay pickable."""
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+
+        dialog = self._make()
+        with mock.patch.object(
+            bc_mod.QFileDialog, "getOpenFileNames", return_value=([], "")
+        ) as picker:
+            dialog._browse_files()
+        args = picker.call_args[0]
+        self.assertIn("All Files", args[3])
+
+    def test_variant_selector_is_greyed_for_yuv_input(self):
+        """Product rule: no "select variants, then get told they cannot run"."""
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+        from raw_view.models import AppSettings
+
+        _ensure_app()
+        settings = AppSettings()
+        settings.multi_variant_enabled = True
+        self.addCleanup(setattr, settings, "multi_variant_enabled", False)
+        dialog = bc_mod.BatchConvertDialog(settings)
+        self._dialogs.append(dialog)
+        self.assertIsNotNone(dialog._variant_selector)
+        self.assertTrue(dialog._variant_selector.isEnabled())
+        self.assertEqual(dialog._variant_selector.toolTip(), "")
+        dialog.input_type.setCurrentText("YUV")
+        self.assertFalse(dialog._variant_selector.isEnabled())
+        # L-7: an unexplained greyed-out panel reads like a bug; Convert's
+        # button carries a tooltip, so Batch must explain it too.
+        self.assertIn("YUV", dialog._variant_selector.toolTip())
+        dialog.input_type.setCurrentText("Image")
+        self.assertTrue(dialog._variant_selector.isEnabled())
+        self.assertEqual(dialog._variant_selector.toolTip(), "")
+
     def test_switching_to_yuv_clears_dimensions_and_pins_target(self):
         dialog = self._make()
         self.assertEqual(dialog.width.value(), 2560)
@@ -879,6 +1612,18 @@ class BatchConvertDialogInputTypeTests(_DialogTestBase):
         self.assertEqual(dialog.target_type.currentText(), "YUV")
         self.assertFalse(dialog.target_type.isEnabled())
         self.assertTrue(dialog.input_yuv_type.isVisibleTo(dialog))
+
+    def test_switching_to_yuv_hides_and_disables_align_endian(self):
+        """M-1 (Batch): no stale is_raw may survive the pin to YUV."""
+        dialog = self._make()
+        self.assertEqual(dialog.target_type.currentText(), "RAW")
+        self.assertTrue(dialog.align.isVisibleTo(dialog))
+        self.assertTrue(dialog.align.isEnabled())
+        dialog.input_type.setCurrentText("YUV")
+        self.assertEqual(dialog.target_type.currentText(), "YUV")
+        for widget in (dialog.align, dialog.endian):
+            self.assertFalse(widget.isVisibleTo(dialog), "YUV 输入下不得残留控件")
+            self.assertFalse(widget.isEnabled(), "不可见的控件不得可操作")
 
     def test_non_convertible_targets_greyed(self):
         from raw_view import transcode as T
@@ -926,6 +1671,223 @@ class BatchConvertDialogInputTypeTests(_DialogTestBase):
             T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
         )
         self.assertIn("NV12", Path(out).name, "自动输出名应体现目标布局")
+
+    def test_conditional_row_labels_hide_with_their_fields(self):
+        """H-1: Batch has the same dangling-label defect class as Convert."""
+        dialog = self._make()
+
+        def expected(*, input_yuv=False, raw=False, yonly=False, bayer=True):
+            show_raw = raw and not input_yuv
+            show_bit = (not raw) and yonly and not input_yuv
+            show_align = raw or show_bit
+            return {
+                dialog.input_yuv_type: input_yuv,
+                dialog.raw_type: show_raw,
+                dialog.bit_depth_combo: show_bit,
+                dialog.align: show_align,
+                dialog.endian: show_align,
+                dialog.raw_source_mode: show_raw,
+                dialog.bayer_pattern: show_raw and bayer,
+            }
+
+        names = {
+            "input_type": dialog.input_type,
+            "input_hint": dialog._input_hint,
+            "input_yuv_type": dialog.input_yuv_type,
+            "target": dialog.target_type,
+            "raw_type": dialog.raw_type,
+            "yuv_type": dialog.yuv_type,
+            "bit_depth": dialog.bit_depth_combo,
+            "align": dialog.align,
+            "endian": dialog.endian,
+            "raw_source": dialog.raw_source_mode,
+            "bayer": dialog.bayer_pattern,
+            "width": dialog.width,
+            "height": dialog.height,
+        }
+
+        def expected_order(*, input_yuv=False, raw=False, yonly=False, bayer=True):
+            """Canonical order declared by ``_cond_row_groups`` in __init__."""
+            show_raw = raw and not input_yuv
+            show_bit = (not raw) and yonly and not input_yuv
+            show_align = raw or show_bit
+            order = ["input_type", "input_hint"]
+            if input_yuv:
+                order += ["input_yuv_type"]
+            order += ["target"]
+            if show_raw:
+                order += ["raw_type"]
+            order += ["yuv_type"]
+            if show_bit:
+                order += ["bit_depth"]
+            if show_align:
+                order += ["align", "endian"]
+            if show_raw:
+                order += ["raw_source"]
+                if bayer:
+                    order += ["bayer"]
+            order += ["width", "height"]
+            return order
+
+        def check(state, **kwargs):
+            wanted = expected(**kwargs)
+            for field, want in wanted.items():
+                label = dialog._cond_row_labels[field]
+                self.assertEqual(
+                    field.isVisibleTo(dialog), want,
+                    f"{state}: field {label.text()!r} visibility",
+                )
+                self.assertEqual(
+                    label.isVisibleTo(dialog), want,
+                    f"{state}: label {label.text()!r} left dangling",
+                )
+                # L-1 (0.5.10.3): hiding a row disables its field; showing it
+                # again must re-enable it.  Without the explicit
+                # ``setEnabled(True)`` in ``_apply_cond_rows`` the field stays
+                # visible but disabled after its first hide, while every
+                # visibility assertion above still passes (mutation survived).
+                self.assertEqual(
+                    field.isEnabled(), want,
+                    f"{state}: field {label.text()!r} enabled",
+                )
+            # L-1: hidden rows must be removed from the layout.  With
+            # setVisible only, QFormLayout keeps a 6px gap per hidden row and
+            # rowCount stays at 6 fixed + 7 conditional.
+            visible_cond = sum(1 for want in wanted.values() if want)
+            self.assertEqual(
+                dialog._form.rowCount(), 6 + visible_cond,
+                f"{state}: hidden rows must not reserve layout height",
+            )
+            # L-1 (0.5.10.2): lock the actual row order, not just the count.
+            # Without the ``anchor_row += 1`` in ``_apply_cond_rows`` the rows
+            # inserted into one group come back reversed (e.g. Source offset
+            # before Input YUV format) while the checks above stay green.
+            self.assertEqual(
+                _form_field_sequence(dialog, names),
+                expected_order(**kwargs),
+                f"{state}: conditional rows must keep their declared order",
+            )
+
+        self.assertEqual(dialog.target_type.currentText(), "RAW")
+        check("default Image/RAW/bayer", raw=True, bayer=True)
+
+        dialog.target_type.setCurrentText("YUV")
+        check("Image/YUV/YOnly", raw=False, yonly=True)
+
+        dialog.yuv_type.setCurrentText("NV12")
+        check("Image/YUV/NV12", raw=False, yonly=False)
+
+        dialog.input_type.setCurrentText("YUV")
+        check("YUV input", input_yuv=True, raw=False, yonly=False)
+
+        dialog.input_type.setCurrentText("Image")
+        dialog.target_type.setCurrentText("RAW")
+        dialog.raw_source_mode.setCurrentText("gray")
+        check("Image/RAW/gray", raw=True, bayer=False)
+
+        # L-1 (0.5.10.3): walk a field across the hide boundary and back.
+        # NV12 keeps Bit depth/Alignment/Endianness hidden; returning to
+        # Image/RAW/bayer must bring them back *enabled*, not merely visible.
+        # The ``isEnabled`` assertion above is what makes deleting the
+        # ``setEnabled(True)`` in ``_apply_cond_rows`` go red.
+        dialog.target_type.setCurrentText("YUV")
+        check("Image/YUV/NV12 (round trip back)", raw=False, yonly=False)
+
+        dialog.target_type.setCurrentText("RAW")
+        dialog.raw_source_mode.setCurrentText("bayer")
+        check("Image/RAW/bayer (round trip back)", raw=True, bayer=True)
+
+    def test_sync_keeps_keyboard_focus_on_a_still_visible_field(self):
+        """M-1 (0.5.10.2): Batch loses focus exactly like Convert does."""
+        app = _ensure_app()
+        dialog = self._make()
+        dialog.show()
+        app.processEvents()
+        dialog.raw_source_mode.setFocus()
+        app.processEvents()
+        self.assertIs(
+            app.focusWidget(), dialog.raw_source_mode,
+            "precondition: the field must own focus before the sync",
+        )
+        dialog._sync_controls_locked()
+        app.processEvents()
+        self.assertIs(
+            app.focusWidget(), dialog.raw_source_mode,
+            "a still-visible field must keep keyboard focus across a sync",
+        )
+
+    def test_sync_keeps_an_open_yuv_source_popup_open(self):
+        """M-1 (0.5.10.2): the YUV source popup must survive a sync."""
+        app = _ensure_app()
+        dialog = self._make()
+        dialog.show()
+        dialog.input_type.setCurrentText("YUV")
+        app.processEvents()
+        combo = dialog.input_yuv_type
+        self.assertTrue(combo.isVisible())
+        combo.showPopup()
+        app.processEvents()
+        self.assertTrue(
+            combo.view().isVisible(), "precondition: the popup must be open",
+        )
+        try:
+            dialog._sync_controls_locked()
+            app.processEvents()
+            self.assertTrue(
+                combo.view().isVisible(),
+                "a sync must not close the YUV source format popup",
+            )
+        finally:
+            combo.hidePopup()
+            app.processEvents()
+
+    def test_yuv_batch_with_greyed_variant_panel_still_converts(self):
+        """M-3: the `isEnabled()` guard lets a YUV batch run with variants on.
+
+        Deleting that clause used to pass all batch tests while the real
+        behaviour became "show an information box, leave the row Pending and
+        write nothing".  This asserts the actual conversion result.
+        """
+        import raw_view.gui.dialogs.batch_convert as bc_mod
+        from raw_view.gui.dialogs.batch_convert import BatchConvertDialog
+        from raw_view.models import AppSettings
+
+        app = _ensure_app()
+        settings = AppSettings()
+        settings.multi_variant_enabled = True
+        self.addCleanup(setattr, settings, "multi_variant_enabled", False)
+        dialog = BatchConvertDialog(settings)
+        self._dialogs.append(dialog)
+        app.processEvents()
+        self.assertIsNotNone(dialog._variant_selector)
+
+        dialog.input_type.setCurrentText("YUV")
+        self.assertFalse(dialog._variant_selector.isEnabled())
+        dialog.input_yuv_type.setCurrentText("I420")
+        dialog.width.setValue(W)
+        dialog.height.setValue(H)
+        dialog.yuv_type.setCurrentText("NV12")
+        src = os.path.join(self._tmp, "in.i420")
+        Path(src).write_bytes(_i420_bytes())
+        dialog._add_files([src])
+
+        with mock.patch.object(bc_mod, "generate_image_variants") as variants, \
+             mock.patch.object(bc_mod.QMessageBox, "information") as info:
+            dialog._run_batch()
+
+        variants.assert_not_called()
+        self.assertEqual(dialog._file_table.item(0, 2).text(), "OK")
+        out = dialog._file_table.item(0, 3).text()
+        self.assertTrue(os.path.isfile(out), out)
+        self.assertEqual(
+            Path(out).read_bytes(),
+            T.transcode_bytes(_i420_bytes(), _spec("I420", "NV12")),
+        )
+        messages = [call.args[2] for call in info.call_args_list if len(call.args) >= 3]
+        self.assertTrue(
+            any("Batch complete" in message for message in messages),
+            f"应完成正常批量汇总，实际弹窗: {messages}",
+        )
 
 
 # ── 8. CLI defects D1-D7 ─────────────────────────────────────────────

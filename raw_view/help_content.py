@@ -92,6 +92,25 @@ HELP_HTML = """
 <li>RAW viewing supports Bayer color preview (RGGB/GRBG/GBRG/BGGR) or grayscale preview.</li>
 <li>YUV conversion uses RGB-to-YUV conversion with subformat-specific chroma sampling.</li>
 </ul>
+<h3>YUV to YUV (Lossless Rearrangement)</h3>
+<p>An existing YUV file can be converted into another YUV layout without
+decoding: only the byte order changes, so the result is bit-exact and
+reversible. Set <b>Input type</b> to <b>YUV</b>.</p>
+<ul>
+<li>Only layouts inside the same chroma-sampling family are allowed:
+    4:2:2 (YUYV/UYVY/YVYU/VYUY/NV16/NV61) or
+    4:2:0 (I420/YV12/NV12/NV21). All 42 in-family directions round-trip
+    byte-exactly.</li>
+<li>No resize: <b>Width/Height are the source frame dimensions</b>, used only
+    to parse the byte layout. They are not an output size.</li>
+<li>4:2:2 &lt;-&gt; 4:2:0 is refused (greyed out in the target list): changing
+    chroma sampling would require lossy chroma resampling.</li>
+<li>YOnly (4:0:0) and RAW are not transcodeable this way — YOnly has no chroma
+    planes, and RAW &lt;-&gt; YUV is reserved for a future release.</li>
+<li><b>Source offset (bytes)</b> (Convert dialog only; Batch does not offer it
+    yet) skips a file header or padding before the first frame; the remaining
+    byte count must still be a whole number of frames.</li>
+</ul>
 <h3>Sensor presets</h3>
 <ul>
 <li>The main <b>Preset</b> control is selection-only (no typing). It fills the panel fields;

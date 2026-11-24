@@ -1,4 +1,8 @@
-"""Batch image-to-RAW/YUV conversion dialog."""
+"""Batch file-to-RAW/YUV conversion dialog.
+
+Each input may be an image (PNG/JPG/BMP) or an existing YUV file (lossless
+byte rearrangement inside one chroma-sampling family).
+"""
 
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ from raw_view.models import (
 )
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+from raw_view.transcode import YUV_TRANSCODE_FORMATS
 
 
 # 与本项目主面板 (panels.py) 的默认输出分辨率保持一致（转换默认产出高清，
@@ -71,7 +76,7 @@ def resolve_output_dir(same_dir: bool, input_path: str, settings_dir: str) -> st
 
 
 class BatchConvertDialog(QDialog):
-    """Modal dialog for batch-converting multiple images to RAW or YUV format."""
+    """Modal dialog for batch-converting multiple files to RAW or YUV."""
 
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,12 +87,12 @@ class BatchConvertDialog(QDialog):
 
         # ── Source file list (drag-drop or browse) ──
         self.input_edit = FileDropLineEdit()
-        self.input_edit.setAccessibleName("Images to convert")
+        self.input_edit.setAccessibleName("Files to convert")
         self.input_edit.setAccessibleDescription(
-            "Drop image files here or use Add Files to build the batch list."
+            "Drop image or YUV files here or use Add Files to build the batch list."
         )
         self.input_edit.setPlaceholderText(
-            "Drop files here or use Browse to add multiple images..."
+            "Drop files here or use Add Files to add images or YUV files..."
         )
         self._add_btn = QPushButton("Add Files")
         self._add_btn.setObjectName("secondaryButton")
@@ -116,11 +121,10 @@ class BatchConvertDialog(QDialog):
         # 覆盖标签提示“Add Files 或拖放文件”，随表格行数/尺寸变化显隐与定位，
         # 不改变 QTableWidget 的行列语义。
         self._empty_hint = QLabel("Add files with Add Files or drag & drop here", self._file_table.viewport())
+        self._empty_hint.setObjectName("emptyTableHint")
         self._empty_hint.setAlignment(Qt.AlignCenter)
-        self._empty_hint.setStyleSheet(
-            "color: #9AA0AC; font-style: italic;"
-            "background: transparent; border: none;"
-        )
+        # Colour/font come from the theme-scoped rule in build_ui_stylesheet()
+        # (was a hard-coded dark-theme grey that did not follow ui/font_size).
         self._empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._empty_hint.hide()
         # 事件过滤器必须装在 **viewport** 上：Qt 只把某个对象的自身事件交给装在该
@@ -141,7 +145,9 @@ class BatchConvertDialog(QDialog):
 
         # Input type mirrors ConvertDialog: Image keeps the historical
         # decode+resize path, YUV losslessly rearranges an existing YUV file
-        # (width/height become SOURCE frame size, no resize).
+        # (width/height become SOURCE frame size, no resize).  "RAW" stays
+        # visible but is genuinely disabled so it cannot be selected and then
+        # silently fall through to the image branch.
         self.input_type = QComboBox()
         self.input_type.addItems(["Image", "YUV", "RAW (coming soon)"])
         self.input_type.setItemData(
@@ -150,10 +156,22 @@ class BatchConvertDialog(QDialog):
             "reserved for a future release.",
             Qt.ToolTipRole,
         )
+        raw_input_item = self.input_type.model().item(2)
+        if raw_input_item is not None:
+            raw_input_item.setEnabled(False)
         self.input_type.setAccessibleName("Input type")
 
+        # Always-visible explanation of the selected input type (same as
+        # ConvertDialog): make the Image vs YUV difference clear up front.
+        self._input_hint = QLabel()
+        self._input_hint.setObjectName("hintLabel")
+        self._input_hint.setWordWrap(True)
+
+        # Source YUV list: only formats the transcoder can read.  YOnly (4:0:0)
+        # is excluded — it has no chroma planes, so every target would be
+        # greyed out, leaving the row in a dead end.
         self.input_yuv_type = QComboBox()
-        self.input_yuv_type.addItems(ControlPanel.YUV_FORMATS)
+        self.input_yuv_type.addItems(YUV_TRANSCODE_FORMATS)
 
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
@@ -198,7 +216,11 @@ class BatchConvertDialog(QDialog):
         self._same_dir_cb.setChecked(True)
 
         params_form = QFormLayout()
+        # Kept for _apply_cond_rows(): hidden conditional rows are taken out of
+        # the layout (setVisible alone still reserves a 6px row gap).
+        self._form = params_form
         params_form.addRow("Input type", self.input_type)
+        params_form.addRow("", self._input_hint)
         params_form.addRow("Input YUV format", self.input_yuv_type)
         params_form.addRow("Target", self.target_type)
         params_form.addRow("RAW type", self.raw_type)
@@ -210,6 +232,50 @@ class BatchConvertDialog(QDialog):
         params_form.addRow("Bayer pattern", self.bayer_pattern)
         params_form.addRow("Width", self.width)
         params_form.addRow("Height", self.height)
+
+        # QFormLayout hides only the field, never the row label.  Cache every
+        # conditional row's label so _apply_cond_rows() can move both together;
+        # otherwise a hidden field leaves its label dangling (0.5.10 H-1).
+        # Collected after all addRow() calls: labelForField() only answers for
+        # a field already in the form.
+        self._cond_row_labels = {
+            field: params_form.labelForField(field)
+            for field in (
+                self.input_yuv_type,
+                self.raw_type,
+                self.bit_depth_combo,
+                self.align,
+                self.endian,
+                self.raw_source_mode,
+                self.bayer_pattern,
+            )
+        }
+        self._cond_row_labels = {
+            field: label
+            for field, label in self._cond_row_labels.items()
+            if label is not None
+        }
+
+        # Conditional rows grouped by the fixed row that follows them, so a
+        # visible row is inserted back at its original position (0.5.10.1
+        # review L-1).
+        self._cond_row_groups = (
+            (
+                self.target_type, ((self.input_yuv_type, "Input YUV format"),),
+            ),
+            (
+                self.yuv_type, ((self.raw_type, "RAW type"),),
+            ),
+            (
+                self.width, (
+                    (self.bit_depth_combo, "Bit depth"),
+                    (self.align, "Alignment"),
+                    (self.endian, "Endianness"),
+                    (self.raw_source_mode, "RAW source"),
+                    (self.bayer_pattern, "Bayer pattern"),
+                ),
+            ),
+        )
 
         params_right = QVBoxLayout()
         params_right.addLayout(params_form)
@@ -233,7 +299,7 @@ class BatchConvertDialog(QDialog):
         self._run_btn = QPushButton("Start Batch Convert")
         self._run_btn.setObjectName("accentButton")
         self._run_btn.setEnabled(False)
-        self._run_btn.setToolTip("Add at least one image before starting the batch conversion.")
+        self._run_btn.setToolTip("Add at least one file before starting the batch conversion.")
         self._run_btn.clicked.connect(self._run_batch)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
@@ -289,7 +355,7 @@ class BatchConvertDialog(QDialog):
     def _browse_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select Images",
+            "Select Files",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)",
         )
@@ -299,7 +365,7 @@ class BatchConvertDialog(QDialog):
     def _clear_files(self) -> None:
         self._file_table.setRowCount(0)
         self._run_btn.setEnabled(False)
-        self._run_btn.setToolTip("Add at least one image before starting the batch conversion.")
+        self._run_btn.setToolTip("Add at least one file before starting the batch conversion.")
 
     # ── 0.4.0-L-2：空表引导覆盖标签 ─────────────────────────────────────
 
@@ -360,9 +426,9 @@ class BatchConvertDialog(QDialog):
         self.input_edit.setText(f"{count} file(s) loaded")
         self._run_btn.setEnabled(count > 0)
         self._run_btn.setToolTip(
-            "Start converting the loaded images."
+            "Start converting the loaded files."
             if count > 0 else
-            "Add at least one image before starting the batch conversion."
+            "Add at least one file before starting the batch conversion."
         )
 
     # ── Control sync ───────────────────────────────────────────────────
@@ -385,47 +451,155 @@ class BatchConvertDialog(QDialog):
             self._syncing_controls = False
 
     def _sync_controls_locked(self) -> None:
+        is_yuv_input = self._is_yuv_input()
+        # Pin the target BEFORE reading is_raw: setCurrentText() re-enters
+        # _sync_controls, which the guard swallows, so the pre-switch value
+        # would otherwise leave Alignment/Endianness visible and enabled for a
+        # YUV input even though transcoding ignores them (0.5.10 review M-1).
+        self.target_type.setEnabled(not is_yuv_input)
+        if is_yuv_input and self.target_type.currentText() != "YUV":
+            self.target_type.setCurrentText("YUV")
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
         # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
         is_yonly = self.yuv_type.currentText() == "YOnly"
-        is_yuv_input = self._is_yuv_input()
         show_raw = is_raw and not is_yuv_input
         show_bit = (not is_raw) and is_yonly and not is_yuv_input
         show_align_endian = is_raw or show_bit
-        self.raw_type.setVisible(show_raw)
-        self.bit_depth_combo.setVisible(show_bit)
-        self.align.setVisible(show_align_endian)
-        self.endian.setVisible(show_align_endian)
-        self.raw_source_mode.setVisible(show_raw)
-        self.bayer_pattern.setVisible(show_raw and is_bayer)
-        self.input_yuv_type.setVisible(is_yuv_input)
-        # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
-        # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用。
-        for w, shown in (
-            (self.raw_type, show_raw),
-            (self.bit_depth_combo, show_bit),
-            (self.align, show_align_endian),
-            (self.endian, show_align_endian),
-            (self.raw_source_mode, show_raw),
-            (self.bayer_pattern, show_raw and is_bayer),
-            (self.input_yuv_type, is_yuv_input),
-        ):
-            w.setEnabled(shown)
-        self.target_type.setEnabled(not is_yuv_input)
-        if is_yuv_input and self.target_type.currentText() != "YUV":
-            self.target_type.setCurrentText("YUV")
+        # One call drives visibility, layout membership and enabled state for
+        # every conditional row.  Hidden rows are taken out of the QFormLayout
+        # instead of only being hidden: setVisible(False) still reserves a 6px
+        # row gap (0.5.10.1 review L-1).  Enabled state is derived here rather
+        # than from isVisible(), which is always False before show().
+        self._apply_cond_rows({
+            self.input_yuv_type: is_yuv_input,
+            self.raw_type: show_raw,
+            self.bit_depth_combo: show_bit,
+            self.align: show_align_endian,
+            self.endian: show_align_endian,
+            self.raw_source_mode: show_raw,
+            self.bayer_pattern: show_raw and is_bayer,
+        })
         self.yuv_type.setEnabled(True if is_yuv_input else not is_raw)
         self._refresh_target_formats()
+        # Variants fan one IMAGE out into many formats; grey the panel out for a
+        # YUV source instead of letting the user pick options that cannot run.
+        variant_selector = getattr(self, "_variant_selector", None)
+        if variant_selector is not None:
+            variant_selector.setEnabled(not is_yuv_input)
+            # Explain *why* it is greyed out; Convert's button carries the same
+            # tooltip, and an unexplained disabled panel reads like a bug to the
+            # user (0.5.10 review L-7).
+            variant_selector.setToolTip(
+                "Variants are generated from an image; not available for a YUV input."
+                if is_yuv_input else ""
+            )
+        self._sync_input_hint()
+
+    def _apply_cond_rows(self, desired: dict[QWidget, bool]) -> None:
+        """Move conditional rows in/out of the QFormLayout to match *desired*.
+
+        ``QFormLayout`` keeps the row label visible when only the field is
+        hidden (0.5.10 review H-1), and still reserves a 6px gap for a row
+        whose label and field are both hidden (0.5.10.1 review L-1).  Hidden
+        rows are therefore ``takeRow``-ed out of the form and visible rows are
+        ``insertRow``-ed back at their canonical position.
+
+        Rows that stay visible are deliberately **not** touched: hiding them
+        even for an instant closes an open QComboBox popup and moves the
+        keyboard focus to the next widget in the chain; re-showing afterwards
+        does not undo either (0.5.10.2 review M-1).  Only rows that must
+        disappear are detached, and only rows that must appear *and are not in
+        the form yet* are inserted.
+
+        ``_cond_row_groups`` is the only place the row order is declared and
+        ``_cond_row_labels`` the only place label widgets are cached, so a
+        label can never drift from its field.
+        """
+        form = self._form
+        # 1) Detach only the rows that must be hidden.  Recompute the row index
+        # each time: takeRow() shifts the rows below it.
+        for _anchor, rows in self._cond_row_groups:
+            for field, _label_text in rows:
+                if desired.get(field, False):
+                    continue
+                row = form.getWidgetPosition(field)[0]
+                if row >= 0:
+                    taken = form.takeRow(row)
+                    label = (
+                        taken.labelItem.widget()
+                        if taken.labelItem is not None else None
+                    )
+                    if label is not None:
+                        self._cond_row_labels[field] = label
+                        label.setVisible(False)
+                else:
+                    # Already outside the form (previous sync) but still a
+                    # child widget; keep it hidden until re-inserted.
+                    label = self._cond_row_labels.get(field)
+                    if label is not None:
+                        label.setVisible(False)
+                field.setVisible(False)
+                field.setEnabled(False)
+
+        # 2) Insert the rows that must show but are not in the form yet, group
+        # by group, in declared order.  Start at the *earliest* row this group
+        # still occupies: a row that becomes visible again has to be inserted
+        # before the first surviving sibling declared after it, not merely
+        # before the anchor (otherwise ``Bit depth`` would land after the
+        # already-present ``Alignment``/``Endianness``).
+        for anchor, rows in self._cond_row_groups:
+            insert_at = form.getWidgetPosition(anchor)[0]
+            if insert_at < 0:
+                insert_at = form.rowCount()
+            for field, _label_text in rows:
+                position = form.getWidgetPosition(field)[0]
+                if position >= 0 and desired.get(field, False):
+                    insert_at = min(insert_at, position)
+            for field, label_text in rows:
+                if not desired.get(field, False):
+                    continue
+                position = form.getWidgetPosition(field)[0]
+                if position < 0:
+                    label = self._cond_row_labels.get(field)
+                    if label is not None:
+                        form.insertRow(insert_at, label, field)
+                    else:
+                        form.insertRow(insert_at, label_text, field)
+                        label = form.labelForField(field)
+                        if label is not None:
+                            self._cond_row_labels[field] = label
+                    if label is not None:
+                        label.setVisible(True)
+                    field.setVisible(True)
+                    position = insert_at
+                # Enabled state is derived here rather than from isVisible(),
+                # which is always False before show() (0.2.2).
+                field.setEnabled(True)
+                insert_at = position + 1
 
     def _is_yuv_input(self) -> bool:
         return self.input_type.currentText() == "YUV"
 
+    def _sync_input_hint(self) -> None:
+        """Explain the selected input type before the user commits to it."""
+        if self._is_yuv_input():
+            self._input_hint.setText(
+                "YUV input: lossless byte rearrangement inside the same "
+                "4:2:2 / 4:2:0 family. Nothing is resized — Width/Height are "
+                "the SOURCE frame size (same for every file in the batch)."
+            )
+        else:
+            self._input_hint.setText(
+                "Image input: decode PNG/JPG/BMP and encode to RAW/YUV. "
+                "Width/Height are the OUTPUT size (each image is resized)."
+            )
+
     def _on_input_type_changed(self) -> None:
         """Clear Width/Height when the input type changes (they change meaning)."""
         if self._is_yuv_input():
-            from raw_view.transcode import YUV_TRANSCODE_FORMATS
-
+            # Defensive: the source list already only holds transcodable
+            # formats, so a dead-end selection cannot normally exist.
             if self.input_yuv_type.currentText() not in YUV_TRANSCODE_FORMATS:
                 self.input_yuv_type.setCurrentText(YUV_TRANSCODE_FORMATS[0])
             self.width.setValue(1)
@@ -475,7 +649,11 @@ class BatchConvertDialog(QDialog):
 
         target_type = self.target_type.currentText()
         yuv_input = self._is_yuv_input()
-        if yuv_input and self._variant_selector is not None:
+        if (
+            yuv_input
+            and self._variant_selector is not None
+            and self._variant_selector.isEnabled()
+        ):
             QMessageBox.information(
                 self, "Batch Convert",
                 "Multi-variant generation works on images only; it is disabled "
@@ -563,7 +741,7 @@ class BatchConvertDialog(QDialog):
                 self._progress.setLabelText(f"Converting {i + 1}/{len(files)}: {Path(input_path).name}")
 
                 # Multi-variant mode: fan each file into all selected combos.
-                if self._variant_selector is not None:
+                if self._variant_selector is not None and self._variant_selector.isEnabled():
                     formats = self._variant_selector.selected_formats()
                     sizes = self._variant_selector.selected_sizes()
                     bayer = self._variant_selector.selected_bayer()

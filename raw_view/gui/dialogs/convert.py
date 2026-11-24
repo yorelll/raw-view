@@ -1,4 +1,8 @@
-"""Image-to-RAW/YUV conversion dialog."""
+"""File-to-RAW/YUV conversion dialog.
+
+The input may be an image (PNG/JPG/BMP, decoded and re-encoded) or an existing
+YUV file (lossless byte rearrangement inside one chroma-sampling family).
+"""
 
 from __future__ import annotations
 
@@ -46,6 +50,7 @@ from raw_view.models import (
 from raw_view.gui.image_utils import _format_size, qimage_from_rgb
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
+from raw_view.transcode import YUV_TRANSCODE_FORMATS
 
 
 # 与本项目主面板 (panels.py) 的默认输出分辨率保持一致（转换默认产出高清，
@@ -53,23 +58,35 @@ from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
 DEFAULT_CONVERT_WIDTH = 2560
 DEFAULT_CONVERT_HEIGHT = 1440
 
+#: Browse filter for the input file.  Images are listed first, but "All Files"
+#: must stay: a YUV source may carry any suffix (``.nv16``, ``.yuyv``, ``.bin``,
+#: none at all), so hard-coding a YUV extension list would make it unpickable.
+INPUT_FILE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
+
 
 class ConvertDialog(QDialog):
-    """Modal dialog for converting standard images to RAW or YUV format."""
+    """Modal dialog for converting an image or YUV file to RAW/YUV."""
 
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
-        self.setWindowTitle("Convert Image")
+        # True while _generate_variants() is pumping events and writing files.
+        # _sync_controls_locked() must not re-enable the button during that
+        # window, otherwise a mid-run edit lets the user start a second,
+        # overlapping generation (0.5.10.1 review M-1).
+        self._generating_variants = False
+        self.setWindowTitle("Convert File")
         self.setMinimumWidth(520)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self.input_edit = FileDropLineEdit()
-        self.input_edit.setAccessibleName("Input image")
+        self.input_edit.setAccessibleName("Input file")
         self.input_edit.setAccessibleDescription(
-            "Select a PNG, JPG, or BMP input image, or drag one here."
+            "Select an image (PNG/JPG/BMP) or an existing YUV file, or drag one here."
         )
-        self.input_edit.setPlaceholderText("Select an input image (PNG/JPG/BMP), or drag one here...")
+        self.input_edit.setPlaceholderText(
+            "Select an input file (image or YUV), or drag one here..."
+        )
         self.output_edit = QLineEdit()
         self.output_edit.setAccessibleName("Output file")
         self.output_edit.setAccessibleDescription(
@@ -82,7 +99,8 @@ class ConvertDialog(QDialog):
         # requested output size).  "YUV" = lossless byte rearrangement inside the
         # YUV 4:2:2 / 4:2:0 family: width/height become the SOURCE frame
         # dimensions and nothing is resized.  "RAW" is reserved (no conversion
-        # implemented yet); it is shown greyed so the intent stays visible.
+        # implemented yet); the entry stays visible but is genuinely disabled so
+        # it can never be selected and then fail.
         self.input_type = QComboBox()
         self.input_type.addItems(["Image", "YUV", "RAW (coming soon)"])
         self.input_type.setItemData(
@@ -91,14 +109,28 @@ class ConvertDialog(QDialog):
             "reserved for a future release.",
             Qt.ToolTipRole,
         )
+        raw_input_item = self.input_type.model().item(2)
+        if raw_input_item is not None:
+            raw_input_item.setEnabled(False)
         self.input_type.setAccessibleName("Input type")
         self.input_type.setAccessibleDescription(
             "Image: decode a PNG/JPG/BMP and encode it. "
             "YUV: losslessly rearrange an existing YUV 4:2:2/4:2:0 file."
         )
 
+        # Always-visible explanation of what the selected input type means, so
+        # the user understands Image vs YUV *before* choosing (instead of being
+        # told after the fact that a combination does not work).
+        self._input_hint = QLabel()
+        self._input_hint.setObjectName("hintLabel")
+        self._input_hint.setWordWrap(True)
+
+        # Source YUV list: only formats the transcoder can actually read.  YOnly
+        # is deliberately excluded (4:0:0 has no chroma planes, so it cannot be
+        # losslessly rearranged into 4:2:2/4:2:0); listing it as a source would
+        # leave every target greyed out — a dead end.
         self.input_yuv_type = QComboBox()
-        self.input_yuv_type.addItems(ControlPanel.YUV_FORMATS)
+        self.input_yuv_type.addItems(YUV_TRANSCODE_FORMATS)
 
         self.target_type = QComboBox()
         self.target_type.addItems(["RAW", "YUV"])
@@ -142,6 +174,17 @@ class ConvertDialog(QDialog):
         self.height.setRange(1, 65535)
         self.height.setValue(DEFAULT_CONVERT_HEIGHT)
 
+        # Bytes to skip before the first YUV frame (file header, padding, ...).
+        # Mirrors the CLI's --offset; only meaningful for a YUV input, so it is
+        # hidden and disabled for images (see _sync_controls_locked).
+        self.offset = QSpinBox()
+        self.offset.setRange(0, 2**31 - 1)
+        self.offset.setValue(0)
+        self.offset.setToolTip(
+            "Bytes to skip before the first frame (file header / padding). "
+            "YUV input only."
+        )
+
         self._auto_output_path = ""
 
         # Help text for YUV formats
@@ -166,9 +209,9 @@ class ConvertDialog(QDialog):
         preview_title.setAlignment(Qt.AlignLeft)
 
         preview_content = QHBoxLayout()
-        self._preview_thumb = QLabel("Drop an image\nor click Browse")
+        self._preview_thumb = QLabel("Drop a file\nor click Browse")
         self._preview_thumb.setObjectName("previewThumb")
-        self._preview_thumb.setAccessibleName("Source image preview")
+        self._preview_thumb.setAccessibleName("Source preview")
         self._preview_thumb.setAccessibleDescription(
             "Thumbnail of the source image; it does not represent decoded output bytes."
         )
@@ -222,9 +265,14 @@ class ConvertDialog(QDialog):
 
         # ── Layout construction ───────────────────────────────────────
         form = QFormLayout()
-        form.addRow("Input image", input_row_w)
+        # Kept for _apply_cond_rows(): hidden conditional rows are taken out of
+        # the layout (setVisible alone still reserves a 6px row gap).
+        self._form = form
+        form.addRow("Input file", input_row_w)
         form.addRow("Input type", self.input_type)
+        form.addRow("", self._input_hint)
         form.addRow("Input YUV format", self.input_yuv_type)
+        form.addRow("Source offset (bytes)", self.offset)
         form.addRow("Output file", output_row_w)
         form.addRow("Target", self.target_type)
         form.addRow("RAW type", self.raw_type)
@@ -238,6 +286,61 @@ class ConvertDialog(QDialog):
         form.addRow("Width", self.width)
         form.addRow("Height", self.height)
         form.addRow("", self._yuv_note)
+
+        # QFormLayout hides only the field, never the row label.  Cache every
+        # conditional row's label so _apply_cond_rows() can move both together;
+        # otherwise a hidden field leaves its label dangling with no control
+        # next to it (0.5.10 review H-1).  Collected after all addRow() calls:
+        # labelForField() only answers for a field already in the form.
+        self._cond_row_labels = {
+            field: form.labelForField(field)
+            for field in (
+                self.input_yuv_type,
+                self.offset,
+                self.raw_type,
+                self.bit_depth_combo,
+                self.align,
+                self.endian,
+                self.raw_source_mode,
+                self.bayer_pattern,
+                self._yuv_note,
+            )
+        }
+        self._cond_row_labels = {
+            field: label
+            for field, label in self._cond_row_labels.items()
+            if label is not None
+        }
+        # Named handle kept for readability/tests; visibility is driven through
+        # _apply_cond_rows() so the label can never drift from its field.
+        self._offset_label = self._cond_row_labels.get(self.offset)
+
+        # Conditional rows grouped by the fixed row that follows them, so a
+        # visible row is inserted back at its original position (0.5.10.1
+        # review L-1).  ``None`` means "append after everything else".
+        self._cond_row_groups = (
+            (
+                output_row_w, (
+                    (self.input_yuv_type, "Input YUV format"),
+                    (self.offset, "Source offset (bytes)"),
+                ),
+            ),
+            (
+                self.yuv_type, ((self.raw_type, "RAW type"),),
+            ),
+            (
+                self.width, (
+                    (self.bit_depth_combo, "Bit depth"),
+                    (self.align, "Alignment"),
+                    (self.endian, "Endianness"),
+                    (self.raw_source_mode, "RAW source"),
+                    (self.bayer_pattern, "Bayer pattern"),
+                ),
+            ),
+            (
+                None, ((self._yuv_note, ""),),
+            ),
+        )
 
         # CONVERT is the primary action; disabled until an input is chosen.
         btn_run = QPushButton("Convert")
@@ -322,6 +425,8 @@ class ConvertDialog(QDialog):
         self.width.valueChanged.connect(self._update_preview)
         self.height.valueChanged.connect(self._sync_default_output)
         self.height.valueChanged.connect(self._update_preview)
+        # The source offset changes which bytes count as frame data.
+        self.offset.valueChanged.connect(self._update_preview)
         self.raw_type.currentTextChanged.connect(self._update_preview)
         self.yuv_type.currentTextChanged.connect(self._update_preview)
         # YOnly 位深变化直接影响 YOnly<bit> 帧大小 → 预览帧大小需刷新
@@ -353,12 +458,12 @@ class ConvertDialog(QDialog):
         resize the wrong way.  The user confirmed they must be cleared rather
         than carried over.
         """
+        # A source offset belongs to the previous input kind; start clean.
+        self.offset.setValue(0)
         if self._is_yuv_input():
-            # The source list starts at YOnly (4:0:0), which converts to
-            # nothing; land on a format that actually has targets so the dialog
-            # does not open in a dead end.
-            from raw_view.transcode import YUV_TRANSCODE_FORMATS
-
+            # Defensive: keep a source that actually has convertible targets
+            # (the list is already YUV_TRANSCODE_FORMATS, so this is a no-op
+            # unless the selection somehow drifted).
             if self._input_format() not in YUV_TRANSCODE_FORMATS:
                 self.input_yuv_type.setCurrentText(YUV_TRANSCODE_FORMATS[0])
             # Source frame dimensions: nothing sensible can be inherited from
@@ -375,8 +480,9 @@ class ConvertDialog(QDialog):
         self._update_preview()
 
     def _browse_input(self) -> None:
+        # "All Files" is required: a YUV source can carry any (or no) suffix.
         path, _ = QFileDialog.getOpenFileName(
-            self, "Input Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+            self, "Input File", "", INPUT_FILE_FILTER
         )
         if path:
             self.input_edit.setText(path)
@@ -402,47 +508,149 @@ class ConvertDialog(QDialog):
             self._syncing_controls = False
 
     def _sync_controls_locked(self) -> None:
+        is_yuv_input = self.input_type.currentText() == "YUV"
+        # A YUV input is transcoded into another YUV layout only (RAW is a
+        # different family), so pin the target FIRST and only then read is_raw.
+        # Reading is_raw before the pin used the pre-switch value (0.5.10 review
+        # M-1): setCurrentText() below re-enters _sync_controls, which the guard
+        # swallows, so a stale is_raw=True kept Alignment/Endianness visible and
+        # enabled for a YUV input even though transcoding ignores them.
+        self.target_type.setEnabled(not is_yuv_input)
+        if is_yuv_input and self.target_type.currentText() != "YUV":
+            self.target_type.setCurrentText("YUV")
         is_raw = self.target_type.currentText() == "RAW"
         is_bayer = self.raw_source_mode.currentText() == "bayer"
         # YOnly 是一个独立格式 + Bit depth 下拉：选它时显示位深/对齐/大小端
         is_yonly = self.yuv_type.currentText() == "YOnly"
-        is_yuv_input = self.input_type.currentText() == "YUV"
         show_raw = is_raw and not is_yuv_input
         show_bit = (not is_raw) and is_yonly and not is_yuv_input
         show_align_endian = is_raw or show_bit
-        self.raw_type.setVisible(show_raw)
-        self.bit_depth_combo.setVisible(show_bit)
-        self.align.setVisible(show_align_endian)
-        self.endian.setVisible(show_align_endian)
-        self.raw_source_mode.setVisible(show_raw)
-        self.bayer_pattern.setVisible(show_raw and is_bayer)
-        self._yuv_note.setVisible(not is_raw)
-        self.input_yuv_type.setVisible(is_yuv_input)
-        # 隐藏的控件同时禁用，避免焦点/键盘可达。注意不能从 isVisible() 反推：
-        # 对话框未 show 时 isVisible() 恒为 False，会导致可见控件也被禁用
-        # （0.2.2 review 发现：初启 Convert 对话框所有高级控件全灰）。
-        for w, shown in (
-            (self.raw_type, show_raw),
-            (self.bit_depth_combo, show_bit),
-            (self.align, show_align_endian),
-            (self.endian, show_align_endian),
-            (self.raw_source_mode, show_raw),
-            (self.bayer_pattern, show_raw and is_bayer),
-            (self.input_yuv_type, is_yuv_input),
-        ):
-            w.setEnabled(shown)
-        # A YUV input is transcoded into another YUV layout only (RAW is a
-        # different family), so the target is pinned while it is chosen.
-        self.target_type.setEnabled(not is_yuv_input)
-        if is_yuv_input and self.target_type.currentText() != "YUV":
-            self.target_type.setCurrentText("YUV")
+        # One call drives visibility, layout membership and enabled state for
+        # every conditional row.  Hidden rows are taken out of the QFormLayout
+        # instead of only being hidden: setVisible(False) still reserves a 6px
+        # row gap (0.5.10.1 review L-1).  Enabled state is derived here rather
+        # than from isVisible(), which is always False before show() (0.2.2).
+        self._apply_cond_rows({
+            self.input_yuv_type: is_yuv_input,
+            self.offset: is_yuv_input,
+            self.raw_type: show_raw,
+            self.bit_depth_combo: show_bit,
+            self.align: show_align_endian,
+            self.endian: show_align_endian,
+            self.raw_source_mode: show_raw,
+            self.bayer_pattern: show_raw and is_bayer,
+            self._yuv_note: not is_raw,
+        })
         self.yuv_type.setEnabled(True if is_yuv_input else not is_raw)
         self._refresh_target_formats()
+        # Multi-variant generation fans one IMAGE out into many formats; it has
+        # no meaning for a YUV source, so grey the trigger out up front instead
+        # of failing after the user picks it.
+        btn_variants = getattr(self, "_btn_variants", None)
+        if btn_variants is not None:
+            # Keep it disabled while generation is running: this sync is
+            # reachable from any control the user can edit during the
+            # processEvents() pumps, and re-enabling would allow a second
+            # concurrent generation (0.5.10.1 review M-1).
+            btn_variants.setEnabled(
+                not is_yuv_input and not self._generating_variants
+            )
+            btn_variants.setToolTip(
+                "Variants are generated from an image; not available for a YUV input."
+                if is_yuv_input else ""
+            )
         # Width/height mean "source frame size" (parse only) for a YUV input and
         # "output size" (resize) for an image; say which in the tooltips.
         self._sync_dimension_hints()
+        self._sync_input_hint()
 
     # ── YUV input helpers ─────────────────────────────────────────────
+
+    def _apply_cond_rows(self, desired: dict[QWidget, bool]) -> None:
+        """Move conditional rows in/out of the QFormLayout to match *desired*.
+
+        ``QFormLayout`` keeps the row label visible when only the field is
+        hidden (0.5.10 review H-1), and still reserves a 6px gap for a row
+        whose label and field are both hidden (0.5.10.1 review L-1).  Hidden
+        rows are therefore ``takeRow``-ed out of the form and visible rows are
+        ``insertRow``-ed back at their canonical position (the fixed row that
+        followed them in ``__init__``).
+
+        Rows that stay visible are deliberately **not** touched: hiding them
+        even for an instant closes an open QComboBox popup and moves the
+        keyboard focus to the next widget in the chain; re-showing afterwards
+        does not undo either (0.5.10.2 review M-1).  Only rows that must
+        disappear are detached, and only rows that must appear *and are not in
+        the form yet* are inserted.
+
+        ``_cond_row_groups`` is the only place the row order is declared and
+        ``_cond_row_labels`` the only place label widgets are cached, so a
+        label can never drift from its field.
+        """
+        form = self._form
+        # 1) Detach only the rows that must be hidden.  Recompute the row index
+        # each time: takeRow() shifts the rows below it.
+        for _anchor, rows in self._cond_row_groups:
+            for field, _label_text in rows:
+                if desired.get(field, False):
+                    continue
+                row = form.getWidgetPosition(field)[0]
+                if row >= 0:
+                    taken = form.takeRow(row)
+                    label = (
+                        taken.labelItem.widget()
+                        if taken.labelItem is not None else None
+                    )
+                    if label is not None:
+                        self._cond_row_labels[field] = label
+                        label.setVisible(False)
+                else:
+                    # Already outside the form (previous sync) but still a
+                    # child widget; keep it hidden until re-inserted.
+                    label = self._cond_row_labels.get(field)
+                    if label is not None:
+                        label.setVisible(False)
+                field.setVisible(False)
+                field.setEnabled(False)
+
+        # 2) Insert the rows that must show but are not in the form yet, group
+        # by group, in declared order.  Start at the *earliest* row this group
+        # still occupies: a row that becomes visible again has to be inserted
+        # before the first surviving sibling declared after it, not merely
+        # before the anchor (otherwise ``Bit depth`` would land after the
+        # already-present ``Alignment``/``Endianness``).
+        for anchor, rows in self._cond_row_groups:
+            insert_at = (
+                form.rowCount() if anchor is None
+                else form.getWidgetPosition(anchor)[0]
+            )
+            if insert_at < 0:
+                insert_at = form.rowCount()
+            for field, _label_text in rows:
+                position = form.getWidgetPosition(field)[0]
+                if position >= 0 and desired.get(field, False):
+                    insert_at = min(insert_at, position)
+            for field, label_text in rows:
+                if not desired.get(field, False):
+                    continue
+                position = form.getWidgetPosition(field)[0]
+                if position < 0:
+                    label = self._cond_row_labels.get(field)
+                    if label is not None:
+                        form.insertRow(insert_at, label, field)
+                    else:
+                        form.insertRow(insert_at, label_text, field)
+                        label = form.labelForField(field)
+                        if label is not None:
+                            self._cond_row_labels[field] = label
+                    if label is not None:
+                        label.setVisible(True)
+                    field.setVisible(True)
+                    position = insert_at
+                # Enabled state is derived here rather than from isVisible(),
+                # which is always False before show() (0.2.2).
+                field.setEnabled(True)
+                insert_at = position + 1
 
     def _is_yuv_input(self) -> bool:
         return self.input_type.currentText() == "YUV"
@@ -489,6 +697,20 @@ class ConvertDialog(QDialog):
                 if reject_reason(source, self.yuv_type.itemText(index)) is None:
                     self.yuv_type.setCurrentIndex(index)
                     break
+
+    def _sync_input_hint(self) -> None:
+        """Explain the selected input type before the user commits to it."""
+        if self._is_yuv_input():
+            self._input_hint.setText(
+                "YUV input: lossless byte rearrangement inside the same "
+                "4:2:2 / 4:2:0 family. Nothing is resized — Width/Height are "
+                "the SOURCE frame size."
+            )
+        else:
+            self._input_hint.setText(
+                "Image input: decode PNG/JPG/BMP and encode to RAW/YUV. "
+                "Width/Height are the OUTPUT size (the image is resized)."
+            )
 
     def _sync_dimension_hints(self) -> None:
         """Label width/height as source-frame size for a YUV input (no resize)."""
@@ -589,7 +811,7 @@ class ConvertDialog(QDialog):
 
         input_path = self.input_edit.text().strip()
         if not input_path or not Path(input_path).is_file():
-            self._preview_thumb.setText("Drop an image\nor click Browse")
+            self._preview_thumb.setText("Drop a file\nor click Browse")
             self._preview_info.setText("Source: -\nOutput specification: -\nFrame size: -")
             return
 
@@ -662,7 +884,9 @@ class ConvertDialog(QDialog):
         self._preview_thumb.setText("YUV input\n(no preview)")
         w, h = self.width.value(), self.height.value()
         try:
-            spec = TranscodeSpec(source, target, w, h)
+            spec = TranscodeSpec(
+                source, target, w, h, offset=self.offset.value()
+            )
             fsize = frame_size(spec)
             frames = frame_count(Path(input_path).stat().st_size, spec)
         except (TranscodeError, OSError) as exc:
@@ -734,6 +958,7 @@ class ConvertDialog(QDialog):
                     height=self.height.value(),
                     alignment=self.align.currentText(),
                     endianness=self.endian.currentText(),
+                    offset=self.offset.value(),
                 )
                 # Same 512MB single-frame limit the CLI applies: a 16384x16385
                 # NV16 frame used to land on disk through the GUI while the CLI
@@ -800,6 +1025,11 @@ class ConvertDialog(QDialog):
         """Generate every selected format/bayer/size combination from the input."""
         if self._variant_selector is None:
             return
+        # Defence in depth: the button is disabled for the whole run, but a
+        # programmatic/re-entrant click must never start a second overlapping
+        # generation writing the same output folder (0.5.10.1 review M-1).
+        if self._generating_variants:
+            return
         input_path = self.input_edit.text().strip()
         if not input_path or not Path(input_path).is_file():
             QMessageBox.warning(self, "Generate Variants", "Please choose a valid input image.")
@@ -822,6 +1052,10 @@ class ConvertDialog(QDialog):
             output_dir=self._settings.default_output_dirname,
             template=self._settings.output_template,
         )
+        # ``_generating_variants`` keeps _sync_controls_locked() (reachable
+        # from every control edit during the event pumps below) from
+        # re-enabling the button mid-run.
+        self._generating_variants = True
         self._btn_variants.setEnabled(False)
         self._btn_variants.setText(f"Generating 0/{len(plans)}…")
         QApplication.processEvents()
@@ -861,8 +1095,14 @@ class ConvertDialog(QDialog):
             QMessageBox.critical(self, "Generate Variants Failed", f"\u274c {exc}")
             return
         finally:
+            # Clear the run flag BEFORE deriving the final state, then derive
+            # it from the CURRENT input type: generation pumps events, so the
+            # user may have switched to YUV mid-run.  Re-enabling unconditionally
+            # left a clickable button whose tooltip said "not available for a
+            # YUV input" (0.5.10 review L-4).
+            self._generating_variants = False
             self._btn_variants.setText("Generate Variants")
-            self._btn_variants.setEnabled(True)
+            self._btn_variants.setEnabled(not self._is_yuv_input())
         out_dir = str(Path(written[0]).parent) if written else "-"
         QMessageBox.information(
             self,

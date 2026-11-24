@@ -11,7 +11,7 @@ Python RAW/YUV 图像查看与格式转换工具。
 - YUV 查看：**YOnly**（YUV 4:0:0 灰度，单个格式 + Bit depth 配置 8/10/12/14/16——8 为 1 字节/像素，10/12/14/16 为 16-bit 存储，支持 LSB/MSB 对齐与大小端）、I420/YV12/NV12/NV21/YUYV/UYVY/YVYU/VYUY/NV16/NV61
 - 文件大小校验、偏移解析、缩放查看、导出 PNG/JPEG（支持设置 DPI）
 - 图片转换：PNG/JPEG/BMP -> RAW（支持 Bayer Pattern 选择，可选灰度）或 YUV
-- **YUV 家族无损互转**：Convert 对话框新增 **Input type** 下拉（Image / YUV / RAW 占位置灰）。选 **YUV** 时把已有 YUV 文件在同家族内只重排字节地转换成另一种布局（4:2:2：YUYV/UYVY/YVYU/VYUY/NV16/NV61；4:2:0：I420/YV12/NV12/NV21，42 个方向全部逐字节可还原），**不 resize**：Width/Height 变为**源帧尺寸**。目标格式按源格式家族过滤，**不可转的目标置灰并显示原因**；切换 Input type 会清空 Width/Height（两种输入下语义不同）。文件字节数不是整帧倍数时给出明确错误，多帧文件逐帧保留
+- **YUV 家族无损互转**：Convert / Batch Convert 对话框提供 **Input type** 下拉（Image / YUV；RAW 项置灰不可选）。选 **YUV** 时把已有 YUV 文件在同家族内只重排字节地转换成另一种布局（4:2:2：YUYV/UYVY/YVYU/VYUY/NV16/NV61；4:2:0：I420/YV12/NV12/NV21，42 个方向全部逐字节可还原），**不 resize**：Width/Height 变为**源帧尺寸**（**Source offset (bytes)** 用于跳过文件头/填充，等同 CLI `--offset`，目前仅 **Convert** 对话框提供；Batch 暂不支持，留待后续按文件建模）。源格式列表只列可转格式（不含 YOnly），目标格式按源格式家族过滤，**不可转的目标置灰并显示原因**；切换 Input type 会清空 Width/Height（**Convert** 还会清空 Source offset，两种输入下语义不同）。文件字节数不是整帧倍数时给出明确错误，多帧文件逐帧保留
 - **批量转换**：支持多文件批量转换，进度条显示，统一参数设置，转换报告
 - **多变体一键生成**：可在 Settings 中开启 *Enable multi-variant generation*，之后 Convert / Batch Convert 对话框会出现勾选面板——一张图片一次生成多种 **format**（RAW8/10/12/… + YUV）× **bayer pattern**（RGGB/GRBG/GBRG/BGGR）× **size**（预设常用分辨率 + 自定义）的组合。YUV 无 Bayer，因此每个尺寸只出一个文件；RAW 灰度源（`source_mode=gray`）同样不按 Bayer 展开。默认关闭，即每次只生成一个文件
 - **转换预览**：Convert 对话框中显示原图缩略图及目标格式帧大小信息
@@ -240,7 +240,7 @@ Preset 管理对话框底部提供 **Import** 与 **Export** 两个按钮：
 一张源图想同时导出 RAW8 / RAW10 / RAW12、多个 Bayer 排列、多个分辨率时，无需重复操作。
 
 1. 打开 **Settings**，勾选 **Enable multi-variant generation**，保存。
-2. 打开 **Convert Image...**（单图）或 **Batch Convert...**（多图），底部会出现勾选面板：
+2. 打开 **Convert...**（单文件）或 **Batch Convert...**（多文件），底部会出现勾选面板：
    - **Formats (RAW)** / **Formats (YUV)**：勾选要生成的所有格式。
    - **Bayer patterns**：仅对 RAW 且 `RAW source = bayer` 生效；灰度源与 YUV 会被忽略。
    - **Sizes**：勾选常用分辨率；在该区域 **右键** 可 *Add custom size…* 添加自定义尺寸或删除已添加的自定义尺寸（自定义尺寸以蓝色标注，重复添加会高亮闪烁提示，标题旁 **ⓘ** 有说明）。
