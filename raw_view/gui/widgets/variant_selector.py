@@ -138,7 +138,7 @@ class VariantSelector(QWidget):
         frame.setObjectName("subcard")
         frame.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
         layout.addLayout(self._title_row(title, help_text))
 
@@ -157,7 +157,7 @@ class VariantSelector(QWidget):
         frame.setObjectName("subcard")
         frame.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
         layout.addLayout(self._title_row(
             "Sizes",

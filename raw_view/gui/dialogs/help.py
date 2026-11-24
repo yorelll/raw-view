@@ -40,7 +40,7 @@ class KeyboardShortcutsDialog(QDialog):
         layout.setSpacing(10)
 
         intro = QLabel("Supported keyboard shortcuts:")
-        intro.setStyleSheet("font-weight: 600;")
+        intro.setObjectName("groupTitle")
         layout.addWidget(intro)
 
         content = QWidget()

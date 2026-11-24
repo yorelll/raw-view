@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QEvent, QSignalBlocker, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSignalBlocker, QSize, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAction,
     QActionGroup,

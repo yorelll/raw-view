@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
@@ -198,30 +197,12 @@ class FourCCDialog(QDialog):
         self._edit_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
 
-        # Explicit button styling: visible border in both light and dark mode.
-        # Disabled state uses a subtle dashed border + light colour so the
-        # button visually recedes instead of looking "greyed‑out but clickable".
         # Add Custom is the primary action (solid blue); Edit/Delete are
-        # secondary (outlined).
-        self._add_btn.setStyleSheet(
-            "QPushButton {"
-            "  background: palette(highlight); color: palette(highlighted-text);"
-            "  border: none; border-radius: 6px; padding: 6px 16px;"
-            "}"
-            "QPushButton:hover { background: palette(dark); }"
-        )
+        # secondary (outlined).  Styling comes from the shared stylesheet so
+        # both themes and disabled states stay consistent.
+        self._add_btn.setObjectName("accentButton")
         for btn in (self._edit_btn, self._delete_btn, close_btn):
-            btn.setStyleSheet(
-                "QPushButton {"
-                "  border: 1px solid palette(mid); border-radius: 6px;"
-                "  padding: 6px 16px;"
-                "}"
-                "QPushButton:hover { background: rgba(128, 128, 128, 0.15); }"
-                "QPushButton:disabled {"
-                "  background: transparent; color: palette(mid);"
-                "  border: 1px dashed palette(midlight);"
-                "}"
-            )
+            btn.setObjectName("secondaryButton")
 
         btn_row.addWidget(self._add_btn)
         btn_row.addWidget(self._edit_btn)

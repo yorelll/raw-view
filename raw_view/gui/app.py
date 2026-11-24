@@ -28,7 +28,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -242,6 +241,54 @@ _BAYER_LAYOUTS: dict[str, tuple[str, str, str, str]] = {
 }
 
 
+def _paint_bayer_cells(
+    painter: QPainter,
+    width: int,
+    height: int,
+    tokens: dict[str, str],
+    pattern: str,
+    gap: int = 0,
+    radius: int = 0,
+) -> None:
+    """Paint the 2x2 Bayer mosaic shared by the chip and the empty-state mark."""
+    cells = _BAYER_LAYOUTS.get(pattern, _BAYER_LAYOUTS["RGGB"])
+    cell_w = max(1, (width - gap) // 2)
+    cell_h = max(1, (height - gap) // 2)
+    rects = (
+        (0, 0, cell_w, cell_h),
+        (cell_w + gap, 0, cell_w, cell_h),
+        (0, cell_h + gap, cell_w, cell_h),
+        (cell_w + gap, cell_h + gap, cell_w, cell_h),
+    )
+    for key, (x, y, w, h) in zip(cells, rects):
+        color = QColor(tokens[f"bayer_{key}"])
+        if radius:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(x, y, w, h, radius, radius)
+        else:
+            painter.fillRect(x, y, w, h, color)
+
+
+def _bayer_mark_pixmap(size: int, theme: str) -> QPixmap:
+    """Render the 44px empty-state Bayer mark with explicit theme tokens."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    _paint_bayer_cells(
+        painter,
+        size,
+        size,
+        THEME_PALETTES[theme],
+        "RGGB",
+        gap=2,
+        radius=2,
+    )
+    painter.end()
+    return pixmap
+
+
 class _BayerSwatch(QWidget):
     """Tiny 2x2 colour chip showing the active Bayer pattern."""
 
@@ -261,17 +308,9 @@ class _BayerSwatch(QWidget):
         palette = self.palette()
         dark = palette.color(palette.Base).lightnessF() < 0.5
         tokens = THEME_PALETTES["dark" if dark else "light"]
-        cells = _BAYER_LAYOUTS.get(self._pattern, _BAYER_LAYOUTS["RGGB"])
-        half_w = self.width() // 2
-        half_h = self.height() // 2
-        rects = (
-            (0, 0, half_w, half_h),
-            (half_w, 0, half_w, half_h),
-            (0, half_h, half_w, half_h),
-            (half_w, half_h, half_w, half_h),
+        _paint_bayer_cells(
+            painter, self.width(), self.height(), tokens, self._pattern
         )
-        for key, (x, y, w, h) in zip(cells, rects):
-            painter.fillRect(x, y, w, h, QColor(tokens[f"bayer_{key}"]))
 
 
 class ReadoutStrip(QWidget):
@@ -293,7 +332,8 @@ class ReadoutStrip(QWidget):
         self._detail.setObjectName("readoutDetail")
         self._frame = QLabel("")
         self._frame.setObjectName("readoutFrame")
-        self._frame.setProperty("mono", True)
+        for label in (self._format, self._detail, self._frame):
+            label.setProperty("mono", True)
         self._frame.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         layout.addWidget(self._swatch, 0, Qt.AlignVCenter)
@@ -709,7 +749,7 @@ class MainWindow(QMainWindow):
         self.panel.set_enabled(False)
 
     def _render_empty_icon(self) -> None:
-        """Re-render the empty-state glyph with the active theme token."""
+        """Re-render the empty-state 2x2 Bayer mark for the active theme."""
         label = self.__dict__.get("_empty_icon_label")
         if label is None:
             return
@@ -717,14 +757,13 @@ class MainWindow(QMainWindow):
         if theme not in ("light", "dark"):
             palette = self.palette()
             theme = "dark" if palette.color(palette.Base).lightnessF() < 0.5 else "light"
-        color = THEME_PALETTES[theme]["text_secondary"]
+        label.setAccessibleName("Bayer colour mark")
+        label.setAccessibleDescription("2 by 2 red green green blue Bayer mosaic")
         try:
-            import qtawesome as qta
-
-            label.setPixmap(qta.icon("fa5s.image", color=color).pixmap(72, 72))
+            label.setPixmap(_bayer_mark_pixmap(44, theme))
         except Exception:
             # Never use an emoji as a fallback (project-wide UI rule).
-            label.setText("Image")
+            label.setText("Bayer")
 
     def _build_empty_state(self) -> QWidget:
         """Placeholder shown in the viewer area before any file is opened."""
@@ -736,6 +775,7 @@ class MainWindow(QMainWindow):
 
         icon_label = QLabel()
         icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFixedSize(44, 44)
         self._empty_icon_label = icon_label
         self._render_empty_icon()
 
@@ -3031,11 +3071,11 @@ class MainWindow(QMainWindow):
         frame_size = self._get_frame_size(item.options)
         if frame_size > 0:
             self.image_status.setText(
-                f"Image: {item.options.width}x{item.options.height} ({frame_size:,} bytes) | Format: {item.options.format_name}"
+                f"Image: {item.options.width}×{item.options.height} ({frame_size:,} bytes) | Format: {item.options.format_name}"
             )
         else:
             self.image_status.setText(
-                f"Image: {item.options.width}x{item.options.height} | Format: {item.options.format_name}"
+                f"Image: {item.options.width}×{item.options.height} | Format: {item.options.format_name}"
             )
         self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
         if item.total_frames > 1:
@@ -3863,10 +3903,10 @@ class MainWindow(QMainWindow):
             frame_size = self._get_frame_size(item.options)
             if frame_size > 0:
                 self.image_status.setText(
-                    f"Image: {width}x{height} ({frame_size:,} bytes) | Format: {format_name}"
+                    f"Image: {width}×{height} ({frame_size:,} bytes) | Format: {format_name}"
                 )
             else:
-                self.image_status.setText(f"Image: {width}x{height} | Format: {format_name}")
+                self.image_status.setText(f"Image: {width}×{height} | Format: {format_name}")
             self._update_frame_display(item)
         self._refresh_forget_action()
         current = self.__dict__.get("_apply_all_current")

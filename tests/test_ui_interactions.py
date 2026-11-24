@@ -1867,7 +1867,7 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
             expected = expected_frame_size_raw("RAW8", 4, 4)
             self.assertEqual(
                 statuses["image"],
-                f"Image: 4x4 ({expected:,} bytes) | Format: RAW8",
+                f"Image: 4×4 ({expected:,} bytes) | Format: RAW8",
             )
             self.assertNotIn("/frame", statuses["image"])
             self.assertEqual(statuses["file"], f"File: {os.path.basename(path)} (19 bytes)")
@@ -1939,7 +1939,7 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
         self.assertTrue(seen, "命中路径应写状态栏")
         status = seen[-1]
         expected = expected_frame_size_raw("RAW8", 4, 4)
-        self.assertIn("4x4", status)
+        self.assertIn("4×4", status)
         self.assertIn(f"{expected:,} bytes", status)
         # 旧 bug：显示的会是 2x2 的帧大小。括号内的数字必须精确等于
         # 4x4 的帧大小，而不是 `4`（stale）这种会被子串误判的裸数字。

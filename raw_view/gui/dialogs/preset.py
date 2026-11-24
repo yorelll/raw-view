@@ -74,7 +74,7 @@ class PresetManagerDialog(QDialog):
 
         # ── Left side: search + list + Add/Delete; everything else on right-click ──
         header = QLabel("Presets")
-        header.setStyleSheet("font-weight: bold;")
+        header.setObjectName("groupTitle")
 
         # Name search covers every preset type.  The simplified category filter
         # only constrains browsing when search is empty, matching the main
@@ -185,7 +185,7 @@ class PresetManagerDialog(QDialog):
         form.addRow("Offset", self.offset_spin)
 
         edit_header = QLabel("Edit selected preset")
-        edit_header.setStyleSheet("font-weight: bold;")
+        edit_header.setObjectName("groupTitle")
         right = QVBoxLayout()
         right.addWidget(edit_header)
         right.addLayout(form)

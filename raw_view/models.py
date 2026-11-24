@@ -1531,6 +1531,14 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: none;
             border-bottom: 1px solid {p["border_color"]};
         }}
+        QToolBar QToolButton {{
+            background: transparent;
+            border: none;
+            border-radius: 6px;
+        }}
+        QToolBar QToolButton:hover {{
+            background: {p["accent_light"]};
+        }}
         QStatusBar {{
             background: {p["panel_bg"]};
             color: {p["text_secondary"]};
@@ -1563,6 +1571,11 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QSlider::handle:horizontal:hover {{
             border: 2px solid {p["button_hover_bg"]};
+        }}
+        /* qt-material base uppercases these selectors; keep real case for tab
+           file names, Help group titles and table headers. */
+        QTabBar, QGroupBox, QDockWidget, QToolBox::tab, QHeaderView::section {{
+            text-transform: none;
         }}
         QTabWidget::pane {{
             border: 1px solid {p["border_color"]};
@@ -1621,6 +1634,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QPushButton#secondaryButton:hover {{
             background: {p["accent_light"]};
+            color: {p["button_hover_bg"]};
+        }}
+        QPushButton#secondaryButton:disabled {{
+            background: transparent;
+            color: {p["text_secondary"]};
+            border: 1px dashed {p["border_color"]};
         }}
         QPushButton#textButton {{
             background: transparent;
@@ -1717,10 +1736,6 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: 1px solid {p["border_color"]};
             border-radius: 6px;
             color: {p["text_secondary"]};
-        }}
-        QMenuBar {{
-            background: {p["panel_bg"]};
-            color: {p["text_color"]};
         }}
         QMenuBar::item {{
             padding: 6px 12px;

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtGui import QBrush, QColor, QImage, QPixmap
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,14 +37,9 @@ from PyQt5.QtWidgets import (
 from raw_view.converter import (
     image_file_to_raw,
     image_file_to_yuv,
-    load_bgr_image,
     resolve_output_path_collision,
 )
-from raw_view.formats import (
-    expected_frame_size_raw,
-    expected_frame_size_yuv,
-    require_decode_size,
-)
+from raw_view.formats import require_decode_size
 from raw_view.models import (
     AppSettings,
     BAYER_PATTERNS,
