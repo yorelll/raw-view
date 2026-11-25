@@ -1385,6 +1385,29 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QWidget#centralRoot, DropCentralWidget {{
             background: {p["main_bg"]};
         }}
+        /*
+         * H-2 / H-8: the window surface (dialogs and the viewer stack) is the
+         * same main_bg as the 16px root margin.  qt-material renders every
+         * QDialog with secondaryDarkColor, which pushed the outlined-button
+         * accent text to 4.15:1 in the light theme; main_bg brings it back to
+         * 4.58:1.  The empty-state page and the tab strip are transparent so
+         * their container's main_bg shows through instead of a second grey.
+         */
+        QDialog, QStackedWidget, QTabWidget {{
+            background: {p["main_bg"]};
+        }}
+        QWidget#emptyState, QTabBar {{
+            background: transparent;
+        }}
+        /*
+         * The image canvas (QGraphicsView) is the largest part of the "tab
+         * empty area": when the fitted image is letterboxed, the band above
+         * and below it is the view's own Base background, still qt-material
+         * grey.  Drive it from main_bg so the viewer surface is continuous.
+         */
+        QGraphicsView {{
+            background: {p["main_bg"]};
+        }}
         QWidget#controlPanel {{
             background: {p["panel_bg"]};
             border: 1px solid {p["border_color"]};
@@ -1574,6 +1597,33 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["panel_bg"]};
             border: 1px solid {p["border_color"]};
             border-radius: 8px;
+        }}
+        /*
+         * M-1: list/table surfaces join the token system.  Body = panel_bg
+         * (same as an input/card), zebra rows and the header = main_bg, and
+         * the selected row uses accent_light + text_color.  Before this the
+         * qt-material greys left four different blue-greys in one dialog and
+         * the header was brighter than the rows it labels.
+         */
+        QListWidget, QTableWidget {{
+            background: {p["panel_bg"]};
+            alternate-background-color: {p["main_bg"]};
+            border: 1px solid {p["border_color"]};
+            border-radius: 6px;
+        }}
+        QListWidget::item, QTableWidget::item {{
+            padding: 4px 8px;
+        }}
+        QListWidget::item:selected, QTableWidget::item:selected {{
+            background: {p["accent_light"]};
+            color: {p["text_color"]};
+        }}
+        QHeaderView::section {{
+            background: {p["main_bg"]};
+            color: {p["text_secondary"]};
+            border: none;
+            border-bottom: 1px solid {p["border_color"]};
+            padding: 6px 8px;
         }}
         QSlider {{
             background: transparent;

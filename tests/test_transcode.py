@@ -1400,12 +1400,12 @@ class DialogHintThemeTests(_DialogTestBase):
                         f"{theme}/{font_size}: {hint.objectName()} on real "
                         f"background {background} = {ratio:.2f}:1 低于 WCAG AA",
                     )
-                # The empty-table hint sits directly on the dialog window, not
-                # on a card; assert its real background is not panel_bg.
+                # 0.6.1 M-1: the empty-table hint is a child of the table
+                # viewport, so its real background is now the table body token.
                 empty_bg = _rendered_background(dialog._empty_hint, dialog)
-                self.assertNotEqual(
+                self.assertEqual(
                     empty_bg, THEME_PALETTES[theme]["panel_bg"].lower(),
-                    f"{theme}/{font_size}: 空表提示背景不是 panel_bg",
+                    f"{theme}/{font_size}: 空表提示必须落在表格体表面 panel_bg 上",
                 )
 
 
