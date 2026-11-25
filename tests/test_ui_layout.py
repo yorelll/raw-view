@@ -39,7 +39,11 @@ from PyQt5.QtWidgets import (  # noqa: E402
 
 from raw_view.gui.app import MainWindow  # noqa: E402
 from raw_view.gui.panels import ControlPanel  # noqa: E402
-from raw_view.models import AppSettings, DecodeOptions  # noqa: E402
+from raw_view.models import (  # noqa: E402
+    AppSettings,
+    DecodeOptions,
+    SensorPreset,
+)
 
 APP = QApplication.instance() or QApplication([])
 
@@ -241,6 +245,68 @@ class StateStatusElisionTests(_LayoutFixture):
         self.assertEqual(label.elided_text(), long_text)
         pixmap = label.grab()
         self.assertFalse(pixmap.isNull())
+
+
+class PresetNameElisionTests(_LayoutFixture):
+    """V-2 follow-up: long preset names elide with an ellipsis + full tooltip."""
+
+    LONG_27 = "IMX477 12bit 4000x3000 msb"
+    LONG_47 = "IMX477 12bit 4000x3000 msb with an extremely long suffix"
+    SHORT = "Short"
+
+    def _select(self, name: str):
+        panel = self._panel()
+        panel.set_presets([SensorPreset(name=name)], current=name)
+        _pump()
+        return panel.preset_combo
+
+    def test_long_names_elide_and_tooltip_keeps_full_name(self):
+        self._apply("light", 24)
+        for name in (self.LONG_27, self.LONG_47):
+            with self.subTest(name=name):
+                combo = self._select(name)
+                self.assertEqual(combo.currentText(), name)
+                self.assertEqual(combo.toolTip(), name)
+                metrics = QFontMetrics(combo.font())
+                rect = combo._text_rect()
+                self.assertGreater(
+                    metrics.horizontalAdvance(name), rect.width(),
+                    "test setup: the name must overflow the capped selector",
+                )
+                shown = combo.display_text()
+                self.assertNotEqual(shown, name)
+                self.assertLess(len(shown), len(name))
+                self.assertLessEqual(
+                    metrics.horizontalAdvance(shown), rect.width() + 1,
+                    f"elided text must fit the field: {shown!r}",
+                )
+                # The real fonts render "…"; glyph-less fallback fonts measure
+                # it as zero width and Qt then truncates without the glyph.
+                if metrics.horizontalAdvance("…") > 0:
+                    self.assertTrue(shown.endswith("…"), shown)
+
+                calls: list[int] = []
+                original = combo.display_text
+                combo.display_text = lambda: calls.append(1) or original()
+                combo.repaint()
+                _pump(2)
+                self.assertTrue(calls, "paintEvent must use display_text()")
+                del combo.display_text
+
+    def test_short_name_is_not_elided(self):
+        self._apply("light", 24)
+        combo = self._select(self.SHORT)
+        self.assertEqual(combo.display_text(), self.SHORT)
+        self.assertEqual(combo.toolTip(), self.SHORT)
+
+    def test_tooltip_restored_when_selection_is_cleared(self):
+        self._apply("light", 24)
+        combo = self._select(self.LONG_27)
+        self.assertEqual(combo.toolTip(), self.LONG_27)
+        self._panel().reset_preset_selection()
+        _pump()
+        self.assertEqual(combo.currentIndex(), -1)
+        self.assertEqual(combo.toolTip(), ControlPanel._PRESET_TOOLTIP)
 
 
 class ReadoutStripHeightTests(_LayoutFixture):

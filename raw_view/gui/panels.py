@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QSignalBlocker, QSize, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QRect, QSignalBlocker, QSize, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QAction,
@@ -19,6 +19,8 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionComboBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -167,6 +169,16 @@ class PresetComboBox(_SizedCombo):
     popupClosed = pyqtSignal()
     focusLost = pyqtSignal()
 
+    def __init__(self, parent: QWidget | None = None, theme: str = "dark") -> None:
+        super().__init__(parent)
+        # Explicit theme for painting the selected item (the palette Text role
+        # is qt-material's muted colour, not our text_color token).
+        self._theme = normalize_ui_theme(theme)
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = normalize_ui_theme(theme)
+        self.update()
+
     @property
     def popup_open(self) -> bool:
         view = self.view()
@@ -191,9 +203,91 @@ class PresetComboBox(_SizedCombo):
             int(text.blue() * keep + base.blue() * blend),
         )
 
+    def _text_rect(self) -> QRect:
+        """Exact text area the style paints into (padding + drop-down).
+
+        Using the style's ``SE_ComboBoxEditField`` keeps this in sync with the
+        QSS padding/drop-down width; a hand-made rect was 10 px wider than the
+        real one and let a 2 px clip slip through unseen.
+        """
+        option = QStyleOptionComboBox()
+        option.initFrom(self)
+        option.rect = self.rect()
+        option.editable = False
+        option.currentText = self.currentText()
+        option.currentIcon = self.itemIcon(self.currentIndex())
+        option.iconSize = self.iconSize()
+        option.frame = self.hasFrame()
+        rect = self.style().subControlRect(
+            QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, self
+        )
+        if rect.width() <= 0:
+            rect = self.rect().adjusted(8, 2, -24, -2)
+        return rect
+
+    def _elide(self, text: str, width: int) -> str:
+        """Tail-elide *text* to *width*, guaranteeing the ellipsis marker.
+
+        Qt's ``elidedText`` drops the ellipsis on glyph-less fallback fonts
+        (measured CI/offscreen environment), which is exactly the silent
+        truncation this fix must remove.  When the marker is measurable the
+        prefix is trimmed until ``prefix + "…"`` fits, so the box always shows
+        an ellipsis instead of an arbitrary cut.
+        """
+        metrics = QFontMetrics(self.font())
+        elided = metrics.elidedText(text, Qt.ElideRight, width)
+        if elided == text or elided.endswith("…"):
+            return elided
+        marker = "…"
+        marker_width = metrics.horizontalAdvance(marker)
+        if marker_width <= 0 or marker_width >= width:
+            return elided
+        low, high = 0, len(text)
+        result = marker
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = text[:mid] + marker
+            if metrics.horizontalAdvance(candidate) <= width:
+                result = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+        return result
+
+    def display_text(self) -> str:
+        """Text the paint path shows for the current item (elided if needed).
+
+        User preset names are unbounded; the selector is width-capped so a long
+        name must show a tail ellipsis instead of being silently cut off (V-2).
+        """
+        if self.currentIndex() < 0:
+            return ""
+        text = self.currentText()
+        metrics = QFontMetrics(self.font())
+        rect = self._text_rect()
+        if rect.width() <= 0 or metrics.horizontalAdvance(text) <= rect.width():
+            return text
+        return self._elide(text, rect.width())
+
     def paintEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
         super().paintEvent(event)
         if self.currentIndex() >= 0:
+            shown = self.display_text()
+            text = self.currentText()
+            if shown and shown != text:
+                from PyQt5.QtGui import QColor, QPainter
+
+                tokens = THEME_PALETTES[self._theme]
+                painter = QPainter(self)
+                try:
+                    rect = self._text_rect()
+                    painter.fillRect(rect, QColor(tokens["input_bg"]))
+                    painter.setPen(QColor(tokens["text_color"]))
+                    painter.drawText(
+                        rect, Qt.AlignLeft | Qt.AlignVCenter, shown
+                    )
+                finally:
+                    painter.end()
             return
         hint = self.placeholderText()
         if not hint:
@@ -254,6 +348,11 @@ class ControlPanel(QWidget):
     # Empty-state hint painted inside the combo frame (there is no placeholder
     # row in the model: the popup lists real presets only).
     _PRESET_PLACEHOLDER = "Select a preset"
+    #: Tooltip shown when no preset is selected (restored after a reset).
+    _PRESET_TOOLTIP = (
+        "Select a saved sensor preset. Use the filter button to restrict the "
+        "list by type."
+    )
     #: Decode fields whose text must stay readable at every font size (V-2).
     _FIELD_NAMES = (
         "type_combo", "format_combo", "bit_depth_combo", "align_combo",
@@ -350,14 +449,15 @@ class ControlPanel(QWidget):
         # A recent-use re-order is deferred out of the selection call stack; it
         # runs only after the combo popup is closed or focus leaves the combo.
         self._preset_reorder_pending = False
-        self.preset_combo = PresetComboBox()
+        self.preset_combo = PresetComboBox(theme=self._theme)
         self.preset_combo.setObjectName("presetSelector")
         self.preset_combo.setEditable(False)
         self.preset_combo.setInsertPolicy(QComboBox.NoInsert)
         self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
-        self.preset_combo.setToolTip(
-            "Select a saved sensor preset. Use the filter button to restrict the list by type."
-        )
+        self.preset_combo.setToolTip(self._PRESET_TOOLTIP)
+        # The selector is width-capped, so a long preset name elides in the
+        # box; the tooltip is the only way to read the full name (r3).
+        self.preset_combo.currentTextChanged.connect(self._sync_preset_tooltip)
         self.preset_combo.setAccessibleName("Sensor preset")
         self.preset_combo.setAccessibleDescription(
             "Choose a saved sensor preset; selecting one fills the decode fields without applying."
@@ -1237,6 +1337,14 @@ class ControlPanel(QWidget):
         # Preset names are user data: a longer model entry needs a wider
         # selector (V-2), so re-derive the widths after every rebuild.
         self._schedule_panel_metrics()
+        self._sync_preset_tooltip()
+
+    def _sync_preset_tooltip(self, *_args) -> None:
+        """Expose the full selected preset name (elided in the capped box)."""
+        if self.preset_combo.currentIndex() >= 0:
+            self.preset_combo.setToolTip(self.preset_combo.currentText())
+        else:
+            self.preset_combo.setToolTip(self._PRESET_TOOLTIP)
 
     def _update_preset_filter_button(self) -> None:
         """Expose the active browse category through tooltip/accessibility text."""
@@ -1318,6 +1426,7 @@ class ControlPanel(QWidget):
         the default light ``Base`` colour.
         """
         self._theme = normalize_ui_theme(theme)
+        self.preset_combo.set_theme(self._theme)
         self.preset_filter_btn.setIcon(
             _qta_icon("fa5s.filter", self._icon_color())
         )
@@ -1426,6 +1535,7 @@ class ControlPanel(QWidget):
             self.preset_combo.setCurrentIndex(-1)
             self.preset_combo.setPlaceholderText(self._PRESET_PLACEHOLDER)
         self.preset_combo.update()
+        self._sync_preset_tooltip()
 
     def set_zoom_percent(self, percent: int) -> None:
         """Update zoom slider and spin box without emitting zoomChanged."""
