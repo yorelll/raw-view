@@ -530,6 +530,70 @@ class LegacyPresetCompatibilityTests(unittest.TestCase):
             destroy_widget(dlg)
 
 
+class PresetManagerConditionalRowsTests(unittest.TestCase):
+    """U-6: the editor shows only parameters that apply to the preset type."""
+
+    def _visible(self, dlg):
+        form = dlg._cond_form
+        return [
+            name
+            for name, _label in dlg._cond_row_specs
+            if form.getWidgetPosition(getattr(dlg, name))[0] >= 0
+        ]
+
+    def test_rows_mirror_panel_type_rules(self):
+        cases = (
+            ("RAW", "RAW12", "Bayer Color",
+             ["align_combo", "endian_combo", "preview_combo", "bayer_combo"]),
+            ("RAW", "RAW12", "Grayscale",
+             ["align_combo", "endian_combo", "preview_combo"]),
+            ("YUV", "YOnly10", "Bayer Color",
+             ["align_combo", "endian_combo"]),
+            ("YUV", "YUYV", "Bayer Color", []),
+            ("Standard Image", "N/A", "Bayer Color", []),
+        )
+        for image_type, format_name, preview, expected in cases:
+            with self.subTest(image_type=image_type, format_name=format_name):
+                settings = _PresetSettings([
+                    SensorPreset(
+                        name="conditional",
+                        image_type=image_type,
+                        format_name=format_name,
+                        preview_mode=preview,
+                    )
+                ])
+                dlg = PresetManagerDialog(settings)
+                try:
+                    self.assertEqual(self._visible(dlg), expected)
+                    # Removed rows leave no label or usable control behind.
+                    for name, _label in dlg._cond_row_specs:
+                        field = getattr(dlg, name)
+                        if name in expected:
+                            continue
+                        self.assertTrue(field.isHidden())
+                        self.assertFalse(field.isEnabled())
+                        self.assertIsNone(dlg._cond_form.labelForField(field))
+                finally:
+                    destroy_widget(dlg)
+
+    def test_preview_change_refreshes_bayer_row(self):
+        settings = _PresetSettings([
+            SensorPreset(
+                name="raw", image_type="RAW", format_name="RAW12",
+                preview_mode="Bayer Color",
+            )
+        ])
+        dlg = PresetManagerDialog(settings)
+        try:
+            self.assertIn("bayer_combo", self._visible(dlg))
+            dlg.preview_combo.setCurrentText("Grayscale")
+            self.assertNotIn("bayer_combo", self._visible(dlg))
+            dlg.preview_combo.setCurrentText("Bayer Color")
+            self.assertIn("bayer_combo", self._visible(dlg))
+        finally:
+            destroy_widget(dlg)
+
+
 class PresetManagerFormatFilterTests(unittest.TestCase):
     def setUp(self):
         self.settings = _PresetSettings([

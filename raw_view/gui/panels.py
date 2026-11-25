@@ -319,6 +319,7 @@ class ControlPanel(QWidget):
         self.refresh_pin_theme()
 
         preset_select_row = QWidget()
+        preset_select_row.setObjectName("presetRow")
         preset_select_layout = QHBoxLayout(preset_select_row)
         preset_select_layout.setContentsMargins(0, 0, 0, 0)
         preset_select_layout.setSpacing(4)
@@ -365,6 +366,7 @@ class ControlPanel(QWidget):
 
         # ── Zoom controls ──
         zoom_row = QWidget()
+        zoom_row.setObjectName("zoomRow")
         zoom_layout = QHBoxLayout(zoom_row)
         zoom_layout.setContentsMargins(0, 0, 0, 0)
         self.zoom_slider = QSlider()
@@ -388,6 +390,7 @@ class ControlPanel(QWidget):
 
         # ── Size row (Width x Height on one 4px-grid row) ─────────────
         size_row = QWidget()
+        size_row.setObjectName("sizeRow")
         size_layout = QHBoxLayout(size_row)
         size_layout.setContentsMargins(0, 0, 0, 0)
         size_layout.setSpacing(6)

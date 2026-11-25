@@ -242,6 +242,7 @@ class BatchConvertDialog(QDialog):
         output_dir_row.addWidget(self.output_dir_edit, 1)
         output_dir_row.addWidget(self._output_dir_browse_btn, 0)
         self._output_dir_widget = QWidget()
+        self._output_dir_widget.setObjectName("outputDirRow")
         self._output_dir_widget.setLayout(output_dir_row)
         # When the checkbox is on, keep an explicit (non-empty) statement that
         # outputs go next to each input instead of hiding the destination

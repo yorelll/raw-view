@@ -181,6 +181,24 @@ class PresetManagerDialog(QDialog):
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
         form.addRow("Offset", self.offset_spin)
+        self._cond_form = form
+        self._cond_row_specs = [
+            ("align_combo", "Alignment"),
+            ("endian_combo", "Endianness"),
+            ("preview_combo", "RAW preview"),
+            ("bayer_combo", "Bayer pattern"),
+        ]
+        self._cond_row_labels = {}
+        for name, _label in self._cond_row_specs:
+            label_widget = form.labelForField(getattr(self, name))
+            if label_widget is not None:
+                self._cond_row_labels[name] = label_widget
+
+        # The conditional rows must follow the same RAW / YOnly / ordinary-YUV
+        # rules as the decode panel.  These signals cover Type, Format and RAW
+        # preview changes; row selection refreshes them after _load_form().
+        self.format_combo.currentTextChanged.connect(self._on_conditional_changed)
+        self.preview_combo.currentTextChanged.connect(self._on_conditional_changed)
 
         edit_header = QLabel("Edit selected preset")
         edit_header.setObjectName("groupTitle")
@@ -248,6 +266,100 @@ class PresetManagerDialog(QDialog):
         # Match what ControlPanel exposes so saved presets remain compatible.
         self._populate_format_combo(image_type)
         self._on_field_changed()
+        if not self._loading:
+            self._sync_conditional_rows()
+
+    def _on_conditional_changed(self, *_args) -> None:
+        if not self._loading:
+            self._sync_conditional_rows()
+
+    def _sync_conditional_rows(self) -> None:
+        """Show only the parameters that apply to the selected preset type.
+
+        Mirrors ControlPanel._sync_type_enabled():
+        RAW -> Alignment + Endianness + RAW preview (+ Bayer for colour);
+        YUV starting with YOnly -> Alignment + Endianness;
+        everything else -> none of the RAW-only rows.
+
+        Rows are taken out with ``takeRow`` rather than hidden with
+        ``setVisible(False)``: this form has no spacer above Width, so hidden
+        rows would otherwise leave visible gaps between Format and Width.
+        """
+        image_type = normalize_preset_image_type(self.type_combo.currentText())
+        format_name = normalize_preset_format_name(self.format_combo.currentText())
+        if image_type == "RAW":
+            align = endian = preview = True
+            bayer = self.preview_combo.currentText().startswith("Bayer")
+        elif image_type == "YUV" and format_name.startswith("YOnly"):
+            align = endian = True
+            preview = bayer = False
+        else:
+            align = endian = preview = bayer = False
+        desired = {
+            "align_combo": align,
+            "endian_combo": endian,
+            "preview_combo": preview,
+            "bayer_combo": bayer,
+        }
+
+        form = self._cond_form
+        enabled = self._current_index >= 0
+
+        def _in_form(field) -> bool:
+            return form.getWidgetPosition(field)[0] >= 0
+
+        needs_rebuild = False
+        for name, _label in self._cond_row_specs:
+            field = getattr(self, name)
+            want_visible = desired[name]
+            in_form = _in_form(field)
+            if want_visible:
+                if not in_form or field.isEnabled() != enabled:
+                    needs_rebuild = True
+                    break
+            elif in_form or field.isEnabled():
+                needs_rebuild = True
+                break
+        if not needs_rebuild:
+            return
+
+        labels = {}
+        fields = {}
+        for name, _label in self._cond_row_specs:
+            field = getattr(self, name)
+            fields[name] = field
+            pos = form.getWidgetPosition(field)
+            if pos[0] >= 0:
+                taken = form.takeRow(pos[0])
+                label_widget = (
+                    taken.labelItem.widget() if taken.labelItem is not None else None
+                )
+                if label_widget is not None:
+                    labels[name] = label_widget
+            cached_label = self._cond_row_labels.get(name)
+            if cached_label is not None:
+                cached_label.setVisible(False)
+            field.setVisible(False)
+
+        anchor_pos = form.getWidgetPosition(self.width_spin)
+        insert_at = anchor_pos[0] if anchor_pos[0] >= 0 else form.rowCount()
+        for name, label_text in self._cond_row_specs:
+            field = fields[name]
+            visible = desired[name]
+            field.setEnabled(visible and enabled)
+            if not visible:
+                continue
+            label_widget = self._cond_row_labels.get(name) or labels.get(name)
+            if label_widget is not None:
+                form.insertRow(insert_at, label_widget, field)
+            else:
+                form.insertRow(insert_at, label_text, field)
+            new_label = form.labelForField(field)
+            if new_label is not None:
+                new_label.setVisible(True)
+                new_label.setEnabled(True)
+            field.setVisible(True)
+            insert_at += 1
 
     # ── List management ─────────────────────────────────────────────────
 
@@ -406,6 +518,7 @@ class PresetManagerDialog(QDialog):
             self.offset_spin.setValue(preset.offset)
         finally:
             self._loading = False
+        self._sync_conditional_rows()
 
     def _on_field_changed(self, *_) -> None:
         if self._loading or self._current_index < 0:

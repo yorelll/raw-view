@@ -1415,14 +1415,14 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QLabel[role="formLabel"] {{
             color: {p["text_secondary"]};
-            font-size: 12px;
+            font-size: {max(font_size - 1, 9)}px;
         }}
         QLabel[role="hint"] {{
             color: {p["hint_text"]};
         }}
         QLabel#sectionLabel {{
             color: {p["text_color"]};
-            font-size: 11px;
+            font-size: {max(font_size - 2, 9)}px;
             font-weight: 500;
             background: transparent;
         }}
@@ -1441,7 +1441,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QLabel#groupTitle {{
             color: {p["text_color"]};
-            font-size: 12px;
+            font-size: {max(font_size - 1, 9)}px;
             font-weight: 500;
         }}
         QLabel#monoLabel, QLabel[mono="true"], QSpinBox[mono="true"] {{
@@ -1535,12 +1535,25 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: none;
             border-bottom: 1px solid {p["border_color"]};
         }}
-        QToolBar QToolButton {{
+        QToolBar QToolButton,
+        QToolBar QToolButton:hover,
+        QToolBar QToolButton:pressed,
+        QToolBar QToolButton:checked {{
             background: transparent;
-            border: none;
+            border: 0;
+            border-left: 0;
+            border-right: 0;
+            margin: 0;
+            padding: 0;
             border-radius: 6px;
         }}
         QToolBar QToolButton:hover {{
+            background: {p["accent_light"]};
+        }}
+        QToolBar QToolButton:pressed {{
+            background: {p["accent_light"]};
+        }}
+        QToolBar QToolButton:checked {{
             background: {p["accent_light"]};
         }}
         QStatusBar {{
@@ -1551,6 +1564,19 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QStatusBar::item {{
             border: none;
+        }}
+        QWidget#presetRow, QWidget#sizeRow, QWidget#zoomRow,
+        QWidget#readoutContainer, QWidget#formRow, QWidget#outputDirRow,
+        QWidget#inputRow, QWidget#outputRow, QWidget#transparentPage {{
+            background: transparent;
+        }}
+        QTextBrowser#helpBrowser {{
+            background: {p["panel_bg"]};
+            border: 1px solid {p["border_color"]};
+            border-radius: 8px;
+        }}
+        QSlider {{
+            background: transparent;
         }}
         QSlider::groove:horizontal {{
             height: 4px;
@@ -1778,7 +1804,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QLabel#frameNavLabel {{
             color: {p["text_secondary"]};
-            font-size: {max(font_size - 1, 10)}px;
+            font-size: {font_size}px;
         }}
         QWidget#frameNavBar {{
             background: transparent;
@@ -1789,7 +1815,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border-radius: 6px;
             font-weight: bold;
             color: {p["nav_button_text"]};
-            font-size: 14px;
+            font-size: {max(font_size + 1, 10)}px;
         }}
         QWidget#frameNavBar QPushButton:hover {{
             background: {p["nav_button_hover_bg"]};
@@ -1811,7 +1837,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QWidget#frameNavBar QLabel {{
             color: {p["text_secondary"]};
-            font-size: 13px;
+            font-size: {font_size}px;
         }}
         QLabel#hintLabel {{
             color: {p["hint_text"]};

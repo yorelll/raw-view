@@ -372,6 +372,7 @@ class ConvertDialog(QDialog):
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(btn_in, 0)
         input_row_w = QWidget()
+        input_row_w.setObjectName("inputRow")
         input_row_w.setLayout(input_row)
 
         output_row = QHBoxLayout()
@@ -380,6 +381,7 @@ class ConvertDialog(QDialog):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(btn_out, 0)
         output_row_w = QWidget()
+        output_row_w.setObjectName("outputRow")
         output_row_w.setLayout(output_row)
 
         # ── Layout construction ───────────────────────────────────────
@@ -487,6 +489,7 @@ class ConvertDialog(QDialog):
         # past the screen. The action button lives outside the scroll area and
         # stays pinned at the bottom of this page.
         content = QWidget()
+        content.setObjectName("transparentPage")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
@@ -501,6 +504,7 @@ class ConvertDialog(QDialog):
         scroll.setWidget(content)
 
         self._convert_page = QWidget()
+        self._convert_page.setObjectName("transparentPage")
         convert_page_layout = QVBoxLayout(self._convert_page)
         convert_page_layout.setContentsMargins(0, 0, 0, 0)
         convert_page_layout.addWidget(scroll, 1)

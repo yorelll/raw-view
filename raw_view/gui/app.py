@@ -250,7 +250,7 @@ def _paint_bayer_cells(
     gap: int = 0,
     radius: int = 0,
 ) -> None:
-    """Paint the 2x2 Bayer mosaic shared by the chip and the empty-state mark."""
+    """Paint the 2x2 Bayer mosaic used by the empty-state mark."""
     cells = _BAYER_LAYOUTS.get(pattern, _BAYER_LAYOUTS["RGGB"])
     cell_w = max(1, (width - gap) // 2)
     cell_h = max(1, (height - gap) // 2)
@@ -289,32 +289,8 @@ def _bayer_mark_pixmap(size: int, theme: str) -> QPixmap:
     return pixmap
 
 
-class _BayerSwatch(QWidget):
-    """Tiny 2x2 colour chip showing the active Bayer pattern."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._pattern = "RGGB"
-        self.setFixedSize(14, 14)
-        self.setAccessibleName("Bayer pattern colours")
-
-    def set_pattern(self, pattern: str) -> None:
-        if pattern != self._pattern:
-            self._pattern = pattern
-            self.update()
-
-    def paintEvent(self, event):  # noqa: N802
-        painter = QPainter(self)
-        palette = self.palette()
-        dark = palette.color(palette.Base).lightnessF() < 0.5
-        tokens = THEME_PALETTES["dark" if dark else "light"]
-        _paint_bayer_cells(
-            painter, self.width(), self.height(), tokens, self._pattern
-        )
-
-
 class ReadoutStrip(QWidget):
-    """30 px per-tab readout: Bayer chip, format, alignment, size, bytes, frame."""
+    """30 px per-tab readout: format, alignment, size, bytes, frame."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -325,7 +301,6 @@ class ReadoutStrip(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(8)
-        self._swatch = _BayerSwatch()
         self._format = QLabel("")
         self._format.setObjectName("readoutFormat")
         self._detail = QLabel("")
@@ -334,13 +309,12 @@ class ReadoutStrip(QWidget):
         self._frame.setObjectName("readoutFrame")
         for label in (self._format, self._detail, self._frame):
             label.setProperty("mono", True)
-        self._frame.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        layout.addWidget(self._swatch, 0, Qt.AlignVCenter)
         layout.addWidget(self._format, 0, Qt.AlignVCenter)
         layout.addWidget(self._detail, 0, Qt.AlignVCenter)
-        layout.addStretch(1)
         layout.addWidget(self._frame, 0, Qt.AlignVCenter)
+        layout.addStretch(1)
 
     def set_data(
         self,
@@ -353,20 +327,11 @@ class ReadoutStrip(QWidget):
         image_type = getattr(options, "image_type", "")
         format_name = getattr(options, "format_name", "") or "—"
         if image_type == "Standard Image":
-            self._swatch.setVisible(False)
             self._format.setText("Standard Image")
             self._detail.setText("")
             self._detail.setVisible(False)
         else:
             is_raw = image_type == "RAW"
-            show_bayer = is_raw and getattr(
-                options, "preview_mode", "Bayer Color"
-            ) != "Grayscale"
-            self._swatch.setVisible(show_bayer)
-            if show_bayer:
-                self._swatch.set_pattern(
-                    getattr(options, "bayer_pattern", "RGGB") or "RGGB"
-                )
             self._format.setText(format_name)
             parts = []
             # Alignment/endianness only describe multi-bit unpacking; they are
@@ -1929,6 +1894,7 @@ class MainWindow(QMainWindow):
 
         # Container: ReadoutStrip + ImageView + FrameNavBar
         container = QWidget()
+        container.setObjectName("readoutContainer")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)

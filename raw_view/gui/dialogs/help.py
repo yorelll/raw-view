@@ -18,7 +18,48 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.help_content import HELP_HTML, SHORTCUTS
-from raw_view.models import APP_VERSION
+from raw_view.models import (
+    APP_VERSION,
+    THEME_PALETTES,
+    normalize_ui_theme,
+)
+
+
+def build_help_document_css(theme: str, font_size: int) -> str:
+    """Return theme-aware document CSS for the Format Help browser."""
+    palette = THEME_PALETTES[normalize_ui_theme(theme)]
+    size = int(font_size)
+    return f"""
+        body {{
+            color: {palette["text_color"]};
+            background-color: {palette["panel_bg"]};
+            border: 1px solid {palette["border_color"]};
+            padding: 12px;
+            font-size: {size}px;
+        }}
+        h2 {{
+            color: {palette["text_color"]};
+            font-size: {size + 3}px;
+            font-weight: 600;
+        }}
+        h3 {{
+            color: {palette["text_color"]};
+            font-size: {size + 1}px;
+            font-weight: 600;
+        }}
+        p, li {{
+            color: {palette["text_color"]};
+            font-size: {size}px;
+        }}
+        code {{
+            font-family: "Cascadia Mono", "Consolas", monospace;
+            color: {palette["text_secondary"]};
+            font-size: {size}px;
+        }}
+        a {{
+            color: {palette["accent"]};
+        }}
+    """
 
 
 class KeyboardShortcutsDialog(QDialog):
@@ -44,6 +85,7 @@ class KeyboardShortcutsDialog(QDialog):
         layout.addWidget(intro)
 
         content = QWidget()
+        content.setObjectName("transparentPage")
         content_grid = QVBoxLayout(content)
         content_grid.setContentsMargins(0, 0, 0, 0)
         content_grid.setSpacing(10)
@@ -79,20 +121,39 @@ class KeyboardShortcutsDialog(QDialog):
 class HelpDialog(QDialog):
     """Read-only dialog that explains RAW/YUV format layout rules."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        theme: str | None = None,
+        font_size: int | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Format Help")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        settings = getattr(parent, "settings", None)
+        if theme is None:
+            theme = getattr(settings, "ui_theme", "light")
+        if font_size is None:
+            font_size = getattr(settings, "ui_font_size", 13)
         layout = QVBoxLayout(self)
         browser = QTextBrowser()
+        browser.setObjectName("helpBrowser")
         browser.setAccessibleName("Format help")
         browser.setAccessibleDescription("Read-only help for RAW and YUV format layout rules.")
+        browser.document().setDefaultStyleSheet(
+            build_help_document_css(theme, int(font_size))
+        )
         browser.setHtml(HELP_HTML)
-        layout.addWidget(browser)
+        layout.addWidget(browser, 1)
         close_btn = QPushButton("Close")
+        close_btn.setObjectName("secondaryButton")
         close_btn.setAccessibleName("Close format help")
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
         self.resize(760, 560)
 
 

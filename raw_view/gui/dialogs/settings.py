@@ -107,6 +107,7 @@ class SettingsDialog(QDialog):
         output_dir_row.addWidget(self.output_dir_edit, 1)
         output_dir_row.addWidget(self.output_dir_browse, 0)
         output_dir_widget = QWidget()
+        output_dir_widget.setObjectName("formRow")
         output_dir_widget.setLayout(output_dir_row)
         form.addRow("Default output folder", output_dir_widget)
         # Template field: line-edit + Reset + hover-help ⓘ icon (no wall of
@@ -118,6 +119,7 @@ class SettingsDialog(QDialog):
         template_input_row.addWidget(self.template_reset_btn, 0)
         template_input_row.addWidget(self.template_help_icon, 0)
         template_widget = QWidget()
+        template_widget.setObjectName("formRow")
         template_widget.setLayout(template_input_row)
         form.addRow("Output filename template", template_widget)
         form.addRow("Saved image DPI", self.dpi_spin)
@@ -141,6 +143,7 @@ class SettingsDialog(QDialog):
         variant_row.addWidget(variant_help, 0)
         variant_row.addStretch(1)
         variant_widget = QWidget()
+        variant_widget.setObjectName("formRow")
         variant_widget.setLayout(variant_row)
         form.addRow("Convert variants", variant_widget)
 
@@ -160,6 +163,7 @@ class SettingsDialog(QDialog):
         manage_row.addWidget(self.manage_presets_btn, 0)
         manage_row.addStretch(1)
         manage_widget = QWidget()
+        manage_widget.setObjectName("formRow")
         manage_widget.setLayout(manage_row)
         form.addRow("Sensor presets", manage_widget)
 

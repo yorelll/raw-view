@@ -177,6 +177,7 @@ class VariantConvertPage(QWidget):
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(self._input_browse_btn, 0)
         input_row_w = QWidget()
+        input_row_w.setObjectName("inputRow")
         input_row_w.setLayout(input_row)
 
         # ── Input type (Image / YUV / reserved RAW) ───────────────────
@@ -303,6 +304,7 @@ class VariantConvertPage(QWidget):
         output_dir_row.addWidget(self.output_dir_edit, 1)
         output_dir_row.addWidget(self._output_dir_browse_btn, 0)
         self._output_dir_widget = QWidget()
+        self._output_dir_widget.setObjectName("outputDirRow")
         self._output_dir_widget.setLayout(output_dir_row)
         self._output_dir_hint = QLabel()
         self._output_dir_hint.setObjectName("hintLabel")
@@ -340,6 +342,7 @@ class VariantConvertPage(QWidget):
 
         # ── Layout ────────────────────────────────────────────────────
         content = QWidget()
+        content.setObjectName("transparentPage")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
 
