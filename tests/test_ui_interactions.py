@@ -191,9 +191,6 @@ def _new_window_with_tabs():
     w.panel = SimpleNamespace(set_enabled=lambda _enabled: None)
     w._refresh_file_nav_actions = lambda: None
     w.file_status = SimpleNamespace(setText=lambda _t: None)
-    w.image_status = SimpleNamespace(setText=lambda _t: None)
-    w.zoom_status = SimpleNamespace(setText=lambda _t: None)
-    w.frame_status = SimpleNamespace(setText=lambda _t: None)
     w._set_state = lambda *_a, **_k: None
     return w
 
@@ -1815,7 +1812,6 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
 
         w = MainWindow.__new__(MainWindow)
         w.state_status = SimpleNamespace(setText=lambda _t: None)
-        w.image_status = SimpleNamespace(setText=lambda _t: None)
         w.file_status = SimpleNamespace(
             setText=lambda _t: None,
             setToolTip=lambda _t: None,
@@ -1832,7 +1828,6 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
         from raw_view.gui.app import DecodeCache
         from raw_view.gui.worker import DecodeResult
         from raw_view.models import DecodeOptions, ViewerItem
-        from raw_view.formats import expected_frame_size_raw
 
         # 真实文件：decode_current 会经 _remaining_bytes 读文件大小（文件不存在会
         # 走 QMessageBox 分支，__new__ 桩无真实父类会崩）。命中路径其实不读内容。
@@ -1850,7 +1845,6 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
         import tempfile
 
         from raw_view.models import DecodeOptions, ViewerItem
-        from raw_view.formats import expected_frame_size_raw
 
         with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as tf:
             tf.write(b"\x00" * 19)
@@ -1859,13 +1853,6 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
             w = self._new_window()
             statuses: dict[str, str] = {}
             w.file_status.setText = lambda text: statuses.__setitem__("file", text)
-            w.image_status.setText = lambda text: statuses.__setitem__("image", text)
-            w.zoom_status = SimpleNamespace(
-                setText=lambda text: statuses.__setitem__("zoom", text),
-            )
-            w.frame_status = SimpleNamespace(
-                setText=lambda text: statuses.__setitem__("frame", text),
-            )
             item = ViewerItem()
             item.options = DecodeOptions(
                 file_path=path,
@@ -1880,15 +1867,7 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
 
             w._sync_status_from_item(item)
 
-            expected = expected_frame_size_raw("RAW8", 4, 4)
-            self.assertEqual(
-                statuses["image"],
-                f"Image: 4×4 ({expected:,} bytes) | Format: RAW8",
-            )
-            self.assertNotIn("/frame", statuses["image"])
             self.assertEqual(statuses["file"], f"File: {os.path.basename(path)} (19 bytes)")
-            self.assertEqual(statuses["zoom"], "Zoom: 125%")
-            self.assertEqual(statuses["frame"], "Frame: -")
         finally:
             os.unlink(path)
 
@@ -1896,7 +1875,6 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
         from raw_view.gui.app import DecodeCache
         from raw_view.gui.worker import DecodeResult
         from raw_view.models import DecodeOptions, ViewerItem
-        from raw_view.formats import expected_frame_size_raw
 
         w = self._new_window()
         item = ViewerItem()
@@ -1940,34 +1918,10 @@ class DecodeCacheHitStatusTests(unittest.TestCase):
             }
         )
         w._loading_item = False
-        w.zoom_status = SimpleNamespace(setText=lambda _t: None)
         w._compute_frame_info = lambda _item: None
 
-        # 现在的 options 是 2x2；缓存中是 4x4 → 命中后状态应显示 4x4 的帧大小。
-        seen: list[str] = []
-
-        def _capture(text, *a):
-            seen.append(text)
-
-        w.image_status.setText = _capture
         w.decode_current()
 
-        self.assertTrue(seen, "命中路径应写状态栏")
-        status = seen[-1]
-        expected = expected_frame_size_raw("RAW8", 4, 4)
-        self.assertIn("4×4", status)
-        self.assertIn(f"{expected:,} bytes", status)
-        # 旧 bug：显示的会是 2x2 的帧大小。括号内的数字必须精确等于
-        # 4x4 的帧大小，而不是 `4`（stale）这种会被子串误判的裸数字。
-        import re as _re
-
-        m = _re.search(r"\(([\d,]+) bytes\)", status)
-        self.assertIsNotNone(m, f"状态栏应有 bytes 数字: {status!r}")
-        self.assertNotIn("bytes/frame", status, "状态栏不应再显示 /frame")
-        self.assertEqual(
-            int(m.group(1).replace(",", "")), expected,
-            f"状态栏帧大小必须按当前宽高 4x4 计算: {status!r}",
-        )
         # 选项已回填为缓存的 4x4（与 _on_decode_finished 非缓存路径一致）
         self.assertEqual(item.options.width, 4)
         self.assertEqual(item.options.height, 4)

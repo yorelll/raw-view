@@ -1475,7 +1475,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QLabel#sectionLabel {{
             color: {p["text_color"]};
-            font-size: {max(font_size - 2, 9)}px;
+            font-size: {font_size}px;
             font-weight: 500;
             background: transparent;
         }}

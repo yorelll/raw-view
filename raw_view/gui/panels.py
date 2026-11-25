@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QSignalBlocker, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSignalBlocker, QSize, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QAction,
     QActionGroup,
@@ -15,6 +16,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QToolButton,
@@ -59,6 +61,94 @@ def _qta_icon(name: str, color: str):
         from PyQt5.QtGui import QIcon
 
         return QIcon()
+
+
+def _make_group_divider(parent: QWidget | None = None) -> QFrame:
+    """The single 1 px hairline used between every pair of panel groups (M-6)."""
+    divider = QFrame(parent)
+    divider.setFrameShape(QFrame.HLine)
+    divider.setObjectName("groupDivider")
+    divider.setFixedHeight(1)
+    return divider
+
+
+class SectionHeadingLabel(QLabel):
+    """Group heading with an optional hairline divider on its top edge.
+
+    M-6 wants one divider between every pair of panel groups, but a divider as
+    its own ``QFormLayout`` row would shift every row index (and the
+    conditional-row anchor contract in ``_apply_cond_rows``).  Painting the
+    line as a child of the heading keeps the form row count and order intact
+    while still producing a real ``QFrame#groupDivider`` for the theme to
+    colour.
+    """
+
+    def __init__(self, text: str, divider: bool = False,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("sectionLabel")
+        self._divider: QFrame | None = None
+        if divider:
+            # Leave room for the line plus a small gap above the text.
+            self.setContentsMargins(0, 6, 0, 0)
+            self._divider = _make_group_divider(self)
+            self._divider.show()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().resizeEvent(event)
+        if self._divider is not None:
+            self._divider.setGeometry(0, 0, self.width(), 1)
+
+
+class _SizedCombo(QComboBox):
+    """Combo whose minimum width follows the font *without* ``setMinimumWidth``.
+
+    The form must not force widths through ``minimumWidth`` (a live contract:
+    the old panel measured every field's content size hint and pushed the form
+    past the scroll viewport).  ``minimumSizeHint`` is the layout's real
+    minimum, so returning the font-derived text width here lets QFormLayout
+    wrap a row when it does not fit while keeping every field readable (V-2).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._required_width = 0
+
+    def set_required_width(self, width: int) -> None:
+        width = max(0, int(width))
+        if width != self._required_width:
+            self._required_width = width
+            self.updateGeometry()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        hint = super().minimumSizeHint()
+        return QSize(self._required_width, hint.height())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), self._required_width), hint.height())
+
+
+class _SizedSpinBox(QSpinBox):
+    """Spin-box twin of :class:`_SizedCombo` (font-derived minimum width)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._required_width = 0
+
+    def set_required_width(self, width: int) -> None:
+        width = max(0, int(width))
+        if width != self._required_width:
+            self._required_width = width
+            self.updateGeometry()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        hint = super().minimumSizeHint()
+        return QSize(self._required_width, hint.height())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), self._required_width), hint.height())
 
 
 class PresetComboBox(QComboBox):
@@ -164,6 +254,14 @@ class ControlPanel(QWidget):
     # Empty-state hint painted inside the combo frame (there is no placeholder
     # row in the model: the popup lists real presets only).
     _PRESET_PLACEHOLDER = "Select a preset"
+    #: Decode fields whose text must stay readable at every font size (V-2).
+    #: The preset selector is excluded: it paints an elided hint and lives in a
+    #: row with fixed-size buttons, so it must stay compressible instead.
+    _FIELD_NAMES = (
+        "type_combo", "format_combo", "bit_depth_combo", "align_combo",
+        "endian_combo", "raw_preview_combo", "bayer_pattern_combo",
+        "width_spin", "height_spin", "offset_spin",
+    )
     # Hint shown instead when the active selection is hidden by the filter.
     _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
     # Three-state pin colours come from THEME_PALETTES (accent / warning); see
@@ -209,7 +307,14 @@ class ControlPanel(QWidget):
         # AppSettings.ui_theme's default; MainWindow passes the live value.
         self._theme = normalize_ui_theme(theme)
         self._preset_icon_actions: list[tuple[QAction, str]] = []
+        # H-6: the minimum width follows the UI font size (see
+        # _sync_panel_metrics); 340 px stays the compact-theme floor.
         self.setMinimumWidth(340)
+        self._metrics_timer = QTimer(self)
+        self._metrics_timer.setSingleShot(True)
+        self._metrics_timer.setInterval(0)
+        self._metrics_timer.timeout.connect(self._sync_panel_metrics)
+        self._metrics_passes_left = 0
         self.setObjectName("controlPanel")
         # Required for the QSS `QWidget#controlPanel` surface to paint.
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -222,6 +327,11 @@ class ControlPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(0)  # no border
+        # H-6: a horizontally scrolling form is never acceptable — the hidden
+        # part is unreachable and the bar itself is the defect.  Fields below
+        # are made shrinkable so the content always fits the viewport.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area = scroll
         # The viewport must not paint its own surface, otherwise the panel card
         # background is hidden behind a white/grey rectangle.
         scroll.viewport().setAutoFillBackground(False)
@@ -341,40 +451,40 @@ class ControlPanel(QWidget):
         preset_select_layout.addWidget(self.preset_filter_btn, 0)
 
         # ── Format parameters ──
-        self.type_combo = QComboBox()
+        self.type_combo = _SizedCombo()
         self.type_combo.addItems(["RAW", "YUV", "Standard Image"])
 
-        self.format_combo = QComboBox()
+        self.format_combo = _SizedCombo()
         self.format_combo.addItems(self.RAW_FORMATS)
         self.format_combo.setCurrentText("RAW12")
 
-        self.align_combo = QComboBox()
+        self.align_combo = _SizedCombo()
         self.align_combo.addItems(["lsb", "msb"])
         self.align_combo.setCurrentText("msb")
 
-        self.endian_combo = QComboBox()
+        self.endian_combo = _SizedCombo()
         self.endian_combo.addItems(["little", "big"])
 
-        self.raw_preview_combo = QComboBox()
+        self.raw_preview_combo = _SizedCombo()
         self.raw_preview_combo.addItems(["Bayer Color", "Grayscale"])
 
-        self.bayer_pattern_combo = QComboBox()
+        self.bayer_pattern_combo = _SizedCombo()
         self.bayer_pattern_combo.addItems(BAYER_PATTERNS)
 
         # YOnly 位深（仅 Format=YOnly 时显示）。内部映射为 YOnly<bit> 有效格式名。
-        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo = _SizedCombo()
         self.bit_depth_combo.addItems(self.YONLY_BIT_DEPTHS)
         self.bit_depth_combo.setCurrentText("12")
 
-        self.width_spin = QSpinBox()
+        self.width_spin = _SizedSpinBox()
         self.width_spin.setRange(1, 65535)
         self.width_spin.setValue(2560)
 
-        self.height_spin = QSpinBox()
+        self.height_spin = _SizedSpinBox()
         self.height_spin.setRange(1, 65535)
         self.height_spin.setValue(1440)
 
-        self.offset_spin = QSpinBox()
+        self.offset_spin = _SizedSpinBox()
         self.offset_spin.setRange(0, 1_000_000_000)
 
         # ── Zoom controls ──
@@ -415,6 +525,24 @@ class ControlPanel(QWidget):
         size_layout.addWidget(self.height_spin, 1)
         self.size_row = size_row
 
+        # H-6: the fields must be compressible.  Their content size hints grow
+        # with the UI font, which is what pushed the form past the scroll
+        # viewport from 16 px up (353/378/405 px against a 332 px viewport).
+        # ``minimumSizeHint`` (see _SizedCombo/_SizedSpinBox) carries the
+        # font-derived text width, so a Preferred policy lets QFormLayout grow
+        # the field to the available column while still wrapping the row when
+        # the label and that minimum cannot share a line.
+        for _field in (
+            self.preset_combo, self.type_combo, self.format_combo,
+            self.bit_depth_combo, self.align_combo, self.endian_combo,
+            self.raw_preview_combo, self.bayer_pattern_combo,
+            self.width_spin, self.height_spin, self.offset_spin,
+        ):
+            _field.setMinimumWidth(0)
+            _field.setSizePolicy(
+                QSizePolicy.Preferred, _field.sizePolicy().verticalPolicy()
+            )
+
         # ── Apply button ──
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.setObjectName("accentButton")
@@ -426,6 +554,11 @@ class ControlPanel(QWidget):
         form = QFormLayout(content)
         form.setVerticalSpacing(6)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        # H-6: Preferred fields grow into the available column; when the label
+        # and the field's font-derived width cannot share a line the row wraps
+        # (label above field) instead of shrinking the field below its text.
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         # 条件行显隐由 _apply_cond_rows 统一管理：用 takeRow/insertRow 把隐藏行
         # 彻底移出表单（仅 setVisible 时本机 PyQt5 的 QFormLayout 仍保留行几何，
         # 会在 Format 与 Width 之间留出大段空白，0.4.1 修复）。
@@ -435,11 +568,7 @@ class ControlPanel(QWidget):
 
         # Separator: the Preset block is "preset management"; everything below
         # is "parameter configuration" — divide the two functional areas.
-        preset_divider = QFrame()
-        preset_divider.setFrameShape(QFrame.HLine)
-        preset_divider.setObjectName("groupDivider")
-        preset_divider.setFixedHeight(1)
-        form.addRow(preset_divider)
+        form.addRow(_make_group_divider())
 
         form.addRow(self._section_label("Format"))
         form.addRow("Type", self.type_combo)
@@ -469,12 +598,13 @@ class ControlPanel(QWidget):
         }
 
         # Anchor for the conditional block: everything that becomes visible is
-        # inserted just before the Geometry section title.
-        self._geometry_section_label = self._section_label("Geometry")
+        # inserted just before the Geometry section title.  The heading also
+        # carries the Preset|Format|Geometry separator (M-6).
+        self._geometry_section_label = self._section_label("Geometry", divider=True)
         form.addRow(self._geometry_section_label)
         form.addRow("Size", size_row)
         form.addRow("Offset", self.offset_spin)
-        form.addRow(self._section_label("View"))
+        form.addRow(self._section_label("View", divider=True))
         form.addRow("Zoom", zoom_row)
 
         self._mark_form_labels(form)
@@ -530,6 +660,104 @@ class ControlPanel(QWidget):
         self._refresh_frame_size_hint()
 
         self._on_type_changed(self.type_combo.currentText())
+        self._refresh_panel_metrics()
+
+    # ── font-scaled panel width (H-6) ────────────────────────────────
+
+    def _panel_font_pixel_size(self) -> int:
+        """Active UI font size in px (QSS sets a pixel size on every widget)."""
+        size = self.font().pixelSize()
+        if size <= 0:
+            size = self.fontInfo().pixelSize()
+        return size if size > 0 else 13
+
+    #: Text chrome a field adds around its content: 8 px padding each side,
+    #: 1 px border each side, plus the 24 px combo drop-down.
+    _FIELD_CHROME = 8 * 2 + 1 * 2
+    _COMBO_DROPDOWN = 24
+
+    def _field_content_width(self, field) -> int:
+        """Width the field needs to show its current value (V-2).
+
+        This is the acceptance rule verbatim (current text vs visible width);
+        a font/theme change re-derives it, and the panel width grows with the
+        font, so larger values are never permanently clipped.
+        """
+        metrics = QFontMetrics(field.font())
+        if isinstance(field, QComboBox):
+            content = metrics.horizontalAdvance(field.currentText())
+            return content + self._FIELD_CHROME + self._COMBO_DROPDOWN
+        if isinstance(field, QSpinBox):
+            content = metrics.horizontalAdvance(field.text())
+            return content + self._FIELD_CHROME + self._COMBO_DROPDOWN
+        return metrics.horizontalAdvance(field.text()) + self._FIELD_CHROME
+
+    def _fit_form_label_column(self) -> None:
+        """Cap the label column so every field keeps room for its text (V-2).
+
+        QFormLayout sizes the shared label column from the widest label, which
+        at 20-24 px made the fields narrower than their own text.  The labels
+        keep their full ``text()`` (tooltips are unaffected); only their laid-
+        out width is capped while the font-derived panel width is in play.
+        """
+        labels = self.__dict__.get("_form_labels") or []
+        viewport = getattr(getattr(self, "scroll_area", None), "viewport", None)
+        width = viewport().width() if viewport is not None else 0
+        if width <= 0 or not labels:
+            return
+        form = self._main_form
+        margins = form.contentsMargins()
+        spacing = form.horizontalSpacing()
+        available = width - margins.left() - margins.right() - spacing
+        required = max(
+            (
+                self._field_content_width(getattr(self, name))
+                for name in self._FIELD_NAMES
+                if getattr(self, name, None) is not None
+            ),
+            default=0,
+        )
+        # Width/Height share one form row: that row needs both fields plus the
+        # "×" label, otherwise the pair is squeezed to half each (V-2 at 16 px).
+        size_layout = self.size_row.layout()
+        size_required = (
+            self._field_content_width(self.width_spin)
+            + self._field_content_width(self.height_spin)
+            + self._size_x_label.sizeHint().width()
+            + size_layout.spacing() * 2
+        )
+        required = max(required, size_required)
+        cap = max(92, available - required)
+        for label in labels:
+            label.setMaximumWidth(cap)
+
+    def _sync_panel_metrics(self) -> None:
+        """Keep the panel wide enough for its font without a horizontal scroll."""
+        font_size = self._panel_font_pixel_size()
+        self.setMinimumWidth(max(340, 320 + (font_size - 13) * 14))
+        # V-2: report (via minimumSizeHint) the width that fits the current
+        # text.  QFormLayout wraps a row whose label + field minimum do not
+        # fit, so the field keeps its text while the form never exceeds the
+        # viewport.  ``setMinimumWidth`` is deliberately not used: it would
+        # also pin the form column and defeat both the wrap and compressibility.
+        for name in self._FIELD_NAMES:
+            field = getattr(self, name, None)
+            if field is not None:
+                field.set_required_width(self._field_content_width(field))
+        self._fit_form_label_column()
+        if self._metrics_passes_left > 0:
+            self._metrics_passes_left -= 1
+            self._metrics_timer.start()
+
+    def _refresh_panel_metrics(self) -> None:
+        """Recompute now and over a few event-loop turns after a style change."""
+        self._metrics_passes_left = 3
+        self._sync_panel_metrics()
+        self._metrics_timer.start()
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().showEvent(event)
+        self._refresh_panel_metrics()
 
     # ── public helpers ───────────────────────────────────────────────
 
@@ -1031,6 +1259,10 @@ class ControlPanel(QWidget):
         for action, icon_name in self._preset_icon_actions:
             action.setIcon(_qta_icon(icon_name, self._icon_color()))
         self.refresh_pin_theme()
+        # H-6: the panel width and the field minimum widths follow ui_font_size;
+        # this explicit hook (not changeEvent, see refresh_pin_theme) re-derives
+        # them after every stylesheet swap.
+        self._refresh_panel_metrics()
 
     def refresh_pin_theme(self) -> None:
         """Re-derive the pin icon colour from the explicit current theme.
@@ -1186,21 +1418,26 @@ class ControlPanel(QWidget):
         self._apply_cond_rows(names)
 
     @staticmethod
-    def _section_label(text: str) -> QLabel:
-        """Small sentence-case heading spanning both form columns."""
-        label = QLabel(text)
-        label.setObjectName("sectionLabel")
-        return label
+    def _section_label(text: str, divider: bool = False) -> QLabel:
+        """Sentence-case heading spanning both form columns.
 
-    @staticmethod
-    def _mark_form_labels(form: QFormLayout) -> None:
+        ``divider=True`` draws the group separator on the heading's top edge
+        (M-6: Preset | Format | Geometry | View all separated, without adding
+        a form row that would shift the conditional-row indices).
+        """
+        return SectionHeadingLabel(text, divider=divider)
+
+    def _mark_form_labels(self, form: QFormLayout) -> None:
         """Apply the 92px form-label column and the 12px label role.
 
         Section headings are ordinary labels added as spanning rows, so they
         are excluded by their objectName.  A minimum width (rather than a
         hard-coded fixed width on every label) keeps the field column stable
-        while still letting an unusually long translated label grow.
+        while still letting an unusually long translated label grow.  The
+        labels are remembered so ``_fit_form_label_column`` can cap the shared
+        column at large font sizes without touching the field texts.
         """
+        self._form_labels: list[QLabel] = []
         for row in range(form.rowCount()):
             item = form.itemAt(row, QFormLayout.LabelRole)
             label = item.widget() if item is not None else None
@@ -1209,6 +1446,7 @@ class ControlPanel(QWidget):
             label.setProperty("role", "formLabel")
             label.setMinimumWidth(92)
             label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self._form_labels.append(label)
 
     # 条件行规范顺序：(属性名, label 文本)。_apply_cond_rows 按此顺序把需要显示
     # 的行插回 Geometry 分组标题之前，保证 RAW / YOnly / 其它状态下的行序一致。

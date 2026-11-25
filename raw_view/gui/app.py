@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 from PyQt5 import sip
 
-from PyQt5.QtCore import QEvent, QSignalBlocker, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
+from PyQt5.QtCore import QEvent, QRect, QSignalBlocker, QSize, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QAction,
@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -288,14 +289,160 @@ def _bayer_mark_pixmap(size: int, theme: str) -> QPixmap:
     return pixmap
 
 
+class StatusLabel(QLabel):
+    """Status-bar label that can never raise the window's minimum width.
+
+    ``setMinimumWidth(0)`` alone is not enough: a label's layout minimum comes
+    from ``minimumSizeHint``.  Overriding it to zero keeps the preferred
+    (sizeHint) width for normal allocation, so short status texts are still
+    laid out in full while a narrow window can shrink the bar freely (H-6).
+    """
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+
+class StateStatusLabel(StatusLabel):
+    """State dot + text; paints an elided copy when the bar is narrow.
+
+    ``text()`` must keep the *full* HTML state string — several callers assert
+    on it — so the elision is visual only: ``paintEvent`` draws the dot and an
+    ``ElideRight`` copy whenever the label is narrower than its text, and falls
+    back to the normal styled QLabel painting otherwise.  Colours are the
+    explicit theme tokens, never guessed from QPalette (qt-material themes
+    through the stylesheet).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._plain_text = ""
+        # Colours arrive from THEME_PALETTES via set_state(); nothing is
+        # hard-coded here (raw_view/gui never owns colour values).
+        self._dot_color: str | None = None
+        self._text_color: str | None = None
+
+    def set_state(self, text: str, dot_color: str, text_color: str) -> None:
+        self._plain_text = text
+        self._dot_color = dot_color
+        self._text_color = text_color
+        super().setText(f'<span style="color:{dot_color};">&#9679;</span> {text}')
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        metrics = QFontMetrics(self.font())
+        rect = self.contentsRect()
+        full_width = metrics.horizontalAdvance("● " + self._plain_text)
+        if (
+            rect.width() <= 0
+            or self._dot_color is None
+            or self._text_color is None
+            or full_width <= rect.width()
+        ):
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        try:
+            dot_width = min(
+                metrics.horizontalAdvance("● "), rect.width()
+            )
+            dot_rect = QRect(rect)
+            dot_rect.setWidth(dot_width)
+            painter.setPen(QColor(self._dot_color))
+            painter.drawText(
+                dot_rect, Qt.AlignLeft | Qt.AlignVCenter, "●"
+            )
+            text_rect = QRect(rect)
+            text_rect.setLeft(rect.left() + dot_width)
+            shown = metrics.elidedText(
+                self._plain_text, Qt.ElideRight, max(0, text_rect.width())
+            )
+            painter.setPen(QColor(self._text_color))
+            painter.drawText(
+                text_rect, Qt.AlignLeft | Qt.AlignVCenter, shown
+            )
+        finally:
+            painter.end()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().resizeEvent(event)
+        self.update()
+
+
+class ElidedStatusLabel(StatusLabel):
+    """Status-bar label that never dictates the window width (H-6 / M-5).
+
+    The label keeps its *full* text and paints an ``ElideMiddle`` copy
+    whenever the laid-out width is smaller.  ``sizeHint`` always reports the
+    full-text width so a shrink cannot feed back into a smaller hint and elide
+    the text permanently.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def setText(self, text: str) -> None:  # noqa: N802 — Qt virtual override
+        self._full_text = text
+        self._sync_elide()
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def sizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        metrics = QFontMetrics(self.font())
+        return QSize(metrics.horizontalAdvance(self._full_text), metrics.height())
+
+    def _sync_elide(self) -> None:
+        width = self.contentsRect().width()
+        if width <= 0:
+            super().setText(self._full_text)
+            return
+        elided = QFontMetrics(self.font()).elidedText(
+            self._full_text, Qt.ElideMiddle, width
+        )
+        super().setText(elided)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().resizeEvent(event)
+        self._sync_elide()
+
+
 class ReadoutStrip(QWidget):
-    """30 px per-tab readout: format, alignment, size, bytes, frame."""
+    """Per-tab readout: format | detail column | stretch | frame.
+
+    H-7: the height is derived from the live font metrics, so 20-24 px UI
+    fonts are no longer clipped by the old fixed 30 px.
+    M-4 / L-2: the detail text owns a fixed, tail-elided column and the frame
+    counter has a fixed width anchored to the right edge, so switching between
+    RAW / YUV / Standard Image never moves it sideways.
+    """
+
+    #: Longest detail a normal session shows (alignment · endianness · size ·
+    #: bytes).  The column is sized from this unless the strip is narrower.
+    _DETAIL_SAMPLE = "msb · little · 65535×65535 · 99,999,999 B"
+    #: Widest frame counter the spin box range can produce.
+    _FRAME_SAMPLE = "999999 / 999999"
+    _BASE_HEIGHT = 30
+    _MIN_DETAIL_WIDTH = 120
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("readoutStrip")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setFixedHeight(30)
+        self._detail_text = ""
+        self._detail_column = 0
+
+        # Style/font changes must re-derive the height and the columns; the
+        # deferred passes mirror FrameNavBar._sync_metrics because a stylesheet
+        # swap fires changeEvent before child fonts have settled.
+        self._metrics_timer = QTimer(self)
+        self._metrics_timer.setSingleShot(True)
+        self._metrics_timer.setInterval(0)
+        self._metrics_timer.timeout.connect(self._sync_metrics)
+        self._metrics_passes_left = 0
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
@@ -310,10 +457,106 @@ class ReadoutStrip(QWidget):
             label.setProperty("mono", True)
             label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
+        # The frame column has a fixed width and is right-aligned: together
+        # with the stretch before it this pins its left edge (V-6).
+        self._frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._frame.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
         layout.addWidget(self._format, 0, Qt.AlignVCenter)
         layout.addWidget(self._detail, 0, Qt.AlignVCenter)
-        layout.addWidget(self._frame, 0, Qt.AlignVCenter)
         layout.addStretch(1)
+        layout.addWidget(self._frame, 0, Qt.AlignVCenter)
+
+        self._sync_metrics()
+
+    # ── metrics ──────────────────────────────────────────────────────
+
+    def _reserved_width(self, frame_width: int) -> int:
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing() * 3
+        return (
+            margins.left() + margins.right() + spacing
+            + self._format.sizeHint().width() + frame_width
+        )
+
+    def _detail_column_width(self, sample_width: int, frame_width: int) -> int:
+        """Fixed detail column, capped so the strip never forces the window wider."""
+        if self.width() > 0:
+            available = self.width() - self._reserved_width(frame_width)
+        else:
+            available = sample_width
+        column = sample_width if available <= 0 else min(sample_width, available)
+        if column <= 0:
+            column = min(sample_width, self._MIN_DETAIL_WIDTH)
+        return max(0, column)
+
+    def _sync_metrics(self) -> None:
+        """Re-derive height and fixed columns after a font/style change."""
+        heights = [
+            QFontMetrics(label.font()).height()
+            for label in (self._format, self._detail, self._frame)
+        ]
+        self.setFixedHeight(max(self._BASE_HEIGHT, max(heights) + 8))
+        self._sync_columns()
+        if self._metrics_passes_left > 0:
+            self._metrics_passes_left -= 1
+            self._metrics_timer.start()
+
+    def _sync_columns(self) -> None:
+        frame_width = QFontMetrics(self._frame.font()).horizontalAdvance(
+            self._FRAME_SAMPLE
+        )
+        self._frame.setFixedWidth(max(0, frame_width))
+        sample_width = QFontMetrics(self._detail.font()).horizontalAdvance(
+            self._DETAIL_SAMPLE
+        )
+        column = self._detail_column_width(max(0, sample_width), frame_width)
+        if column != self._detail_column:
+            self._detail_column = column
+            self._detail.setFixedWidth(column)
+        self._refresh_detail_elide()
+
+    def _refresh_detail_elide(self) -> None:
+        """Elide the stored detail text into the fixed column (L-2)."""
+        if not self._detail_text or self._detail_column <= 0:
+            self._detail.setText("")
+            return
+        self._detail.setText(
+            QFontMetrics(self._detail.font()).elidedText(
+                self._detail_text, Qt.ElideRight, self._detail_column
+            )
+        )
+
+    def _refresh_metrics(self) -> None:
+        self._metrics_passes_left = 3
+        self._sync_metrics()
+        self._metrics_timer.start()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 — Qt virtual
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._refresh_metrics()
+
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().showEvent(event)
+        self._refresh_metrics()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
+        super().resizeEvent(event)
+        # The column is capped by the live width, so a resize can change it.
+        self._sync_columns()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt virtual override
+        """Never let the readout's fixed columns raise the window minimum (H-6).
+
+        The frame/detail columns are sized for readability at the *current*
+        width; treating them as a hard minimum would make the window grow with
+        them (the same failure the old five-part status bar had).  The strip
+        keeps its full height so vertical layout is unaffected.
+        """
+        return QSize(0, super().minimumSizeHint().height())
+
+    # ── content ──────────────────────────────────────────────────────
 
     def set_data(
         self,
@@ -327,7 +570,7 @@ class ReadoutStrip(QWidget):
         format_name = getattr(options, "format_name", "") or "—"
         if image_type == "Standard Image":
             self._format.setText("Standard Image")
-            self._detail.setText("")
+            self._detail_text = ""
             self._detail.setVisible(False)
         else:
             is_raw = image_type == "RAW"
@@ -344,8 +587,9 @@ class ReadoutStrip(QWidget):
             )
             if frame_bytes > 0:
                 parts.append(f"{frame_bytes:,} B")
-            self._detail.setText(" · ".join(parts))
+            self._detail_text = " · ".join(parts)
             self._detail.setVisible(True)
+        self._refresh_detail_elide()
 
         total = max(1, int(total_frames or 1))
         current = min(max(0, int(current_frame)), total - 1)
@@ -619,20 +863,23 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self._apply_theme()
 
-        # Status bar
+        # Status bar — M-5: only the current path (elidable) and the state
+        # dot/text.  Format/size/frame live in the readout strip, zoom in the
+        # panel.  Both labels report a zero minimum width (StatusLabel) so no
+        # status text can raise the window's minimum width (H-6).
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.file_status = QLabel("File: -")
-        self.image_status = QLabel("Image: -")
-        self.zoom_status = QLabel("Zoom: 100%")
-        self.frame_status = QLabel("Frame: -")
-        self.state_status = QLabel()
+        self.file_status = ElidedStatusLabel("File: -")
+        self.state_status = StateStatusLabel()
+        self.state_status.setMinimumWidth(0)
+        self.state_status.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Preferred
+        )
         self._set_state("Ready", "ok")
-        self.status.addPermanentWidget(self.file_status, 2)
-        self.status.addPermanentWidget(self.image_status, 2)
-        self.status.addPermanentWidget(self.frame_status, 1)
-        self.status.addPermanentWidget(self.zoom_status, 1)
-        self.status.addPermanentWidget(self.state_status, 1)
+        # No stretch factors: each label starts at its size hint and only
+        # shrinks (with elision) when the bar is narrower than both together.
+        self.status.addPermanentWidget(self.file_status)
+        self.status.addPermanentWidget(self.state_status)
 
         # Control panel
         self.panel = ControlPanel(theme=self.settings.ui_theme)
@@ -750,6 +997,11 @@ class MainWindow(QMainWindow):
         hint = QLabel("Open a RAW / YUV / image file, or drag and drop it here")
         hint.setAlignment(Qt.AlignCenter)
         hint.setObjectName("statusPlaceholder")
+        # H-6 / V-3: at 24 px this sentence is wide enough to become the
+        # window's minimum width through QStackedWidget (which takes the max
+        # over *all* pages, including this hidden placeholder).  Wrapping it
+        # keeps the empty state from raising the window floor.
+        hint.setWordWrap(True)
 
         open_btn = QPushButton("Open File…")
         open_btn.setObjectName("accentButton")
@@ -797,8 +1049,31 @@ class MainWindow(QMainWindow):
         """Update the status-bar state label with a colored status dot."""
         self._state_text = text
         self._state_kind = kind
+        self._render_state_label()
+
+    def _render_state_label(self) -> None:
+        """Paint the state dot + text into the status label.
+
+        The real widget keeps the full HTML text (``text()`` is asserted by
+        existing tests) and elides visually when the bar is narrow; the label
+        can never raise the window minimum width (``minimumSizeHint`` is 0).
+        """
+        label = self.__dict__.get("state_status")
+        if label is None:
+            return
+        text = self.__dict__.get("_state_text", "")
+        kind = self.__dict__.get("_state_kind", "idle")
         dot = self._state_dot_color(kind)
-        self.state_status.setText(f'<span style="color:{dot};">&#9679;</span> {text}')
+        set_state = getattr(label, "set_state", None)
+        if callable(set_state):
+            settings = self.__dict__.get("settings")
+            theme = getattr(settings, "ui_theme", "light")
+            if theme not in THEME_PALETTES:
+                theme = "light"
+            set_state(text, dot, THEME_PALETTES[theme]["text_color"])
+            return
+        # MainWindow.__new__ test stubs expose only setText().
+        label.setText(f'<span style="color:{dot};">&#9679;</span> {text}')
 
     def _set_item_state(self, item: ViewerItem | None, text: str, kind: str = "idle") -> None:
         """Record a decode status on *item* and show it only if it is current.
@@ -1374,7 +1649,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_frame_display(self, item: ViewerItem) -> None:
-        """Update frame nav bar and status bar from item state."""
+        """Update the frame nav bar and the per-tab readout from item state."""
         frame_nav = getattr(item, "frame_nav", None)
         # The nav bar may already be destroyed when a decode finishes for an
         # item that was reloaded/closed mid-flight (its ViewerItem survives in
@@ -1383,10 +1658,6 @@ class MainWindow(QMainWindow):
             return
         frame_nav.set_frame_info(item.current_frame, item.total_frames)
         frame_nav.setVisible(item.total_frames > 1)
-        if item.total_frames > 1:
-            self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
-        else:
-            self.frame_status.setText("Frame: -")
         self._update_readout(item)
 
     # ── UI-6：同目录文件组切换 ────────────────────────────────────────
@@ -2113,9 +2384,6 @@ class MainWindow(QMainWindow):
             self._active_item_index = -1
             self._active_item_ref = None
             self.file_status.setText("File: -")
-            self.image_status.setText("Image: -")
-            self.zoom_status.setText("Zoom: 100%")
-            self.frame_status.setText("Frame: -")
             self._set_state("No item", "idle")
             self.panel.set_enabled(False)
             # No current item means nothing can match the pin: recompute so the
@@ -2753,7 +3021,6 @@ class MainWindow(QMainWindow):
         )
         self.panel.set_zoom_percent(item.zoom_percent)
         self._update_frame_display(item)
-        self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
         self._loading_item = False
         # The "forget remembered parameters" entry is per-file state and must be
         # recomputed on every tab switch, otherwise it keeps the previous file's
@@ -3081,21 +3348,8 @@ class MainWindow(QMainWindow):
             except OSError:
                 self.file_status.setText(f"File: {os.path.basename(path)}")
                 self.file_status.setToolTip(path)
-        # Show image data size (frame size) as a concrete byte count.
-        frame_size = self._get_frame_size(item.options)
-        if frame_size > 0:
-            self.image_status.setText(
-                f"Image: {item.options.width}×{item.options.height} ({frame_size:,} bytes) | Format: {item.options.format_name}"
-            )
-        else:
-            self.image_status.setText(
-                f"Image: {item.options.width}×{item.options.height} | Format: {item.options.format_name}"
-            )
-        self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
-        if item.total_frames > 1:
-            self.frame_status.setText(f"Frame: {item.current_frame + 1}/{item.total_frames}")
-        else:
-            self.frame_status.setText("Frame: -")
+        # Format / size / frame number are owned by the readout strip; the
+        # status bar only carries the path and the state text (M-5).
         self._update_readout(item)
 
     # ── Panel signal handlers ────────────────────────────────────────
@@ -3175,12 +3429,11 @@ class MainWindow(QMainWindow):
                 self.decode_current(show_error=True)
 
     def _on_panel_zoom_changed(self, percent: int) -> None:
-        """Zoom slider changed."""
+        """Zoom slider changed.  The panel itself already shows the value."""
         item = self._current_item()
         if item and item.view:
             item.view.zoom_to(percent)
             item.zoom_percent = percent
-            self.zoom_status.setText(f"Zoom: {percent}%")
 
     # ── Decode (async) ───────────────────────────────────────────────
 
@@ -3992,13 +4245,6 @@ class MainWindow(QMainWindow):
                 size = 0
             self.file_status.setText(f"File: {os.path.basename(path)} ({size:,} bytes)")
             self.file_status.setToolTip(path)
-            frame_size = self._get_frame_size(item.options)
-            if frame_size > 0:
-                self.image_status.setText(
-                    f"Image: {width}×{height} ({frame_size:,} bytes) | Format: {format_name}"
-                )
-            else:
-                self.image_status.setText(f"Image: {width}×{height} | Format: {format_name}")
             self._update_frame_display(item)
         self._refresh_forget_action()
         current = self.__dict__.get("_apply_all_current")
@@ -4120,7 +4366,6 @@ class MainWindow(QMainWindow):
         if item and item.view:
             item.view.fit_image()
             self.panel.set_zoom_percent(item.view.zoom_percent)
-            self.zoom_status.setText(f"Zoom: {item.view.zoom_percent}%")
 
     def _zoom_in_current(self) -> None:
         item = self._current_item()
@@ -4128,7 +4373,6 @@ class MainWindow(QMainWindow):
             item.view.zoom_in()
             item.zoom_percent = item.view.zoom_percent
             self.panel.set_zoom_percent(item.zoom_percent)
-            self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
 
     def _zoom_out_current(self) -> None:
         item = self._current_item()
@@ -4136,7 +4380,6 @@ class MainWindow(QMainWindow):
             item.view.zoom_out()
             item.zoom_percent = item.view.zoom_percent
             self.panel.set_zoom_percent(item.zoom_percent)
-            self.zoom_status.setText(f"Zoom: {item.zoom_percent}%")
 
     def _reset_zoom_current(self) -> None:
         item = self._current_item()
@@ -4144,12 +4387,10 @@ class MainWindow(QMainWindow):
             item.view.reset_zoom()
             item.zoom_percent = 100
             self.panel.set_zoom_percent(100)
-            self.zoom_status.setText("Zoom: 100%")
 
     def _on_item_zoom_changed(self, item: ViewerItem, zoom: int) -> None:
         item.zoom_percent = zoom
         if item is self._current_item():
-            self.zoom_status.setText(f"Zoom: {zoom}%")
             self.panel.set_zoom_percent(zoom)
 
     # ── Rotate / Flip ───────────────────────────────────────────────

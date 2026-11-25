@@ -462,7 +462,6 @@ class ReloadItemTests(_WindowFixture):
         # Reload = close+open → unapplied edits are discarded and the panel is
         # rebuilt from the item (a Standard Image defaults to its own type).
         self.assertEqual(self.w.panel.type_combo.currentText(), "Standard Image")
-        self.assertIn("Image:", self.w.image_status.text())
 
     def test_reload_of_background_tab_does_not_touch_current_panel(self):
         front = self._png("front.png", np.zeros((5, 7, 3), np.uint8))
@@ -471,14 +470,12 @@ class ReloadItemTests(_WindowFixture):
         self.w.item_tabs.setCurrentIndex(0)
         _APP.processEvents()
         width_before = self.w.panel.width_spin.value()
-        status_before = self.w.image_status.text()
 
         self.w.reload_item(1)
         _APP.processEvents()
 
         self.assertEqual(self.w.item_tabs.currentIndex(), 0)
         self.assertEqual(self.w.panel.width_spin.value(), width_before)
-        self.assertEqual(self.w.image_status.text(), status_before)
 
     def test_reload_keeps_one_tab_identity_consistent(self):
         paths = [self._raw(f"x{i}.raw") for i in range(3)]

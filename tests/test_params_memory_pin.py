@@ -829,7 +829,6 @@ class PinThreeStateTests(_IsolatedWindowTest):
         item.current_frame = 3
         self.w._update_frame_display(item)
         _APP.processEvents()
-        self.assertEqual(self.w.frame_status.text(), "Frame: 4/6")
         self.assertEqual(item.total_frames, 6)
 
         # Now aim at parameters that would yield *fewer* frames than the file
@@ -847,7 +846,6 @@ class PinThreeStateTests(_IsolatedWindowTest):
         self.assertTrue(warn.called, "the cancel path must be exercised")
         self.assertEqual(item.current_frame, 3, "cancelled Apply must keep the frame")
         self.assertEqual(item.total_frames, 6)
-        self.assertEqual(self.w.frame_status.text(), "Frame: 4/6")
         self.assertEqual((item.options.width, item.options.height), (4, 4))
 
     def test_successful_apply_and_cache_hit_still_commit(self):

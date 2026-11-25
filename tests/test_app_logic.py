@@ -1147,7 +1147,6 @@ class DecodeOptionsPersistenceTests(unittest.TestCase):
         w = _new_window()
         w.panel = _StubPanel({"preview_mode": "Grayscale", "bayer_pattern": "GBRG"})
         w._loading_item = False
-        w.zoom_status = SimpleNamespace(setText=lambda _t: None)
 
         item = ViewerItem()
         w._save_panel_to_item(item)
