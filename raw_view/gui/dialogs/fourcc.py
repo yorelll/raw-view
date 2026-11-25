@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.fourcc_data import FourCCEntry, FourCCStore
+from raw_view.gui.dialogs._form import _fit_dialog_height
 from raw_view.models import AppSettings
 
 
@@ -143,6 +144,8 @@ class FourCCDialog(QDialog):
 
         self._build_ui()
         self._populate_table()
+        # L-3: same content-driven, screen-capped height policy as every dialog.
+        _fit_dialog_height(self)
 
     # ── UI construction ────────────────────────────────────────────────
 

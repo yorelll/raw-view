@@ -17,7 +17,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -48,6 +47,13 @@ from raw_view.models import (
     normalize_ui_theme,
     resolve_output_dir,
 )
+from raw_view.gui.dialogs._form import (
+    _dialog_height_cap,
+    _fit_dialog_height,
+    _footer_with,
+    _make_subcard,
+    _make_subcard_frame,
+)
 from raw_view.gui.dialogs.convert import yuv_size_mismatch_hint
 from raw_view.gui.panels import ControlPanel
 from raw_view.gui.widgets import FileDropLineEdit
@@ -67,7 +73,10 @@ class BatchConvertDialog(QDialog):
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("Batch Convert")
-        self.setMinimumSize(700, 520)
+        # The 520 px floor must never exceed the shared height cap (L-3): on a
+        # short screen the cap wins, otherwise the dialog would be forced off
+        # the bottom edge it is supposed to fit inside.
+        self.setMinimumSize(700, min(520, _dialog_height_cap(self)))
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         # ── Source file list (drag-drop or browse) ──
@@ -126,10 +135,14 @@ class BatchConvertDialog(QDialog):
         self._file_table.model().rowsRemoved.connect(lambda *_: self._update_empty_hint())
 
         # ── Output parameters ──
-        params_group = QFrame()
-        params_group.setFrameShape(QFrame.StyledPanel)
+        # M-2: two subcards (Input / Output) replace the single white
+        # ``QFrame#card``, so Batch uses the same surface and density as
+        # Convert / Settings / Preset instead of a flat white block.
+        params_group = QWidget()
+        params_group.setObjectName("paramsGroup")
         params_layout = QHBoxLayout(params_group)
-        params_layout.setContentsMargins(8, 8, 8, 8)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.setSpacing(8)
 
         # Input type mirrors ConvertDialog: Image keeps the historical
         # decode+resize path, YUV losslessly rearranges an existing YUV file
@@ -254,7 +267,7 @@ class BatchConvertDialog(QDialog):
         self._output_dir_hint.setObjectName("hintLabel")
         self._output_dir_hint.setWordWrap(True)
 
-        params_form = QFormLayout()
+        input_card, params_form = _make_subcard("Input")
         # Kept for _apply_cond_rows(): hidden conditional rows are taken out of
         # the layout (setVisible alone still reserves a 6px row gap).
         self._form = params_form
@@ -316,12 +329,11 @@ class BatchConvertDialog(QDialog):
             ),
         )
 
-        params_right = QVBoxLayout()
-        params_right.addLayout(params_form)
+        output_card, params_right = _make_subcard_frame("Output")
         output_folder_row = QHBoxLayout()
         output_folder_row.setContentsMargins(0, 0, 0, 0)
-        self._output_folder_label = QLabel("Output folder")
-        output_folder_row.addWidget(self._output_folder_label, 0)
+        # The card title already says "Output"; a second "Output folder" label
+        # stole the width the checkbox needed (it was clipped at 1:1 halves).
         output_folder_row.addWidget(self._same_dir_cb, 0)
         output_folder_row.addStretch(1)
         params_right.addLayout(output_folder_row)
@@ -329,7 +341,11 @@ class BatchConvertDialog(QDialog):
         params_right.addWidget(self._output_dir_hint)
         params_right.addStretch(1)
 
-        params_layout.addLayout(params_right, 1)
+        # Equal halves: the Input card holds the two-column form, the Output
+        # card holds the folder row + checkbox, which needs ~250 px of its own
+        # (a 3:2 split clipped "Same directory as input").
+        params_layout.addWidget(input_card, 1)
+        params_layout.addWidget(output_card, 1)
 
         # ── Progress ──────────────────────────────────────────────────
         # 刻意不在这里构造 QProgressDialog：QProgressDialog(minimumDuration=0,
@@ -349,19 +365,16 @@ class BatchConvertDialog(QDialog):
         self._run_btn.setEnabled(False)
         self._run_btn.setToolTip("Add at least one file before starting the batch conversion.")
         self._run_btn.clicked.connect(self._run_batch)
+        # M-3: Close used to have no object name and fell back to qt-material's
+        # default solid button, competing with the accent primary.
         close_btn = QPushButton("Close")
+        close_btn.setObjectName("secondaryButton")
         close_btn.clicked.connect(self.accept)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(close_btn)
 
         # Batch conversion is deliberately single-target per file.  Variant
         # fan-out lives on the Convert dialog's "Variant Convert" page; the
         # `multi_variant_enabled` setting must not add controls or extra
         # outputs here (user decision, 0.5.11.1 review L-7 removal).
-        params_group.setObjectName("card")
 
         # The parameters block can grow tall, so wrap it in a scroll area that
         # scrolls internally instead of pushing the action buttons off-screen.
@@ -375,17 +388,15 @@ class BatchConvertDialog(QDialog):
         layout.addLayout(input_row)
         layout.addWidget(self._file_table, 1)
         layout.addWidget(params_scroll)
-        layout.addLayout(btn_row)
+        layout.addLayout(_footer_with(self._run_btn, close_btn))
 
         # Bound the params scroll and the dialog so buttons stay visible.
         screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
             avail_h = screen.availableGeometry().height()
             params_scroll.setMaximumHeight(int(avail_h * 0.45))
-            # P3: same 0.85 / 720 px cap as Convert so the footer never falls
-            # off a 1366x768 screen.  The form itself is deliberately unchanged
-            # (its field sequence and row count are pinned by tests).
-            self.setMaximumHeight(min(int(avail_h * 0.85), 720))
+        # L-3: shared content-driven / screen-capped height policy.
+        _fit_dialog_height(self)
 
         # Signals
         self.input_edit.fileDropped.connect(self._on_files_dropped)

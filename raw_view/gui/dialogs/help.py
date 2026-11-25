@@ -17,6 +17,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from raw_view.gui.dialogs._form import (
+    _dialog_height_cap,
+    _fit_dialog_height,
+    _footer_with,
+)
 from raw_view.help_content import HELP_HTML, SHORTCUTS
 from raw_view.models import (
     APP_VERSION,
@@ -122,13 +127,15 @@ class KeyboardShortcutsDialog(QDialog):
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
 
+        # M-3: the Close button belongs to the same secondary/right-aligned
+        # family as Help and About instead of qt-material's default button.
         close_btn = QPushButton("Close")
+        close_btn.setObjectName("secondaryButton")
         close_btn.setAccessibleName("Close keyboard shortcuts")
         close_btn.clicked.connect(self.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        layout.addLayout(_footer_with(None, close_btn))
+        _fit_dialog_height(self)
+
 
 class HelpDialog(QDialog):
     """Read-only dialog that explains RAW/YUV format layout rules."""
@@ -162,11 +169,13 @@ class HelpDialog(QDialog):
         close_btn.setObjectName("secondaryButton")
         close_btn.setAccessibleName("Close format help")
         close_btn.clicked.connect(self.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        layout.addLayout(_footer_with(None, close_btn))
         self.resize(760, 560)
+        # A help browser is a scroll area whose sizeHint is a fixed viewport
+        # guess, so keep a readable floor and let the shared cap trim it on a
+        # short screen (L-3).
+        self.setMinimumHeight(min(520, _dialog_height_cap(self)))
+        _fit_dialog_height(self, browser)
 
 
 class AboutDialog(QDialog):
@@ -180,7 +189,9 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        title = QLabel("RAW/YUV Viewer")
+        # M-12: one product name everywhere — the window title, the Help menu
+        # entry and this body used to spell it two different ways.
+        title = QLabel("raw-view")
         title.setObjectName("aboutTitle")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -195,12 +206,23 @@ class AboutDialog(QDialog):
             "Supports RAW8–32 (aligned & MIPI packed), YOnly (4:0:0)\n"
             "and common YUV 4:2:0 / 4:2:2 sub-formats."
         )
-        desc.setAlignment(Qt.AlignCenter)
+        # L-4: centered text wrapped ``(4:0:0)`` onto a line of its own.  Left
+        # alignment inside a fixed 320 px block gives natural line breaks; the
+        # block itself stays horizontally centered in the dialog.
+        desc.setAlignment(Qt.AlignLeft)
         desc.setWordWrap(True)
-        layout.addWidget(desc)
+        desc.setFixedWidth(320)
+        layout.addWidget(desc, 0, Qt.AlignHCenter)
 
         layout.addStretch(1)
+        # M-3: the About Close was a full-width solid qt-material button, three
+        # times the size of Help's.  It is a secondary action, right-aligned.
         close_btn = QPushButton("Close")
+        close_btn.setObjectName("secondaryButton")
         close_btn.setAccessibleName("Close about")
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
+        layout.addLayout(_footer_with(None, close_btn))
+        # L-4: keep the dialog narrow around the fixed 320 px description block.
+        self.resize(380, 240)
+        # L-3: shared dialog height policy.
+        _fit_dialog_height(self)

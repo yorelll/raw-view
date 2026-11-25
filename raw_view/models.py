@@ -1453,7 +1453,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border-radius: 12px;
         }}
         QFrame#subcard {{
-            background: transparent;
+            /* Was ``transparent``; qt-material's QFrame palette then leaked
+               input_bg into the card, which put every outlined button and
+               link that sits inside a card on the wrong surface (T-4 measured
+               accent on #FFFFFF / #24272E).  The card is a dialog surface, so
+               it uses the same main_bg as the dialog around it. */
+            background: {p["main_bg"]};
             border: 1px solid {p["border_color"]};
             border-radius: 8px;
         }}
@@ -1695,6 +1700,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
            file names, Help group titles and table headers. */
         QTabBar, QGroupBox, QDockWidget, QToolBox::tab, QHeaderView::section {{
             text-transform: none;
+        }}
+        /* M-14: qt-material paints QGroupBox titles with a near-background
+           grey (3.40:1 in Dark).  text_secondary restores AA contrast in both
+           themes while keeping the title visually quieter than its rows. */
+        QGroupBox::title {{
+            color: {p["text_secondary"]};
         }}
         QTabWidget::pane {{
             border: 1px solid {p["border_color"]};

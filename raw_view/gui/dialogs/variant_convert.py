@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -57,6 +58,7 @@ from raw_view.models import (
     normalize_ui_theme,
     resolve_output_dir,
 )
+from raw_view.gui.dialogs._form import _footer_with
 from raw_view.gui.widgets import FileDropLineEdit, VariantSelector
 from raw_view.transcode import (
     YUV_TRANSCODE_FORMATS,
@@ -367,14 +369,16 @@ class VariantConvertPage(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
 
-        button_row = QHBoxLayout()
-        button_row.addStretch(1)
-        button_row.addWidget(self.generate_button)
+        # M-3: a secondary Cancel sits beside the accent primary, so both
+        # Convert and Variant pages have an explicit dismiss action.
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("secondaryButton")
+        self.cancel_button.clicked.connect(self._reject_dialog)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(scroll, 1)
-        root.addLayout(button_row)
+        root.addLayout(_footer_with(self.generate_button, self.cancel_button))
 
         # ── Signals ───────────────────────────────────────────────────
         self.input_edit.textChanged.connect(self._on_input_text_changed)
@@ -435,6 +439,12 @@ class VariantConvertPage(QWidget):
 
     def _on_input_text_changed(self, *_args) -> None:
         self._sync_generate_button()
+
+    def _reject_dialog(self) -> None:
+        """Cancel the owning Convert dialog (this page has no own result)."""
+        dialog = self.window()
+        if isinstance(dialog, QDialog):
+            dialog.reject()
 
     def _sync_generate_button(self) -> None:
         has_input = bool(self.input_edit.text().strip())

@@ -30,7 +30,10 @@ def _fit_scale_percent(scene_rect: QRectF, view_size: tuple[int, int]) -> int:
     if vw <= 0 or vh <= 0:
         return 100
     fit_scale = min(vw / scene_rect.width(), vh / scene_rect.height())
-    return max(1, int(round(fit_scale * 100)))
+    # Floor, never round up: rounding 96.4% to 96% is fine, but rounding
+    # 96.6% up to 97% makes the fitted image wider than the viewport and brings
+    # the scrollbars straight back (H-5).
+    return max(1, int(fit_scale * 100))
 
 
 class ImageView(QGraphicsView):
@@ -55,6 +58,10 @@ class ImageView(QGraphicsView):
         # 当前生效的旋转角度（90° 的整数倍），与 QTransform 一起维护，
         # 保证 fit/reset/zoom_to 重建变换时旋转不被丢失。
         self._rotation = 0
+        # True while the user is in "Fit to Window" mode: a later viewport
+        # change (frame-nav bar appearing, window resize, readout strip
+        # growing) must re-fit instead of leaving the old scale in place.
+        self._fit_active = False
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -65,6 +72,8 @@ class ImageView(QGraphicsView):
         self.resetTransform()
         self._zoom_percent = 100
         self._rotation = 0
+        # A new image starts at 1:1, not in fit mode.
+        self._fit_active = False
         self.zoomChanged.emit(self._zoom_percent)
         self.setSceneRect(self._pixmap_item.boundingRect())
 
@@ -78,6 +87,7 @@ class ImageView(QGraphicsView):
         """重置为 1:1 —— 只清掉缩放，保留用户已设置的旋转方向。"""
         self._apply_rotation_then_scale(1.0)
         self._zoom_percent = 100
+        self._fit_active = False
         self.zoomChanged.emit(self._zoom_percent)
 
     def fit_image(self) -> None:
@@ -86,20 +96,49 @@ class ImageView(QGraphicsView):
         # 先用 Fit 的目标视图区与场景矩形数学算出缩放比例（不受旋转影响），
         # 再整体重建变换：应用已有旋转后直接按该比例缩放，避免 fitInView
         # 在旋转变换上叠加 m11 语义错乱。viewport 尺寸不含滚动条。
+        # H-5: leave a 2 px safety margin — Qt's scrollbar trigger is inclusive
+        # at the viewport edge, so an image exactly as wide as the viewport can
+        # still show a horizontal bar on some styles.
+        viewport = self.viewport().contentsRect()
         percent = _fit_scale_percent(
             self.sceneRect(),
-            (self.viewport().contentsRect().width(), self.viewport().contentsRect().height()),
+            (max(1, viewport.width() - 2), max(1, viewport.height() - 2)),
         )
         self._rotation = self._rotation % 360
         self._apply_rotation_then_scale(percent / 100.0)
         self._zoom_percent = _clamp_zoom_percent(percent)
+        self._fit_active = True
         self.zoomChanged.emit(self._zoom_percent)
+
+    def _refit_if_needed(self) -> None:
+        """Re-apply Fit when the viewport shrank after the last fit (H-5).
+
+        The reported failure is a fit computed at 956x526 followed by the
+        frame-nav bar/readout strip taking more space, leaving the image 17x21
+        px larger than the viewport.  Only overflow triggers a recompute, so
+        enlarging the window keeps the current fit rather than re-centering.
+        """
+        if not getattr(self, "_fit_active", False):
+            return
+        scene_rect = self.sceneRect()
+        if scene_rect.isNull():
+            return
+        viewport = self.viewport().contentsRect()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        mapped = self.mapFromScene(scene_rect).boundingRect()
+        if (
+            mapped.width() > viewport.width() - 1
+            or mapped.height() > viewport.height() - 1
+        ):
+            self.fit_image()
 
     def zoom_to(self, percent: int) -> None:
         """Zoom to a specific percentage (clamped 10–1000)."""
         percent = _clamp_zoom_percent(percent)
         self._apply_rotation_then_scale(percent / 100.0)
         self._zoom_percent = percent
+        self._fit_active = False
         self.zoomChanged.emit(self._zoom_percent)
 
     def has_image(self) -> bool:
@@ -147,6 +186,9 @@ class ImageView(QGraphicsView):
         actual_factor = new_pct / old_pct
         self.scale(actual_factor, actual_factor)
         self._zoom_percent = new_pct
+        # An explicit zoom step leaves "fit" mode: a later window resize must
+        # not snap the image back to the fitted scale.
+        self._fit_active = False
         if emit:
             self.zoomChanged.emit(self._zoom_percent)
 
@@ -165,6 +207,18 @@ class ImageView(QGraphicsView):
             self.scale(factor, factor)
 
     # ── Qt event overrides ───────────────────────────────────────────
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        # H-5: the viewport can shrink after Fit (frame-nav bar, readout strip,
+        # window resize).  Re-check fit after the layout has settled.
+        self._refit_if_needed()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # A fit performed before the first layout used a placeholder viewport;
+        # re-check once the real geometry exists.
+        self._refit_if_needed()
 
     def wheelEvent(self, event):  # noqa: N802
         if QApplication.keyboardModifiers() & Qt.ControlModifier:

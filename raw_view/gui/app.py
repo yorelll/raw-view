@@ -21,6 +21,8 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -820,7 +822,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("RAW/YUV Viewer")
+        # M-12: one product name across window title, Help menu and About body.
+        self.setWindowTitle("raw-view")
         self.setWindowIcon(app_icon())
         self.settings = AppSettings()
         self.items: list[ViewerItem] = []
@@ -968,6 +971,9 @@ class MainWindow(QMainWindow):
         self._install_apply_shortcut_guard()
         self._refresh_recent_files_menu()
         self.panel.set_enabled(False)
+        # M-13: nothing is loaded yet, so Save must start disabled instead of
+        # silently doing nothing when clicked.
+        self._update_save_action_state()
 
     def _render_empty_icon(self) -> None:
         """Re-render the empty-state 2x2 Bayer mark for the active theme."""
@@ -1027,12 +1033,87 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(open_btn)
         btn_row.addStretch(1)
         vbox.addLayout(btn_row)
+
+        # L-1: recognition beats recall — list the five most recent files right
+        # under Open.  The whole block is hidden when there is no history, so a
+        # fresh install still shows exactly one action.
+        self._empty_recent_label = QLabel("Recent files")
+        self._empty_recent_label.setAlignment(Qt.AlignCenter)
+        self._empty_recent_label.setObjectName("statusPlaceholder")
+        self._empty_recent_list = QListWidget()
+        self._empty_recent_list.setObjectName("emptyRecentList")
+        self._empty_recent_list.setMaximumWidth(380)
+        self._empty_recent_list.setAccessibleName("Recent files")
+        self._empty_recent_list.setAccessibleDescription(
+            "Double-click or press Enter to open a recently used file."
+        )
+        self._empty_recent_list.itemClicked.connect(self._on_empty_recent_clicked)
+        vbox.addWidget(self._empty_recent_label)
+        vbox.addWidget(self._empty_recent_list)
+        self._refresh_empty_recent_list()
+
         vbox.addStretch(1)
         return widget
+
+    def _on_empty_recent_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if isinstance(path, str) and path:
+            self._open_recent_file(path)
+
+    def _refresh_empty_recent_list(self) -> None:
+        """Show at most five recent files on the empty state (L-1)."""
+        widget = self.__dict__.get("_empty_recent_list")
+        label = self.__dict__.get("_empty_recent_label")
+        settings = self.__dict__.get("settings")
+        if widget is None or label is None or settings is None:
+            return
+        files = list(getattr(settings, "recent_files", []) or [])[:5]
+        widget.blockSignals(True)
+        try:
+            widget.clear()
+            for path in files:
+                entry = QListWidgetItem(os.path.basename(path) or path)
+                entry.setData(Qt.UserRole, path)
+                entry.setToolTip(path)
+                widget.addItem(entry)
+        finally:
+            widget.blockSignals(False)
+        visible = bool(files)
+        label.setVisible(visible)
+        widget.setVisible(visible)
+        if visible:
+            row_h = widget.sizeHintForRow(0)
+            if row_h <= 0:
+                row_h = 24
+            widget.setFixedHeight(row_h * len(files) + 2 * widget.frameWidth() + 2)
 
     def _update_center_stack(self) -> None:
         """Show the tabbed views when items exist, else the empty state."""
         self.center_stack.setCurrentIndex(1 if self.items else 0)
+        self._update_save_action_state()
+
+    def _update_save_action_state(self) -> None:
+        """Enable Save As only when the current tab has pixels to save (M-13).
+
+        ``save_display()`` returns silently when there is no ``current_display``
+        (empty state, a tab that failed to decode, or a decode still running),
+        so an enabled toolbar/menu entry with no effect made the app look hung.
+        Called on open/close/tab switch and after every successful decode.
+        """
+        action = self.__dict__.get("save_action")
+        if action is None:
+            return
+        item = None
+        try:
+            item = self._current_item()
+        except Exception:  # noqa: BLE001 — incomplete test stubs
+            item = None
+        has_display = (
+            item is not None
+            and getattr(item, "current_display", None) is not None
+        )
+        if action.isEnabled() != has_display:
+            action.setEnabled(has_display)
 
     _STATE_DOT_TOKENS = {
         "idle": "text_secondary",
@@ -1279,7 +1360,7 @@ class MainWindow(QMainWindow):
         logo_label = QLabel()
         logo_label.setPixmap(app_icon().pixmap(22, 22))
         logo_label.setContentsMargins(8, 0, 10, 0)
-        logo_label.setToolTip("RAW/YUV Viewer")
+        logo_label.setToolTip("raw-view")
         toolbar.addWidget(logo_label)
         toolbar.addSeparator()
 
@@ -1474,6 +1555,13 @@ class MainWindow(QMainWindow):
         # be regenerated after a theme switch; otherwise the toolbar keeps the
         # previous theme's blue.
         self._refresh_action_icons()
+        # M-7: frame-nav glyphs are QIcons built from theme tokens, so they must
+        # be regenerated too (a stylesheet swap cannot recolour a pixmap).
+        for item in self.__dict__.get("items", []):
+            nav = getattr(item, "frame_nav", None)
+            apply_nav_theme = getattr(nav, "apply_theme", None)
+            if callable(apply_nav_theme):
+                apply_nav_theme(self.settings.ui_theme)
         # Explicit refresh hook: the panel must NOT listen to PaletteChange
         # itself (that event also fires during construction).  The theme is
         # passed explicitly; QPalette cannot be used because qt-material only
@@ -1526,6 +1614,18 @@ class MainWindow(QMainWindow):
                 f" image: url('{_asset('chevron_down.png')}'); width: 12px; height: 12px; }}\n"
                 "QComboBox::down-arrow:disabled {"
                 f" image: url('{_asset('chevron_down_disabled.png')}'); width: 12px; height: 12px; }}\n"
+                # M-8: restore a visible 16 px stepper so a number field cannot
+                # be mistaken for a text field.  The control height stays at
+                # the shared 28 px (the buttons split it, they do not add to it).
+                "QSpinBox::up-button, QSpinBox::down-button {"
+                " subcontrol-origin: border; width: 16px; border: none;"
+                " background: transparent; }\n"
+                "QSpinBox::up-button { subcontrol-position: top right; }\n"
+                "QSpinBox::down-button { subcontrol-position: bottom right; }\n"
+                "QSpinBox::up-arrow {"
+                f" image: url('{_asset('chevron_up_small.png')}'); width: 8px; height: 8px; }}\n"
+                "QSpinBox::down-arrow {"
+                f" image: url('{_asset('chevron_down_small.png')}'); width: 8px; height: 8px; }}\n"
                 "QTabBar::close-button {"
                 f" image: url('{_asset('close.png')}'); }}\n"
                 "QTabBar::close-button:hover {"
@@ -2194,7 +2294,7 @@ class MainWindow(QMainWindow):
 
         # Frame navigation bar below the image.  ``_on_frame_changed`` already
         # resolves the *current* item itself, so it cannot touch a dead page.
-        item.frame_nav = FrameNavBar()
+        item.frame_nav = FrameNavBar(theme=self.settings.ui_theme)
         item.frame_nav.frameChanged.connect(self._on_frame_changed)
 
         # Readout strip at the top of the tab (M7): a compact summary of the
@@ -2328,6 +2428,7 @@ class MainWindow(QMainWindow):
             self.panel._sync_type_enabled()
             self.panel._refresh_frame_size_hint()
         self._refresh_pin_state()
+        self._update_save_action_state()
 
     def _active_item(self) -> ViewerItem | None:
         """当前活动引用的 item（对象身份），结构变更后仍能定位真实对象。"""
@@ -4242,6 +4343,8 @@ class MainWindow(QMainWindow):
         if _widget_alive(view):
             view.set_pixmap(QPixmap.fromImage(qimg))
             view.fit_image()
+        # M-13: the first successfully decoded frame makes Save As meaningful.
+        self._update_save_action_state()
         self._set_item_state(
             item, restored_msg if restored_msg is not None else "Decoded", "ok",
         )
@@ -4531,6 +4634,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_recent_files_menu(self) -> None:
         self.recent_menu.clear()
+        # L-1: the empty state mirrors the same history (five most recent).
+        self._refresh_empty_recent_list()
         files = self.settings.recent_files
         if not files:
             action = QAction("(No recent files)", self)

@@ -10,7 +10,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLineEdit,
@@ -21,6 +20,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from raw_view.gui.dialogs._form import (
+    _dialog_footer,
+    _fit_dialog_height,
+    _make_subcard,
+)
 from raw_view.models import AppSettings, DEFAULT_OUTPUT_TEMPLATE
 
 
@@ -31,11 +35,17 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("Settings")
+        # M-11: the template field used to open 428 px wide and show only the
+        # tail of the template.  A real minimum width keeps the whole row —
+        # label + template + Reset + help — readable at the default font.
+        self.setMinimumWidth(560)
         # Drop the title-bar "?" (context help) button — it has no action here.
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self.output_dir_edit = QLineEdit(settings.default_output_dirname)
         self.template_edit = QLineEdit(settings.output_template)
+        # Long templates must be readable, not clipped to their tail.
+        self.template_edit.setMinimumWidth(340)
         # Accurate scope: this template drives single-file Convert, Batch
         # Convert, Generate Variants and the CLI.  (0.5.11 review M-3.)
         self.template_edit.setAccessibleName("Output filename template")
@@ -89,9 +99,11 @@ class SettingsDialog(QDialog):
         if selected >= 0:
             self.theme_combo.setCurrentIndex(selected)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        form.setVerticalSpacing(12)
+        # M-2: the same subcard density as Convert / Batch / Preset.  Settings
+        # used to be right-aligned with 12 px rows while Convert was
+        # left-aligned with 6 px, so the label column jumped at every switch.
+        preferences_card, form = _make_subcard("Preferences")
+        self._form = form
 
         # Inline buttons should match the height of the fields they sit beside
         # (colour already distinguishes them, so they needn't be taller).
@@ -167,37 +179,36 @@ class SettingsDialog(QDialog):
         manage_widget.setLayout(manage_row)
         form.addRow("Sensor presets", manage_widget)
 
-        # Primary action (Save) is filled; Cancel is a quieter outline button.
-        save_btn = QPushButton("Save")
-        save_btn.setObjectName("accentButton")
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setObjectName("secondaryButton")
-        save_btn.clicked.connect(self._save)
-        cancel_btn.clicked.connect(self.reject)
-
         # Separator between the content area and the action bar.
         divider = QFrame()
         divider.setObjectName("groupDivider")
         divider.setFrameShape(QFrame.HLine)
         divider.setFixedHeight(1)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(cancel_btn)
-        row.addWidget(save_btn)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 12)
         layout.setSpacing(10)
-        layout.addLayout(form)
+        layout.addWidget(preferences_card)
         layout.addStretch(1)
         layout.addWidget(divider)
-        layout.addLayout(row)
+        # M-3: the shared footer generator — exactly one accent primary plus a
+        # secondary Cancel on the right.
+        layout.addLayout(
+            _dialog_footer(
+                "Save", on_primary=self._save, on_cancel=self.reject
+            )
+        )
 
         # Long templates get truncated by the field — reveal the full value on
         # hover and keep the start visible.
         self.template_edit.textChanged.connect(self._on_template_changed)
         self._on_template_changed(self.template_edit.text())
+        # M-11: show the start of the template, not the tail that used to be
+        # visible when the cursor defaulted to the end of the field.
+        self.template_edit.setCursorPosition(0)
+
+        # L-3: shared dialog height policy (content-driven, screen-capped).
+        _fit_dialog_height(self)
 
         # Snapshot for unsaved-change detection on close.
         self._initial_state = self._current_state()

@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QEvent, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QFontMetrics
+from PyQt5.QtCore import QEvent, QSize, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSpinBox,
     QWidget,
+)
+
+from raw_view.models import THEME_PALETTES, normalize_ui_theme
+
+# M-7: one icon family for every nav button — the Unicode ``│◀`` / ``▶│``
+# graphemes rendered at a different size than ``◀`` / ``▶`` and looked like
+# two different icon sets.
+_NAV_ICON_NAMES = (
+    "fa5s.angle-double-left",
+    "fa5s.angle-left",
+    "fa5s.angle-right",
+    "fa5s.angle-double-right",
 )
 
 
@@ -30,9 +42,14 @@ class FrameNavBar(QWidget):
 
     frameChanged = pyqtSignal(int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, theme: str = "light"
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("frameNavBar")
+        # Explicit theme: qt-material only changes the stylesheet, so
+        # QApplication.palette() cannot be used to guess it.
+        self._theme = normalize_ui_theme(theme)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 6, 0, 6)
@@ -54,11 +71,11 @@ class FrameNavBar(QWidget):
 
         # ── Buttons ────────────────────────────────────────────────────
         # Icon mapping: │◀  ◀  ▶  ▶│
-        self.first_btn = QPushButton("\u2502\u25C0")   # │◀
+        self.first_btn = QPushButton()
         self.first_btn.setAccessibleName("First frame")
         self.first_btn.setAccessibleDescription("Go to the first frame (Home).")
         self.first_btn.setToolTip("First frame (Home)")
-        self.prev_btn = QPushButton("\u25C0")           # ◀
+        self.prev_btn = QPushButton()
         self.prev_btn.setAccessibleName("Previous frame")
         self.prev_btn.setAccessibleDescription("Go to the previous frame (Left or Up).")
         self.prev_btn.setToolTip("Previous frame (Left / Up)")
@@ -78,11 +95,11 @@ class FrameNavBar(QWidget):
         self._total_label.setAccessibleName("Total frames")
         self._total_label.setAccessibleDescription("Total number of frames in the file.")
 
-        self.next_btn = QPushButton("\u25B6")           # ▶
+        self.next_btn = QPushButton()
         self.next_btn.setAccessibleName("Next frame")
         self.next_btn.setAccessibleDescription("Go to the next frame (Right or Down).")
         self.next_btn.setToolTip("Next frame (Right / Down)")
-        self.last_btn = QPushButton("\u25B6\u2502")     # ▶│
+        self.last_btn = QPushButton()
         self.last_btn.setAccessibleName("Last frame")
         self.last_btn.setAccessibleDescription("Go to the last frame (End).")
         self.last_btn.setToolTip("Last frame (End)")
@@ -90,6 +107,8 @@ class FrameNavBar(QWidget):
         self._nav_buttons = (
             self.first_btn, self.prev_btn, self.next_btn, self.last_btn,
         )
+        self._icon_px = 16
+        self._apply_nav_icons()
         self._update_metrics()
 
         # Note: button/spin/label colours are themed globally via
@@ -118,6 +137,69 @@ class FrameNavBar(QWidget):
 
     # ── public API ───────────────────────────────────────────────────
 
+    def _icon_size_px(self) -> int:
+        """Icon edge in px: at most 16, and never larger than font + 2 (M-7)."""
+        font = self.first_btn.font()
+        px = font.pixelSize()
+        if px <= 0:
+            px = font.pointSize()
+        if px <= 0:
+            px = 13
+        return max(10, min(16, int(px) + 2))
+
+    def _apply_nav_icons(self) -> None:
+        """Rebuild the four nav glyphs with the current theme's tokens.
+
+        ``nav_button_text`` / ``nav_button_disabled_text`` are the documented
+        tokens for the bar; ``color_disabled`` lets Qt render the same glyph
+        in the faded colour without a second asset.
+        """
+        palette = THEME_PALETTES[normalize_ui_theme(self._theme)]
+        try:
+            import qtawesome as qta
+
+            source_icons = [
+                qta.icon(
+                    name,
+                    color=palette["nav_button_text"],
+                    color_disabled=palette["nav_button_disabled_text"],
+                )
+                for name in _NAV_ICON_NAMES
+            ]
+        except Exception:  # pragma: no cover — qtawesome is a hard dependency
+            return
+        self._icon_px = self._icon_size_px()
+        # Render the glyph at 14 px inside the (up to) 16 px icon box.  Font
+        # Awesome's double chevron is two glyph-widths wide, so at 16 px its
+        # pixel bounding box is 12x9 while a single chevron is 7x9 (a 3 px
+        # width/height difference); at 14 px both are exactly 2 px off square,
+        # which is the consistency the review asked for (V-5).  The icon box
+        # itself stays identical for all four, so the buttons remain aligned.
+        glyph_px = min(14, self._icon_px)
+        for button, source in zip(self._nav_buttons, source_icons):
+            icon = QIcon()
+            for mode in (QIcon.Normal, QIcon.Disabled):
+                canvas = QPixmap(self._icon_px, self._icon_px)
+                canvas.fill(Qt.transparent)
+                glyph = source.pixmap(QSize(glyph_px, glyph_px), mode)
+                painter = QPainter(canvas)
+                painter.drawPixmap(
+                    (self._icon_px - glyph_px) // 2,
+                    (self._icon_px - glyph_px) // 2,
+                    glyph,
+                )
+                painter.end()
+                icon.addPixmap(canvas, mode, QIcon.Off)
+            button.setIcon(icon)
+            button.setIconSize(QSize(self._icon_px, self._icon_px))
+            button.setText("")
+
+    def apply_theme(self, theme: str) -> None:
+        """Regenerate icon colours after a live theme switch (M-7)."""
+        self._theme = normalize_ui_theme(theme)
+        self._apply_nav_icons()
+        self._update_metrics()
+
     def _update_metrics(self) -> None:
         """Size controls from the active font instead of fixed 36x32 boxes.
 
@@ -127,11 +209,18 @@ class FrameNavBar(QWidget):
         minimum for compact themes.
         """
         button_fm = QFontMetrics(self.first_btn.font())
+        # Icons are fixed-size; keep a floor that fits the 16 px glyph and the
+        # themed font's line box at every ui/font_size.
         button_w = max(
             self._nav_min_w,
+            getattr(self, "_icon_px", 16) + 14,
             max(button_fm.horizontalAdvance(btn.text()) for btn in self._nav_buttons) + 10,
         )
-        button_h = max(self._nav_min_h, button_fm.height() + 8)
+        button_h = max(
+            self._nav_min_h,
+            getattr(self, "_icon_px", 16) + 8,
+            button_fm.height() + 8,
+        )
         for btn in self._nav_buttons:
             btn.setFixedSize(button_w, button_h)
 
@@ -155,6 +244,8 @@ class FrameNavBar(QWidget):
 
     def _sync_metrics(self) -> None:
         """Finish a deferred metric refresh after fonts and layout settle."""
+        # The icon pixmap size follows the styled font (min(16, font + 2)).
+        self._apply_nav_icons()
         self._update_metrics()
         if self._metrics_passes_left > 0:
             self._metrics_passes_left -= 1

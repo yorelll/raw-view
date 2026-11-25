@@ -52,6 +52,11 @@ from raw_view.models import (
     normalize_ui_theme,
     resolve_output_dir,
 )
+from raw_view.gui.dialogs._form import (
+    _fit_dialog_height,
+    _footer_with,
+    _make_subcard,
+)
 from raw_view.gui.dialogs.variant_convert import VariantConvertPage
 from raw_view.gui.image_utils import _format_size, qimage_from_rgb
 from raw_view.gui.panels import ControlPanel
@@ -68,46 +73,6 @@ DEFAULT_CONVERT_HEIGHT = 1440
 #: must stay: a YUV source may carry any suffix (``.nv16``, ``.yuyv``, ``.bin``,
 #: none at all), so hard-coding a YUV extension list would make it unpickable.
 INPUT_FILE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
-
-
-def _page_content_height(page: QWidget) -> int:
-    """Preferred height of a page, including content inside its QScrollArea.
-
-    ``QScrollArea.sizeHint()`` is a fixed viewport guess, so on its own it made
-    both pages look ~400px tall even though their forms need 800px+.  Prefer
-    the real content height to the scroll area's own hint.
-    """
-    height = page.sizeHint().height()
-    scroll = page.findChild(QScrollArea)
-    if scroll is not None and scroll.widget() is not None:
-        height = max(height, scroll.widget().sizeHint().height())
-    return height
-
-
-def _make_subcard(title: str) -> tuple[QFrame, QFormLayout]:
-    """Build one bordered form section (0.5.10 P3 grouping).
-
-    The Convert page used to be one 17-row flat form; splitting it into
-    ``Input`` / ``Output`` / ``Format`` lets the eye find a parameter without
-    reading every label.  ``QFrame#subcard`` is the nested surface in the
-    stylesheet (transparent fill + 1 px border, radius 8).
-    """
-    frame = QFrame()
-    frame.setObjectName("subcard")
-    frame.setFrameShape(QFrame.StyledPanel)
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(12, 10, 12, 10)
-    layout.setSpacing(8)
-    heading = QLabel(title)
-    heading.setObjectName("groupTitle")
-    layout.addWidget(heading)
-    form = QFormLayout()
-    form.setContentsMargins(0, 0, 0, 0)
-    form.setHorizontalSpacing(10)
-    form.setVerticalSpacing(6)
-    form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-    layout.addLayout(form)
-    return frame, form
 
 
 def _is_file_in_use_error(exc: BaseException) -> bool:
@@ -508,10 +473,15 @@ class ConvertDialog(QDialog):
         convert_page_layout = QVBoxLayout(self._convert_page)
         convert_page_layout.setContentsMargins(0, 0, 0, 0)
         convert_page_layout.addWidget(scroll, 1)
-        convert_row = QHBoxLayout()
-        convert_row.addStretch(1)
-        convert_row.addWidget(btn_run)
-        convert_page_layout.addLayout(convert_row)
+        # Every dialog gets a Cancel next to its primary action (M-3); before
+        # this the Convert dialog could only be dismissed by the title-bar X
+        # or Esc, which is invisible to a user scanning the buttons.
+        self._convert_cancel_btn = QPushButton("Cancel")
+        self._convert_cancel_btn.setObjectName("secondaryButton")
+        self._convert_cancel_btn.clicked.connect(self.reject)
+        convert_page_layout.addLayout(
+            _footer_with(btn_run, self._convert_cancel_btn)
+        )
 
         # ── Variant page (independent UI) ────────────────────────────
         # Variant generation is a separate workflow with its own input,
@@ -533,6 +503,10 @@ class ConvertDialog(QDialog):
         # instead of aligning the combo with the form fields.  Let the combo
         # shrink to the field column (its tooltip keeps the full reason).
         self.mode_selector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # M-10: two entries do not deserve the widest field in the dialog.  The
+        # combo still starts at the form's field column; it just stops after
+        # 260 px instead of stretching to the whole row.
+        self.mode_selector.setMaximumWidth(260)
         self.mode_selector.setCurrentIndex(0)
         self._sync_mode_item()
         self.mode_selector.currentIndexChanged.connect(self._on_mode_changed)
@@ -566,27 +540,17 @@ class ConvertDialog(QDialog):
         layout.addLayout(self._mode_form)
         layout.addWidget(self._stack, 1)
 
-        # Cap the dialog height to the available screen so the buttons never
-        # get pushed off-screen, then size to the *current* page within that
-        # cap.  QStackedWidget.sizeHint() is the maximum over all pages, so it
-        # would let the tall Variant page stretch the Convert page.
+        # L-3: one height policy for every dialog — at most
+        # min(screen * 0.85, 720) and only as tall as the *current* page needs
+        # (QStackedWidget.sizeHint() is the maximum over all pages, so it would
+        # let the tall Variant page stretch the Convert page).
         # NB: self.width / self.height are QSpinBox attributes on this dialog,
-        # so QWidget.width()/height() are shadowed — use sizeHint() instead.
+        # so QWidget.width()/height() are shadowed — the helper reads size().
         self._max_dialog_height = 720
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            max_h = min(int(screen.availableGeometry().height() * 0.85), 720)
-            self._max_dialog_height = max_h
-            self.setMaximumHeight(max_h)
-            page = self._stack.currentWidget()
-            # The page hint does not include the dialog chrome (Mode row,
-            # margins, footer spacing).  Add it back, and prefer the scroll
-            # content's height over QScrollArea's fixed 400px guess so the
-            # dialog opens tall enough for the grouped cards.
-            chrome = max(self.sizeHint().height() - self._stack.sizeHint().height(), 0)
-            hint = page.sizeHint()
-            height = _page_content_height(page) + chrome
-            self.resize(hint.width(), min(height, max_h))
+        page = self._stack.currentWidget()
+        height = _fit_dialog_height(self, page)
+        self._max_dialog_height = getattr(self, "_dialog_height_cap", 720)
+        self.resize(page.sizeHint().width(), height)
 
         # Signals
         self.input_edit.fileDropped.connect(self._sync_default_output)
@@ -1018,14 +982,12 @@ class ConvertDialog(QDialog):
         self._sync_mode_row_alignment()
         # Switching pages used to leave the dialog at the old page's height, so
         # a short Convert page was surrounded by empty space and a tall Variant
-        # page could push its footer off-screen.  Re-size to the new page within
-        # the screen cap (P3).  ``self.width``/``self.height`` are QSpinBox
-        # attributes, so use the widget's current size, not ``self.width()``.
-        cap = getattr(self, "_max_dialog_height", 720)
+        # page could push its footer off-screen.  Re-size to the new page with
+        # the shared L-3 policy (``self.width``/``self.height`` are QSpinBox
+        # attributes, so the helper reads the widget's current size).
         page = self._stack.currentWidget()
-        chrome = max(self.sizeHint().height() - self._stack.sizeHint().height(), 0)
-        height = _page_content_height(page) + chrome
-        self.resize(self.size().width(), min(height, cap))
+        _fit_dialog_height(self, page)
+        self._max_dialog_height = getattr(self, "_dialog_height_cap", 720)
         self._carry_input_between_pages(previous, self._stack.currentWidget())
 
     def _carry_input_between_pages(self, source, target) -> None:

@@ -11,7 +11,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -28,6 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from raw_view.gui.dialogs._form import _fit_dialog_height, _make_subcard
 from raw_view.gui.panels import _qta_icon
 from raw_view.models import (
     AppSettings,
@@ -113,7 +113,10 @@ class PresetManagerDialog(QDialog):
         # Only Add and Delete are surfaced as buttons; Rename / Import / Export
         # live on the right-click menu to keep the panel uncluttered.
         self.add_btn = QPushButton("Add")
-        self.add_btn.setObjectName("accentButton")
+        # M-3: Add is a local list action, not a primary commit; only Save is
+        # filled.  Two solid-blue buttons made the dialog's main action
+        # ambiguous.
+        self.add_btn.setObjectName("secondaryButton")
         self.add_btn.setIcon(_qta_icon("fa5s.plus", self._icon_color()))
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setObjectName("dangerButton")
@@ -174,7 +177,9 @@ class PresetManagerDialog(QDialog):
             # in-memory model so that switching rows preserves the edit.
             self._connect_change_signal(w)
 
-        form = QFormLayout()
+        # M-2: the edit form lives in the same bordered subcard as every other
+        # dialog's form, with left-aligned labels and 6 px row spacing.
+        form_card, form = _make_subcard("Parameters")
         form.addRow("Type", self.type_combo)
         form.addRow("Format", self.format_combo)
         form.addRow("Alignment", self.align_combo)
@@ -207,7 +212,7 @@ class PresetManagerDialog(QDialog):
         edit_header.setObjectName("groupTitle")
         right = QVBoxLayout()
         right.addWidget(edit_header)
-        right.addLayout(form)
+        right.addWidget(form_card)
         right.addStretch(1)
 
         body = QHBoxLayout()
@@ -238,6 +243,9 @@ class PresetManagerDialog(QDialog):
         root.addLayout(bottom)
 
         self._refresh_list(select_index=0 if self._presets else -1)
+
+        # L-3: shared dialog height policy (content-driven, screen-capped).
+        _fit_dialog_height(self)
 
     # ── Wiring helpers ──────────────────────────────────────────────────
 
