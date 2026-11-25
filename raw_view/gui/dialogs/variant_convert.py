@@ -223,7 +223,7 @@ class VariantConvertPage(QWidget):
         image_form.addRow("Endianness", self.endian)
         image_layout.addLayout(image_form)
 
-        self.image_selector = VariantSelector()
+        self.image_selector = VariantSelector(theme=self._settings.ui_theme)
         image_layout.addWidget(self.image_selector)
 
         # ── YUV-only mode ─────────────────────────────────────────────

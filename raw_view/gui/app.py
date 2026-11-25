@@ -635,7 +635,7 @@ class MainWindow(QMainWindow):
         self.status.addPermanentWidget(self.state_status, 1)
 
         # Control panel
-        self.panel = ControlPanel()
+        self.panel = ControlPanel(theme=self.settings.ui_theme)
         self.panel.applyClicked.connect(self._on_apply_clicked)
         self.panel.typeChanged.connect(self._on_panel_type_changed)
         self.panel.rawPreviewChanged.connect(self._on_panel_raw_preview_changed)
@@ -1190,12 +1190,14 @@ class MainWindow(QMainWindow):
         # previous theme's blue.
         self._refresh_action_icons()
         # Explicit refresh hook: the panel must NOT listen to PaletteChange
-        # itself (that event also fires during construction).
+        # itself (that event also fires during construction).  The theme is
+        # passed explicitly; QPalette cannot be used because qt-material only
+        # applies a stylesheet (M-1 r2).
         panel = self.__dict__.get("panel")
-        refresh = getattr(panel, "refresh_pin_theme", None)
-        if refresh is not None:
+        apply_theme = getattr(panel, "apply_theme", None)
+        if apply_theme is not None:
             self._refresh_pin_state()
-            refresh()
+            apply_theme(self.settings.ui_theme)
         # Status-dot HTML and the empty-state glyph carry palette colours in
         # inline HTML/pixmaps, so re-render them after every theme switch.
         kind = self.__dict__.get("_state_kind")

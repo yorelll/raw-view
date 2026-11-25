@@ -28,17 +28,21 @@ from PyQt5.QtWidgets import (
 from raw_view.formats import RAW_BITS, YUV_BYTES_PER_PIXEL
 from raw_view.models import (
     action_icon_colors,
-    current_theme_name,
     BAYER_PATTERNS,
     COMMON_SIZES,
+    normalize_ui_theme,
 )
 
 # Custom (user-added) sizes are tinted through the stylesheet's
 # QCheckBox[customSize="true"] rule (accent token).
 
 
-def _info_icon(tooltip: str) -> QPushButton:
-    """Return a keyboard-accessible info button with the same tooltip help."""
+def _info_icon(tooltip: str, theme: str = "dark") -> QPushButton:
+    """Return a keyboard-accessible info button for *theme* (explicit token).
+
+    ``theme`` defaults to the application's default theme; production callers
+    always pass ``AppSettings.ui_theme`` explicitly.
+    """
     button = QPushButton()
     button.setObjectName("variantInfoButton")
     button.setFlat(True)
@@ -50,7 +54,7 @@ def _info_icon(tooltip: str) -> QPushButton:
     try:
         import qtawesome as qta
 
-        color, _ = action_icon_colors(current_theme_name())
+        color, _ = action_icon_colors(theme)
         button.setIcon(qta.icon("fa5s.info-circle", color=color))
     except Exception:
         button.setText("i")
@@ -75,8 +79,12 @@ class VariantSelector(QWidget):
     # YOnly 位深多选：勾选 YOnly 格式后按这些位深展开成 YOnly<bit> 变体
     YONLY_BITS = ["8", "10", "12", "14", "16"]
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, theme: str = "dark"
+    ) -> None:
         super().__init__(parent)
+        self._theme = normalize_ui_theme(theme)
+        self._info_buttons: list[QPushButton] = []
 
         self._format_boxes: dict[str, QCheckBox] = {}
         self._bayer_boxes: dict[str, QCheckBox] = {}
@@ -115,6 +123,21 @@ class VariantSelector(QWidget):
         # ── Sizes ──
         root.addWidget(self._make_size_group())
 
+    def apply_theme(self, theme: str) -> None:
+        """Re-render the ⓘ glyphs for *theme* (M-9 r2).
+
+        The theme is passed explicitly by the owning dialog/settings; it is
+        never guessed from the application palette.
+        """
+        self._theme = normalize_ui_theme(theme)
+        color, _ = action_icon_colors(self._theme)
+        try:
+            import qtawesome as qta
+        except Exception:  # pragma: no cover - headless fallback
+            return
+        for button in self._info_buttons:
+            button.setIcon(qta.icon("fa5s.info-circle", color=color))
+
     # ── group builders ────────────────────────────────────────────────
 
     def _title_row(self, title: str, help_text: str | None) -> QHBoxLayout:
@@ -125,7 +148,9 @@ class VariantSelector(QWidget):
         label.setObjectName("groupTitle")
         row.addWidget(label)
         if help_text:
-            row.addWidget(_info_icon(help_text))
+            button = _info_icon(help_text, self._theme)
+            self._info_buttons.append(button)
+            row.addWidget(button)
         row.addStretch(1)
         return row
 

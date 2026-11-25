@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 from raw_view.gui.panels import _qta_icon
 from raw_view.models import (
     AppSettings,
+    action_icon_colors,
     BAYER_PATTERNS,
     PRESET_CATEGORY_ALL,
     PRESET_CATEGORY_CHOICES,
@@ -113,10 +114,12 @@ class PresetManagerDialog(QDialog):
         # live on the right-click menu to keep the panel uncluttered.
         self.add_btn = QPushButton("Add")
         self.add_btn.setObjectName("accentButton")
-        self.add_btn.setIcon(_qta_icon("fa5s.plus"))
+        self.add_btn.setIcon(_qta_icon("fa5s.plus", self._icon_color()))
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setObjectName("dangerButton")
-        self.delete_btn.setIcon(_qta_icon("fa5s.trash-alt"))
+        self.delete_btn.setIcon(
+            _qta_icon("fa5s.trash-alt", self._icon_color())
+        )
         for btn in (self.add_btn, self.delete_btn):
             btn.setMinimumWidth(92)
             btn.setIconSize(QSize(13, 13))
@@ -237,6 +240,15 @@ class PresetManagerDialog(QDialog):
         self._refresh_list(select_index=0 if self._presets else -1)
 
     # ── Wiring helpers ──────────────────────────────────────────────────
+
+    def _icon_color(self) -> str:
+        """Explicit current theme's ``icon_color`` token (M-9 r2).
+
+        ``ui_theme`` always exists on the production AppSettings; the dark
+        default only covers lightweight test stubs that do not implement it.
+        """
+        theme = getattr(self._settings, "ui_theme", "dark")
+        return action_icon_colors(theme)[0]
 
     def _connect_change_signal(self, widget) -> None:
         if isinstance(widget, QComboBox):
@@ -442,14 +454,24 @@ class PresetManagerDialog(QDialog):
         if has_item:
             self.list_widget.setCurrentRow(row)
         menu = QMenu(self)
-        act_add = menu.addAction(_qta_icon("fa5s.plus"), "Add…")
-        act_rename = menu.addAction(_qta_icon("fa5s.pen"), "Rename…")
-        act_delete = menu.addAction(_qta_icon("fa5s.trash-alt"), "Delete")
+        act_add = menu.addAction(
+            _qta_icon("fa5s.plus", self._icon_color()), "Add…"
+        )
+        act_rename = menu.addAction(
+            _qta_icon("fa5s.pen", self._icon_color()), "Rename…"
+        )
+        act_delete = menu.addAction(
+            _qta_icon("fa5s.trash-alt", self._icon_color()), "Delete"
+        )
         act_rename.setEnabled(has_item)
         act_delete.setEnabled(has_item)
         menu.addSeparator()
-        act_import = menu.addAction(_qta_icon("fa5s.file-import"), "Import…")
-        act_export = menu.addAction(_qta_icon("fa5s.file-export"), "Export…")
+        act_import = menu.addAction(
+            _qta_icon("fa5s.file-import", self._icon_color()), "Import…"
+        )
+        act_export = menu.addAction(
+            _qta_icon("fa5s.file-export", self._icon_color()), "Export…"
+        )
         chosen = menu.exec_(self.list_widget.mapToGlobal(pos))
         if chosen is act_add:
             self._on_add()

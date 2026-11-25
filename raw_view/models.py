@@ -508,37 +508,12 @@ def action_icon_colors(theme: object) -> tuple[str, str]:
     """Return ``(enabled, disabled)`` icon colours for *theme* (M-9).
 
     The old module-level constants were hard-coded blues/greys; icon colour
-    now lives in ``THEME_PALETTES`` so switching themes cannot leave a bright
-    blue glyph on a dark toolbar.
+    now lives in ``THEME_PALETTES``.  Every call site passes the theme
+    explicitly: guessing from ``QApplication.palette()`` is unreliable because
+    qt-material applies its colours through the stylesheet, not QPalette.
     """
     palette = THEME_PALETTES[normalize_ui_theme(theme)]
     return palette["icon_color"], palette["icon_disabled_color"]
-
-
-# Backwards-compatible module constants (call sites that cannot know the theme
-# at import time use :func:`action_icon_colors` instead).  Kept derived so the
-# values can never drift from the palettes.
-ACTION_ICON_COLOR = THEME_PALETTES["dark"]["icon_color"]
-ACTION_ICON_DISABLED_COLOR = THEME_PALETTES["dark"]["icon_disabled_color"]
-
-
-def current_theme_name() -> str:
-    """Best-effort logical theme from the live QApplication palette.
-
-    Used by widgets that are constructed after the app theme is applied and
-    have no AppSettings reference (dialogs, panel icons).  Falls back to
-    ``"dark"`` (the app default) when there is no QApplication.
-    """
-    try:
-        from PyQt5.QtGui import QColor, QPalette
-        from PyQt5.QtWidgets import QApplication
-    except Exception:  # pragma: no cover - PyQt always available in the GUI
-        return "dark"
-    app = QApplication.instance()
-    if app is None:
-        return "dark"
-    base = QColor(app.palette().color(QPalette.Base))
-    return "dark" if base.lightnessF() < 0.5 else "light"
 
 
 # ── Data models ─────────────────────────────────────────────────────────
@@ -1753,6 +1728,17 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             text-transform: none;
         }}
         /*
+         * H-1 (r2): dialogs also create unnamed QPushButtons (Close / Clear /
+         * About / Keyboard Shortcuts).  qt-material gives them a 2px blue
+         * border in every state, so a recolour to accent would be invisible;
+         * focus_ring is the high-contrast ring.  The width matches the idle
+         * border, so geometry cannot change.  Every styled #objectName rule
+         * above has higher specificity and keeps its own focus treatment.
+         */
+        QPushButton:focus {{
+            border: 2px solid {p["focus_ring"]};
+        }}
+        /*
          * H-1: keyboard focus must be visible on every button family.
          * A 2px ring is painted on the widget's own border; padding is
          * reduced by the same 2px so border+padding stays constant and the
@@ -1761,22 +1747,34 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton#accentButton {{
             background: {p["button_bg"]};
             color: {p["button_text_color"]};
-            border: 2px solid transparent;
+            /* Idle 1px transparent border keeps the delivered 30px height
+               (28 content + 2 border).  Focus thickens it to 2px and drops
+               min/max to 26 so the rendered height stays 30 (M-2), with the
+               horizontal padding reduced by the same 1px to keep the width. */
+            border: 1px solid transparent;
             border-radius: 6px;
             padding: 0px 14px;
-            min-height: 30px;
-            max-height: 30px;
+            min-height: 28px;
+            max-height: 28px;
             font-weight: 600;
         }}
         QPushButton#accentButton[applyPrimary="true"] {{
-            min-height: 34px;
-            max-height: 34px;
+            min-height: 32px;
+            max-height: 32px;
         }}
         QPushButton#accentButton:hover {{
             background: {p["button_hover_bg"]};
         }}
         QPushButton#accentButton:focus {{
-            border-color: {p["focus_ring"]};
+            border: 2px solid {p["focus_ring"]};
+            padding: 0px 13px;
+            min-height: 26px;
+            max-height: 26px;
+        }}
+        QPushButton#accentButton[applyPrimary="true"]:focus {{
+            padding: 0px 13px;
+            min-height: 30px;
+            max-height: 30px;
         }}
         QPushButton#accentButton:disabled {{
             background: {p["border_color"]};

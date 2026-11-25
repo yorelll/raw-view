@@ -30,7 +30,6 @@ from raw_view.formats import (
 )
 from raw_view.models import (
     action_icon_colors,
-    current_theme_name,
     BAYER_PATTERNS,
     PRESET_CATEGORY_ALL,
     PRESET_CATEGORY_CHOICES,
@@ -40,18 +39,18 @@ from raw_view.models import (
     is_supported_preset_format_for_type,
     normalize_preset_format_name,
     normalize_preset_image_type,
+    normalize_ui_theme,
     sort_presets_for_browse,
 )
 
 
-def _qta_icon(name: str, color: str | None = None):
+def _qta_icon(name: str, color: str):
     """Build a qtawesome icon, tolerant of failures/headless envs.
 
-    ``color`` defaults to the *current* theme's ``icon_color`` token (M-9);
-    callers that know the theme pass it explicitly.
+    ``color`` is always supplied explicitly by the caller from
+    ``THEME_PALETTES``; guessing from QApplication.palette() is not reliable
+    because qt-material themes through the stylesheet, not QPalette (M-1 r2).
     """
-    if color is None:
-        color = action_icon_colors(current_theme_name())[0]
     try:
         import qtawesome as qta
 
@@ -201,8 +200,15 @@ class ControlPanel(QWidget):
     # YOnly 多 bit（16-bit 存储）需要启用 Alignment/Endianness 控制。
     _YONLY_16BIT = {"YOnly10", "YOnly12", "YOnly14", "YOnly16"}
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, theme: str = "dark"
+    ) -> None:
         super().__init__(parent)
+        # Explicit theme: icon colour must never be guessed from QPalette (the
+        # qt-material theme lives in the stylesheet).  Default matches
+        # AppSettings.ui_theme's default; MainWindow passes the live value.
+        self._theme = normalize_ui_theme(theme)
+        self._preset_icon_actions: list[tuple[QAction, str]] = []
         self.setMinimumWidth(340)
         self.setObjectName("controlPanel")
         # Required for the QSS `QWidget#controlPanel` surface to paint.
@@ -255,7 +261,7 @@ class ControlPanel(QWidget):
         self.preset_filter_btn.setObjectName("presetFilterButton")
         self.preset_filter_btn.setPopupMode(QToolButton.InstantPopup)
         self.preset_filter_btn.setAutoRaise(True)
-        self.preset_filter_btn.setIcon(_qta_icon("fa5s.filter"))
+        self.preset_filter_btn.setIcon(_qta_icon("fa5s.filter", self._icon_color()))
         self.preset_filter_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.preset_filter_btn.setIconSize(QSize(16, 16))
         self.preset_filter_btn.setFixedSize(30, 30)
@@ -315,7 +321,7 @@ class ControlPanel(QWidget):
         self.pin_btn.setObjectName("pinButton")
         self.pin_btn.setCheckable(True)
         self.pin_btn.setAutoRaise(True)
-        self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack"))
+        self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack", self._icon_color()))
         self.pin_btn.setIconSize(QSize(14, 14))
         self.pin_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.pin_btn.setFixedSize(30, 30)
@@ -966,8 +972,13 @@ class ControlPanel(QWidget):
         self._update_preset_filter_button()
         self._refresh_preset_combo()
 
+    def _icon_color(self) -> str:
+        """Current theme's ``icon_color`` token (M-9)."""
+        return action_icon_colors(self._theme)[0]
+
     def _make_preset_action(self, icon_name: str, text: str, description: str, slot):
-        action = QAction(_qta_icon(icon_name), text, self)
+        action = QAction(_qta_icon(icon_name, self._icon_color()), text, self)
+        self._preset_icon_actions.append((action, icon_name))
         action.setToolTip(description)
         action.setStatusTip(description)
         # QAction has no accessibleName API in PyQt5; descriptive text + tooltip
@@ -988,13 +999,6 @@ class ControlPanel(QWidget):
 
     # ── Pin (pinned parameters) ──────────────────────────────────────
 
-    @staticmethod
-    def _is_dark_palette(palette) -> bool:
-        """Whether *palette* belongs to a dark theme (drives icon brightness)."""
-        from PyQt5.QtGui import QColor
-
-        return QColor(palette.color(palette.Base)).lightnessF() < 0.5
-
     def pin_state(self) -> str:
         """Current three-state pin: ``"off"``, ``"match"`` or ``"pending"``."""
         if not self.pin_btn.isChecked():
@@ -1003,8 +1007,7 @@ class ControlPanel(QWidget):
 
     def _pin_icon_color(self) -> str:
         """Theme-aware icon colour for the current three-state pin."""
-        palette = self.palette()
-        tokens = THEME_PALETTES["dark" if self._is_dark_palette(palette) else "light"]
+        tokens = THEME_PALETTES[self._theme]
         state = self.pin_state()
         if state == "off":
             # Body text colour: bright grey on dark themes, dark grey on light.
@@ -1013,23 +1016,31 @@ class ControlPanel(QWidget):
             return tokens["accent"]
         return tokens["warning"]
 
-    def refresh_pin_theme(self) -> None:
-        """Re-derive the pin icon colour from the current palette.
+    def apply_theme(self, theme: str) -> None:
+        """Re-render every theme-coloured panel glyph (M-1 r2).
 
-        Called explicitly by ``MainWindow._apply_theme`` after a theme switch.
+        Called explicitly by ``MainWindow._apply_theme`` with the authoritative
+        ``AppSettings.ui_theme``.  The theme is never inferred from QPalette:
+        qt-material only sets a stylesheet, so the application palette keeps
+        the default light ``Base`` colour.
+        """
+        self._theme = normalize_ui_theme(theme)
+        self.preset_filter_btn.setIcon(
+            _qta_icon("fa5s.filter", self._icon_color())
+        )
+        for action, icon_name in self._preset_icon_actions:
+            action.setIcon(_qta_icon(icon_name, self._icon_color()))
+        self.refresh_pin_theme()
+
+    def refresh_pin_theme(self) -> None:
+        """Re-derive the pin icon colour from the explicit current theme.
+
         Deliberately NOT wired to ``changeEvent``/``PaletteChange``: that event
         is also delivered while the widget is still being constructed, which
         makes the refresh prone to touching half-initialised state.
         """
         state = self.pin_state()
         self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack", self._pin_icon_color()))
-        # The filter glyph also carries icon_color; rebuild it on theme switch
-        # so a live Light->Dark switch cannot leave the old blue behind (M-9).
-        self.preset_filter_btn.setIcon(
-            _qta_icon("fa5s.filter", action_icon_colors(
-                "dark" if self._is_dark_palette(self.palette()) else "light"
-            )[0])
-        )
         if state == "off":
             self.pin_btn.setToolTip(
                 "Pin the current parameters to apply to other files (Ctrl+N)."

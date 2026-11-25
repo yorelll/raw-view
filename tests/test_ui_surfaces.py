@@ -41,6 +41,7 @@ from _qt_cleanup import (  # noqa: E402
 from PyQt5.QtCore import QPoint, QRect, QSettings, Qt  # noqa: E402
 from PyQt5.QtGui import QColor, QIcon  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
+    QAction,
     QApplication,
     QPushButton,
     QTableWidgetItem,
@@ -533,6 +534,26 @@ class FocusRingTests(_SurfaceTestBase):
                 window.panel.set_enabled(True)
                 self._settle()
 
+                # M-2: the delivered 30px/34px static heights must survive the
+                # 2px focus border (Qt min/max-height excludes the border).
+                save_btn = dialog.findChild(QPushButton, "accentButton")
+                self.assertIsNotNone(save_btn)
+                self.assertEqual(
+                    save_btn.height(), 30,
+                    f"{theme}: 静止 accentButton 高度必须是 30，实测 "
+                    f"{save_btn.height()}",
+                )
+                self.assertEqual(
+                    dialog.template_reset_btn.height(), 30,
+                    f"{theme}: 静止 secondaryButton 高度必须是 30，实测 "
+                    f"{dialog.template_reset_btn.height()}",
+                )
+                self.assertEqual(
+                    window.panel.apply_btn.height(), 34,
+                    f"{theme}: 静止 applyPrimary 高度必须是 34，实测 "
+                    f"{window.panel.apply_btn.height()}",
+                )
+
                 tool_buttons = self._toolbar_buttons(window)
                 self.assertGreaterEqual(
                     len(tool_buttons), 2, f"{theme}: 工具栏至少要有两个 QToolButton"
@@ -602,6 +623,87 @@ class FocusRingTests(_SurfaceTestBase):
                         if widget in self._widgets:
                             self._widgets.remove(widget)
                         destroy_widget(widget)
+
+
+    def test_t5b_every_visible_pushbutton_paints_focus(self):
+        """H-1 r2: no QPushButton family (named or generic) is left out."""
+        from raw_view.gui.dialogs import (
+            AboutDialog,
+            BatchConvertDialog,
+            ConvertDialog,
+            FourCCDialog,
+            HelpDialog,
+            KeyboardShortcutsDialog,
+            PresetManagerDialog,
+            SettingsDialog,
+        )
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                self.settings.ui_font_size = 13
+                dialogs = {
+                    "Batch": self._track(BatchConvertDialog(self.settings)),
+                    "FourCC": self._track(FourCCDialog(self.settings)),
+                    "Help": self._track(HelpDialog()),
+                    "About": self._track(AboutDialog()),
+                    "Keyboard": self._track(KeyboardShortcutsDialog()),
+                    "Settings": self._track(SettingsDialog(self.settings)),
+                    "Preset": self._track(PresetManagerDialog(self.settings)),
+                    "Convert": self._track(ConvertDialog(self.settings)),
+                }
+                try:
+                    for name, dialog in dialogs.items():
+                        dialog.show()
+                        APP.setActiveWindow(dialog)
+                        dialog.activateWindow()
+                        dialog.raise_()
+                        self._settle()
+                        for button in dialog.findChildren(QPushButton):
+                            if not button.isVisibleTo(dialog):
+                                continue
+                            if not button.isEnabled():
+                                continue
+                            label = (
+                                button.objectName()
+                                or button.text()
+                                or type(button).__name__
+                            )
+                            button.clearFocus()
+                            self._settle()
+                            self.assertFalse(
+                                button.hasFocus(),
+                                f"{theme}/{name}/{label}: 取样前必须未聚焦",
+                            )
+                            before = dialog.grab().toImage()
+                            size_before = button.size()
+                            button.setFocus(Qt.TabFocusReason)
+                            self._settle()
+                            self.assertTrue(
+                                button.hasFocus(),
+                                f"{theme}/{name}/{label}: 无法获得键盘焦点",
+                            )
+                            after = dialog.grab().toImage()
+                            size_after = button.size()
+                            changed = _diff_pixels(
+                                before, after, button, dialog
+                            )
+                            self.assertGreaterEqual(
+                                changed, 40,
+                                f"{theme}/{name}/{label}: 聚焦前后只有 "
+                                f"{changed} 像素变化（要求 >=40）",
+                            )
+                            self.assertEqual(
+                                size_before, size_after,
+                                f"{theme}/{name}/{label}: 聚焦改变了尺寸 "
+                                f"{size_before} -> {size_after}",
+                            )
+                finally:
+                    for dialog in dialogs.values():
+                        if dialog in self._widgets:
+                            self._widgets.remove(dialog)
+                        destroy_widget(dialog)
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +903,36 @@ class IconTokenTests(_SurfaceTestBase):
                     counts[colour.name().lower()] += 1
         return counts.most_common(1)[0][0]
 
+    @staticmethod
+    def _window_icon_sources(window) -> dict:
+        """Every themed action/icon in the main window (toolbar, menus, panel)."""
+        sources = {}
+        for action in window.findChildren(QAction):
+            if action.property("iconName"):
+                sources[f"action:{action.text()}"] = action.icon()
+        panel = window.panel
+        for attr in (
+            "preset_save_action",
+            "preset_manage_action",
+            "apply_to_all_action",
+            "forget_remembered_action",
+            "pin_toggle_action",
+        ):
+            if hasattr(panel, attr):
+                sources[f"panel.{attr}"] = getattr(panel, attr).icon()
+        sources["panel.filter"] = panel.preset_filter_btn.icon()
+        return sources
+
+    def _assert_icon_colour(self, sources, expected: str, context: str) -> None:
+        expected = expected.lower()
+        self.assertTrue(sources, f"{context}: 没有采集到任何图标")
+        for label, icon in sources.items():
+            actual = self._dominant_colour(icon, QIcon.Normal)
+            self.assertEqual(
+                actual, expected,
+                f"{context}/{label}: 图标主色必须是 {expected}，实测 {actual}",
+            )
+
     def test_t8_icon_colours_follow_tokens_and_theme(self):
         from raw_view.gui.app import MainWindow
 
@@ -871,6 +1003,137 @@ class IconTokenTests(_SurfaceTestBase):
                         switched, enabled,
                         f"{theme}->{other}: 图标颜色在两主题下必须不同",
                     )
+
+                    # L-3 / M-1: every themed icon in the main window (toolbar,
+                    # menus and the panel context-menu actions) must follow the
+                    # new theme after the live switch.
+                    self._assert_icon_colour(
+                        self._window_icon_sources(window),
+                        THEME_PALETTES[other]["icon_color"],
+                        f"{theme}->{other} 主窗口",
+                    )
+
+                    extra_widgets = []
+                    try:
+                        # The live-switch block above changed
+                        # self.settings.ui_theme to *other* (same object as
+                        # window.settings).  Fresh dialogs must be constructed
+                        # for the iteration's theme even though the current
+                        # app stylesheet is the other one.
+                        self.settings.ui_theme = theme
+                        from raw_view.gui.dialogs import (
+                            ConvertDialog,
+                            PresetManagerDialog,
+                            SettingsDialog,
+                        )
+                        from raw_view.gui.panels import ControlPanel
+                        from raw_view.gui.widgets.variant_selector import (
+                            VariantSelector,
+                        )
+
+                        # Fresh construction with an explicit theme: no prior
+                        # _apply_theme call, the app palette still says light.
+                        panel = ControlPanel(theme=theme)
+                        extra_widgets.append(panel)
+                        fresh_sources = {
+                            "filter": panel.preset_filter_btn.icon(),
+                            "preset_save": panel.preset_save_action.icon(),
+                            "preset_manage": panel.preset_manage_action.icon(),
+                            "apply_to_all": panel.apply_to_all_action.icon(),
+                            "forget": panel.forget_remembered_action.icon(),
+                            "pin_toggle": panel.pin_toggle_action.icon(),
+                        }
+                        self._assert_icon_colour(
+                            fresh_sources, palette["icon_color"],
+                            f"{theme} fresh ControlPanel",
+                        )
+
+                        selector = VariantSelector(theme=theme)
+                        extra_widgets.append(selector)
+                        info_buttons = selector.findChildren(
+                            QPushButton, "variantInfoButton"
+                        )
+                        self.assertTrue(
+                            info_buttons,
+                            f"{theme}: VariantSelector 缺少 variantInfoButton",
+                        )
+                        self._assert_icon_colour(
+                            {
+                                f"variantInfo{i}": button.icon()
+                                for i, button in enumerate(info_buttons)
+                            },
+                            palette["icon_color"],
+                            f"{theme} fresh VariantSelector",
+                        )
+                        selector.apply_theme(other)
+                        self._assert_icon_colour(
+                            {
+                                f"variantInfo{i}": button.icon()
+                                for i, button in enumerate(info_buttons)
+                            },
+                            THEME_PALETTES[other]["icon_color"],
+                            f"{theme}->{other} VariantSelector",
+                        )
+
+                        convert = ConvertDialog(self.settings)
+                        extra_widgets.append(convert)
+                        convert_info = convert.findChildren(
+                            QPushButton, "variantInfoButton"
+                        )
+                        self.assertTrue(
+                            convert_info,
+                            f"{theme}: ConvertDialog 缺少 variantInfoButton",
+                        )
+                        self._assert_icon_colour(
+                            {
+                                f"convertInfo{i}": button.icon()
+                                for i, button in enumerate(convert_info)
+                            },
+                            palette["icon_color"],
+                            f"{theme} fresh ConvertDialog",
+                        )
+
+                        preset = PresetManagerDialog(self.settings)
+                        extra_widgets.append(preset)
+                        self._assert_icon_colour(
+                            {
+                                "preset.add": preset.add_btn.icon(),
+                                "preset.delete": preset.delete_btn.icon(),
+                            },
+                            palette["icon_color"],
+                            f"{theme} fresh PresetManager",
+                        )
+
+                        settings_dialog = SettingsDialog(self.settings)
+                        extra_widgets.append(settings_dialog)
+                        settings_sources = {
+                            "settings.templateHelp": (
+                                settings_dialog.template_help_icon.icon()
+                            ),
+                        }
+                        variant_help = settings_dialog.findChild(
+                            QPushButton, "variantHelp"
+                        )
+                        self.assertIsNotNone(variant_help)
+                        settings_sources["settings.variantHelp"] = variant_help.icon()
+                        self._assert_icon_colour(
+                            settings_sources, palette["icon_color"],
+                            f"{theme} fresh SettingsDialog",
+                        )
+                    finally:
+                        for widget in extra_widgets:
+                            destroy_widget(widget)
+
+                    if theme == "dark":
+                        # M-1: dark non-toolbar glyphs must not regress below
+                        # the old main-baseline contrast (5.055:1).
+                        self.assertGreaterEqual(
+                            _contrast_ratio(
+                                palette["icon_color"], palette["panel_bg"]
+                            ),
+                            5.05,
+                            "dark icon_color 对 panel_bg 低于 main 基线 5.05:1",
+                        )
                 finally:
                     if window in self._widgets:
                         self._widgets.remove(window)

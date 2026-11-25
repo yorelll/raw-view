@@ -1217,8 +1217,8 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
                     focus_start = sheet.index(f"QPushButton#{object_name}:focus")
                     focus_rule = sheet[focus_start:sheet.index("}", focus_start)]
                     self.assertIn(
-                        "border", focus_rule,
-                        f"{theme}/{object_name}: focus 必须声明可见边框",
+                        "border: 2px", focus_rule,
+                        f"{theme}/{object_name}: focus 必须声明 2px 可见边框",
                     )
                     self.assertNotIn(
                         "border: none", focus_rule,
