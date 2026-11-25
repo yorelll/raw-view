@@ -2027,12 +2027,15 @@ class DecodeTeardownTests(_StubWindowCleanupMixin):
         from raw_view.gui.app import MainWindow
 
         w = MainWindow()
-        # 假线程：isRunning=True、wait 记录调用
+        # 假线程：isRunning=True、quit/wait 记录调用
         class _FakeThread:
             def __init__(self):
                 self.waited = 0
+                self.quit_called = False
             def isRunning(self):
                 return True
+            def quit(self):
+                self.quit_called = True
             def wait(self, ms):
                 self.waited = ms
                 return True
@@ -2042,7 +2045,10 @@ class DecodeTeardownTests(_StubWindowCleanupMixin):
              mock.patch.object(w, "_cancel_async_decode") as canc:
             MainWindow.closeEvent(w, self._qclose_event())
             dis.assert_called_once_with()
-            self.assertEqual(fake.waited, 400, "关闭时应留下有界短超时")
+            self.assertTrue(fake.quit_called, "关闭时应 quit 线程事件循环")
+            self.assertEqual(
+                fake.waited, w._DECODE_QUIESCE_MS, "关闭时应留下有界短超时"
+            )
             # 别在这里 w.close()——会再次进入 closeEvent 重复触发断言；
             # 真实窗口用 hide + 延迟删除清理即可（close=False 保留该语义）。
             w.hide()

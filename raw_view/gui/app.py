@@ -3703,14 +3703,57 @@ class MainWindow(QMainWindow):
         self._disconnect_decode()
         if thread is None:
             return
+        bound = self._DECODE_QUIESCE_MS if timeout_ms is None else timeout_ms
         try:
             if thread.isRunning():
                 thread.quit()
-                thread.wait(
-                    self._DECODE_QUIESCE_MS if timeout_ms is None else timeout_ms
-                )
+                if not thread.wait(bound):
+                    # Not silent: a live thread during the coming widget work is
+                    # exactly the condition that caused the CI hang.  The result
+                    # is already detached, so this is a bounded trade-off, but a
+                    # log line preserves the evidence instead of hiding it.
+                    logger.warning(
+                        "decode QThread did not stop within %d ms (%s); "
+                        "continuing with the thread still alive",
+                        bound, type(self).__name__,
+                    )
         except RuntimeError:  # pragma: no cover - wrapper already deleted
             pass
+
+    def _join_finished_decode(self) -> None:
+        """Stop the QThread whose result/error was just delivered.
+
+        Central join for the *post-result* path.  By the time a decode result is
+        consumed, its worker's ``run()`` has returned and the thread is only
+        waiting in ``exec()``/winding down.  Joining here makes every follow-up
+        widget action -- Reload All steps 2..N, the open-queue advance, a pin
+        refresh, frame navigation -- run with **no live decode QThread**, instead
+        of having to guard each entry point separately.  This is what fixes the
+        Reload All steps that previously rebuilt pages while the previous
+        thread still sat in ``exec()``.
+
+        Only valid in the *applied* branch of ``_on_decode_finished``/``_error``:
+        there the generation + item identity match guarantees ``_thread`` still
+        belongs to this request.  A stale result must not join ``_thread`` -- it
+        may already point at the request that superseded it.
+        """
+        thread = self.__dict__.get("_thread")
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                thread.quit()
+                if not thread.wait(self._DECODE_QUIESCE_MS):
+                    logger.warning(
+                        "decode QThread did not stop within %d ms after its "
+                        "result; leaving it tracked for the next guard",
+                        self._DECODE_QUIESCE_MS,
+                    )
+                    return
+        except RuntimeError:  # pragma: no cover - wrapper already deleted
+            pass
+        self._thread = None
+        self._worker = None
 
     def _cancel_decode_for(self, item: ViewerItem | None) -> None:
         """若 *item* 正是当前在途解码的目标，则断开其 worker 的连接。
@@ -3751,18 +3794,10 @@ class MainWindow(QMainWindow):
                 self._sync_applied_params_for(it)
             except Exception:
                 logger.exception("Failed to persist remembered parameters on exit")
-        thread = self.__dict__.get("_thread")
-        self._disconnect_decode()
-        if thread is not None:
-            try:
-                if thread.isRunning():
-                    thread.wait(400)
-            except RuntimeError:
-                # 已完成解码的 QThread 经 deleteLater 释放 C++ 对象后，Python 侧
-                # 包装仍可能被 self._thread 引用（_on_decode_finished 不置空）；
-                # 对已删除对象调用 isRunning/wait 会抛 RuntimeError，这里静默跳过
-                # ——线程已退出，无需等待。
-                pass
+        # Same bounded stop-and-detach as tab teardown, but here it must also
+        # call quit(): a finished-but-not-quit thread would otherwise leave the
+        # event loop running while the window (and its children) are destroyed.
+        self._quiesce_decode_thread()
         super().closeEvent(event)
 
     def _should_apply_decode(self, generation: int, item: ViewerItem | None) -> bool:
@@ -3816,6 +3851,12 @@ class MainWindow(QMainWindow):
                 generation, self._decode_generation,
             )
             return
+        # This result belongs to the current request, so _thread is still its
+        # thread.  Join it *before* the UI update and the state-machine advance:
+        # _on_decode_success may synchronously start the next Reload All step or
+        # open-queue item, and that step must not rebuild pages while this
+        # thread is still alive (the CI hang / access violation).
+        self._join_finished_decode()
         self._pending_decode_item = None
         self._background_decode_item = None
         # Consume the per-request intent together with the pending refs: only
@@ -3945,6 +3986,8 @@ class MainWindow(QMainWindow):
                 generation, self._decode_generation,
             )
             return
+        # Same central join as the success path (see _join_finished_decode).
+        self._join_finished_decode()
         show_error = self.__dict__.get("_pending_decode_show_error", True)
         self._pending_decode_item = None
         self._background_decode_item = None

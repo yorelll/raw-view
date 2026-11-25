@@ -753,26 +753,68 @@ class BatchUiRefreshTests(_WindowFixture):
 # ── 0.6.2: decode QThread must be stopped before page teardown ───────────
 
 
+def _blocking_run(seconds: float):
+    """Patch ``DecodeWorker.run`` to keep the thread in flight for *seconds*."""
+    import time
+
+    def _run(_worker):
+        time.sleep(seconds)
+
+    return _run
+
+
+def _record_thread_at_entries(target_name: str):
+    """Wrap a MainWindow method to record ``self._thread`` at every entry."""
+    entries: list = []
+    original = getattr(MainWindow, target_name)
+
+    def _wrapper(self, *args, **kwargs):
+        entries.append(self.__dict__.get("_thread"))
+        return original(self, *args, **kwargs)
+
+    return entries, _wrapper
+
+
+def _thread_is_running(thread) -> bool:
+    try:
+        return thread.isRunning()
+    except RuntimeError:  # pragma: no cover - wrapper already deleted
+        return False
+
+
+def _wait_until(predicate, timeout: float = 30.0) -> bool:
+    from PyQt5.QtTest import QTest
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        QTest.qWait(5)
+        if predicate():
+            return True
+    return predicate()
+
+
 class DecodeQuiesceTests(_WindowFixture):
     """Closing/rebuilding pages while a decode QThread runs spun Qt forever.
 
     The CI watchdog caught it on Ubuntu inside ``QMenu.clear()`` and
     ``QGraphicsView.__init__``; it reproduces on Windows as a 100%-CPU spin in
     ``removeTab`` / ``setParent(None)``.  The fix stops the thread (bounded)
-    before the widget tree is touched.
+    before the widget tree is touched.  These tests pin the *entry* invariant so
+    the guard cannot silently regress at any of the close/reload entry points.
     """
 
-    def test_close_all_stops_inflight_decode_before_destroying_pages(self):
-        import time
-
+    def _open_batch(self, prefix: str = "q", count: int = 6) -> None:
         from PyQt5.QtTest import QTest
 
-        def _slow_run(_worker):  # patched DecodeWorker.run: stays in flight
-            time.sleep(0.15)
+        self.w._open_paths(self._many([f"{prefix}{i}.raw" for i in range(count)]))
+        QTest.qWait(5)
 
-        with mock.patch.object(app_module.DecodeWorker, "run", _slow_run):
-            self.w._open_paths(self._many([f"q{i}.raw" for i in range(6)]))
-            QTest.qWait(5)
+    def test_close_all_stops_inflight_decode_before_destroying_pages(self):
+        entries, wrapper = _record_thread_at_entries("close_item")
+        with mock.patch.object(app_module.DecodeWorker, "run", _blocking_run(0.2)), \
+             mock.patch.object(MainWindow, "close_item", wrapper):
+            self._open_batch()
             thread = self.w.__dict__.get("_thread")
             self.assertIsNotNone(thread, "an async decode must be in flight")
             self.w.close_all_items()
@@ -783,9 +825,104 @@ class DecodeQuiesceTests(_WindowFixture):
             _thread_is_running(thread),
             "close-all must stop the decode QThread before destroying pages",
         )
+        self.assertTrue(entries, "close-all must enter close_item")
+        self.assertEqual(
+            [t for t in entries if t is not None], [],
+            "close-all must quiesce the decode before the FIRST close_item entry",
+        )
+
+    def test_close_item_quiesces_the_inflight_item_before_removal(self):
+        """Mutation guard: _cancel_decode_for must wait, not merely disconnect."""
+        with mock.patch.object(app_module.DecodeWorker, "run", _blocking_run(0.3)):
+            self._open_batch()
+            thread = self.w.__dict__.get("_thread")
+            self.assertIsNotNone(thread)
+            self.w.close_item(0)  # items[0] is the in-flight decode target
+
+        self.assertFalse(
+            _thread_is_running(thread),
+            "closing the in-flight item must join its decode thread first",
+        )
+        # The open queue may have advanced to the next item; stop it for teardown.
+        self.w.close_all_items()
+
+    def test_reload_all_steps_enter_with_no_live_decode_thread(self):
+        """Mutation guard for the central join after consuming a result.
+
+        Reload All steps 2..N run from ``_on_decode_success`` -> ``_advance_*``;
+        the previous thread must already be joined by then, otherwise the page
+        rebuild races a live QThread (the CI access violation / hang).
+        """
+        import time
+
+        from PyQt5.QtTest import QTest
+
+        entries, wrapper = _record_thread_at_entries("_reload_item_at")
+        original_run = app_module.DecodeWorker.run
+
+        def _delayed_run(worker):  # real decode, but leave the thread alive a bit
+            time.sleep(0.02)
+            return original_run(worker)
+
+        with mock.patch.object(MainWindow, "_reload_item_at", wrapper), \
+             mock.patch.object(app_module.DecodeWorker, "run", _delayed_run):
+            self._open_batch("r")
+            self.w.reload_all_items()
+            self.assertTrue(
+                _wait_until(lambda: self.w.__dict__.get("_reload_all_state") is None),
+                "Reload All never settled",
+            )
+
+        self.assertGreaterEqual(len(entries), 6, "every item must be reloaded")
+        self.assertEqual(
+            [t for t in entries if t is not None], [],
+            "Reload All must enter every _reload_item_at with no live _thread",
+        )
+
+    def test_close_right_quiesces_before_destroying_a_covering_batch(self):
+        """If the in-flight item is being closed, stop it before ANY page dies."""
+        entries, wrapper = _record_thread_at_entries("close_item")
+        with mock.patch.object(app_module.DecodeWorker, "run", _blocking_run(0.2)), \
+             mock.patch.object(MainWindow, "close_item", wrapper):
+            self._open_batch("x")
+            thread = self.w.__dict__.get("_thread")
+            self.assertIsNotNone(thread)
+            # Pretend the in-flight target is index 3, inside the closed range.
+            self.w._pending_decode_item = self.w.items[3]
+            self.w.close_items_to_the_right(0)
+
+        self.assertTrue(entries)
+        self.assertEqual(
+            [t for t in entries if t is not None], [],
+            "close-items-to-the-right must stop the thread before the first close",
+        )
+        self.assertFalse(_thread_is_running(thread))
+
+    def test_close_right_keeps_a_non_covering_decode_running(self):
+        """Closing tabs that exclude the in-flight item must NOT cancel it."""
+        with mock.patch.object(app_module.DecodeWorker, "run", _blocking_run(0.5)):
+            self._open_batch("y")
+            thread = self.w.__dict__.get("_thread")
+            self.assertIsNotNone(thread)
+            # pending is items[0]; close to the right of index 1 keeps it open.
+            self.w.close_items_to_the_right(1)
+            try:
+                self.assertTrue(
+                    _thread_is_running(thread),
+                    "a kept in-flight decode must not be stopped",
+                )
+                self.assertIs(self.w.__dict__.get("_thread"), thread)
+            finally:
+                thread.quit()
+                thread.wait(3000)
 
     def test_quiesce_decode_thread_is_bounded_for_a_blocked_worker(self):
-        """A long decode must not make tab teardown block indefinitely."""
+        """A long decode must not make tab teardown block indefinitely.
+
+        Structural, not wall-clock: a 400 ms ``run`` cannot have completed
+        inside the 40 ms bound, so the thread must still be running when the
+        call returns (and the reference is dropped).
+        """
         import time
 
         from PyQt5.QtCore import QThread
@@ -800,24 +937,15 @@ class DecodeQuiesceTests(_WindowFixture):
             self.assertTrue(thread.isRunning())
             self.w._thread = thread
             self.w._worker = None
-            started = time.perf_counter()
             self.w._quiesce_decode_thread(timeout_ms=40)
-            elapsed = time.perf_counter() - started
-            self.assertLess(
-                elapsed, 0.3,
+            self.assertTrue(
+                thread.isRunning(),
                 "quiesce must return within its bound instead of waiting for "
-                "a long decode",
+                "a long decode to finish",
             )
             self.assertIsNone(self.w.__dict__.get("_thread"))
         finally:
             thread.wait(3000)
-
-
-def _thread_is_running(thread) -> bool:
-    try:
-        return thread.isRunning()
-    except RuntimeError:  # pragma: no cover - wrapper already deleted
-        return False
 
 
 # ── S6: background-tab close skips the panel reload ──────────────────────
