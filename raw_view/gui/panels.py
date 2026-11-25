@@ -151,7 +151,7 @@ class _SizedSpinBox(QSpinBox):
         return QSize(max(hint.width(), self._required_width), hint.height())
 
 
-class PresetComboBox(QComboBox):
+class PresetComboBox(_SizedCombo):
     """Selection-only preset combo with a painted empty-state hint.
 
     Qt does not paint ``placeholderText`` for a non-editable ``QComboBox`` (the
@@ -255,13 +255,14 @@ class ControlPanel(QWidget):
     # row in the model: the popup lists real presets only).
     _PRESET_PLACEHOLDER = "Select a preset"
     #: Decode fields whose text must stay readable at every font size (V-2).
-    #: The preset selector is excluded: it paints an elided hint and lives in a
-    #: row with fixed-size buttons, so it must stay compressible instead.
     _FIELD_NAMES = (
         "type_combo", "format_combo", "bit_depth_combo", "align_combo",
         "endian_combo", "raw_preview_combo", "bayer_pattern_combo",
         "width_spin", "height_spin", "offset_spin",
     )
+    #: Every QComboBox/QSpinBox sized by the font metrics, including the View
+    #: group's zoom spin and the Preset group's selector (V-2 covers all).
+    _METRIC_FIELD_NAMES = _FIELD_NAMES + ("zoom_spin", "preset_combo")
     # Hint shown instead when the active selection is hidden by the filter.
     _PRESET_HIDDEN_SELECTION = "(Current preset hidden by filter)"
     # Three-state pin colours come from THEME_PALETTES (accent / warning); see
@@ -501,15 +502,16 @@ class ControlPanel(QWidget):
         self.zoom_slider.setRange(10, 1000)
         self.zoom_slider.setValue(100)
         self.zoom_slider.setTickPosition(QSlider.NoTicks)
-        # Editable spin box: slide for coarse, type for precise.
-        self.zoom_spin = QSpinBox()
+        # Editable spin box: slide for coarse, type for precise.  The width is
+        # font-derived (min 96 px) so "1000%" is never clipped at 20-24 px.
+        self.zoom_spin = _SizedSpinBox()
         self.zoom_spin.setRange(10, 1000)
         self.zoom_spin.setValue(100)
         self.zoom_spin.setSuffix("%")
-        self.zoom_spin.setFixedWidth(96)
         self.zoom_spin.setToolTip("Zoom level (10%–1000%) — drag the slider or type a value")
         zoom_layout.addWidget(self.zoom_slider, 1)
         zoom_layout.addWidget(self.zoom_spin)
+        self.zoom_row = zoom_row
 
         # ── Size row (Width x Height on one 4px-grid row) ─────────────
         size_row = QWidget()
@@ -537,6 +539,7 @@ class ControlPanel(QWidget):
             self.bit_depth_combo, self.align_combo, self.endian_combo,
             self.raw_preview_combo, self.bayer_pattern_combo,
             self.width_spin, self.height_spin, self.offset_spin,
+            self.zoom_spin,
         ):
             _field.setMinimumWidth(0)
             _field.setSizePolicy(
@@ -646,6 +649,12 @@ class ControlPanel(QWidget):
             self.bit_depth_combo,
         ):
             combo.currentTextChanged.connect(lambda _t: self.valuesChanged.emit())
+        # M-1: the format/type models can change the longest item at runtime, so
+        # re-derive the field minimum widths (debounced through the 0 ms timer).
+        self.valuesChanged.connect(self._schedule_panel_metrics)
+        self.type_combo.currentTextChanged.connect(self._schedule_panel_metrics)
+        self.format_combo.currentTextChanged.connect(self._schedule_panel_metrics)
+        self.bit_depth_combo.currentTextChanged.connect(self._schedule_panel_metrics)
         # 切换格式时联动条件显隐（YOnly → 位深+对齐+端序；RAW →高级参数）
         self.format_combo.currentTextChanged.connect(lambda _f: self._sync_type_enabled())
         for spin in (self.width_spin, self.height_spin, self.offset_spin):
@@ -675,21 +684,33 @@ class ControlPanel(QWidget):
     #: 1 px border each side, plus the 24 px combo drop-down.
     _FIELD_CHROME = 8 * 2 + 1 * 2
     _COMBO_DROPDOWN = 24
+    #: Compact-theme floor for the View group's zoom spin.
+    _ZOOM_MIN_WIDTH = 96
 
     def _field_content_width(self, field) -> int:
-        """Width the field needs to show its current value (V-2).
+        """Width needed for the field's *longest possible* value (V-2).
 
-        This is the acceptance rule verbatim (current text vs visible width);
-        a font/theme change re-derives it, and the panel width grows with the
-        font, so larger values are never permanently clipped.
+        QSpinBox uses ``maximum()`` (with prefix/suffix, e.g. ``1000%``);
+        QComboBox uses the longest item in its model.  Sizing from the current
+        default value would clip as soon as the user picks another format,
+        loads a longer preset or types a larger width.
         """
         metrics = QFontMetrics(field.font())
         if isinstance(field, QComboBox):
-            content = metrics.horizontalAdvance(field.currentText())
+            content = max(
+                (
+                    metrics.horizontalAdvance(field.itemText(i))
+                    for i in range(field.count())
+                ),
+                default=0,
+            )
             return content + self._FIELD_CHROME + self._COMBO_DROPDOWN
         if isinstance(field, QSpinBox):
-            content = metrics.horizontalAdvance(field.text())
-            return content + self._FIELD_CHROME + self._COMBO_DROPDOWN
+            text = f"{field.prefix()}{field.maximum()}{field.suffix()}"
+            return (
+                metrics.horizontalAdvance(text)
+                + self._FIELD_CHROME + self._COMBO_DROPDOWN
+            )
         return metrics.horizontalAdvance(field.text()) + self._FIELD_CHROME
 
     def _fit_form_label_column(self) -> None:
@@ -726,28 +747,69 @@ class ControlPanel(QWidget):
             + self._size_x_label.sizeHint().width()
             + size_layout.spacing() * 2
         )
-        required = max(required, size_required)
+        # Zoom shares its row with the slider: the spin's text width is part of
+        # the field column's requirement as well.
+        zoom_layout = self.zoom_row.layout()
+        zoom_required = (
+            self._required_width_for(self.zoom_spin)
+            + self.zoom_slider.minimumSizeHint().width()
+            + zoom_layout.spacing()
+        )
+        required = max(required, size_required, zoom_required)
         cap = max(92, available - required)
         for label in labels:
             label.setMaximumWidth(cap)
+
+    def _required_width_for(self, field) -> int:
+        """Font-derived required width, including per-field compact floors."""
+        required = self._field_content_width(field)
+        if field is self.zoom_spin:
+            required = max(self._ZOOM_MIN_WIDTH, required)
+        if field is self.preset_combo:
+            # The preset selector shares its spanning row with two 30 px icon
+            # buttons; never size it past the space they leave, otherwise the
+            # row would push the button pair outside the panel.
+            viewport = self.scroll_area.viewport().width()
+            if viewport > 0:
+                margins = self._main_form.contentsMargins()
+                room = (
+                    viewport - margins.left() - margins.right()
+                    - 2 * 30 - 2 * 4
+                )
+                required = max(self._ZOOM_MIN_WIDTH, min(required, room))
+        return required
 
     def _sync_panel_metrics(self) -> None:
         """Keep the panel wide enough for its font without a horizontal scroll."""
         font_size = self._panel_font_pixel_size()
         self.setMinimumWidth(max(340, 320 + (font_size - 13) * 14))
-        # V-2: report (via minimumSizeHint) the width that fits the current
-        # text.  QFormLayout wraps a row whose label + field minimum do not
-        # fit, so the field keeps its text while the form never exceeds the
-        # viewport.  ``setMinimumWidth`` is deliberately not used: it would
-        # also pin the form column and defeat both the wrap and compressibility.
-        for name in self._FIELD_NAMES:
+        # V-2: report (via minimumSizeHint) the width that fits the field's
+        # longest possible value.  QFormLayout wraps a row whose label + field
+        # minimum do not fit, so the field keeps its text while the form never
+        # exceeds the viewport.  ``setMinimumWidth`` is deliberately not used:
+        # it would also pin the form column and defeat both the wrap and
+        # compressibility.
+        for name in self._METRIC_FIELD_NAMES:
             field = getattr(self, name, None)
             if field is not None:
-                field.set_required_width(self._field_content_width(field))
+                field.set_required_width(self._required_width_for(field))
         self._fit_form_label_column()
         if self._metrics_passes_left > 0:
             self._metrics_passes_left -= 1
             self._metrics_timer.start()
+
+    def _schedule_panel_metrics(self, *_args) -> None:
+        """Debounced re-derive after values/models change (M-1).
+
+        The fields are sized for their longest possible value, but the format
+        and preset models change at runtime (Type switch, preset list reload),
+        so the widths must follow without waiting for the next font change.
+        """
+        timer = self.__dict__.get("_metrics_timer")
+        if timer is None:
+            return
+        self._metrics_passes_left = 3
+        timer.start()
 
     def _refresh_panel_metrics(self) -> None:
         """Recompute now and over a few event-loop turns after a style change."""
@@ -1172,6 +1234,9 @@ class ControlPanel(QWidget):
                 self.preset_combo.setCurrentIndex(-1)
         self.preset_combo.setPlaceholderText(preset_hint)
         self.preset_combo.update()
+        # Preset names are user data: a longer model entry needs a wider
+        # selector (V-2), so re-derive the widths after every rebuild.
+        self._schedule_panel_metrics()
 
     def _update_preset_filter_button(self) -> None:
         """Expose the active browse category through tooltip/accessibility text."""

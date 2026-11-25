@@ -329,6 +329,19 @@ class StateStatusLabel(StatusLabel):
         super().setText(f'<span style="color:{dot_color};">&#9679;</span> {text}')
         self.update()
 
+    def elided_text(self) -> str:
+        """The text the paint path draws for the label's current width."""
+        if not self._plain_text:
+            return ""
+        metrics = QFontMetrics(self.font())
+        rect = self.contentsRect()
+        if rect.width() <= 0:
+            return self._plain_text
+        dot_width = metrics.horizontalAdvance("● ")
+        return metrics.elidedText(
+            self._plain_text, Qt.ElideRight, max(0, rect.width() - dot_width)
+        )
+
     def paintEvent(self, event) -> None:  # noqa: N802 — Qt virtual override
         metrics = QFontMetrics(self.font())
         rect = self.contentsRect()
@@ -354,12 +367,9 @@ class StateStatusLabel(StatusLabel):
             )
             text_rect = QRect(rect)
             text_rect.setLeft(rect.left() + dot_width)
-            shown = metrics.elidedText(
-                self._plain_text, Qt.ElideRight, max(0, text_rect.width())
-            )
             painter.setPen(QColor(self._text_color))
             painter.drawText(
-                text_rect, Qt.AlignLeft | Qt.AlignVCenter, shown
+                text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.elided_text()
             )
         finally:
             painter.end()

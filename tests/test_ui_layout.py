@@ -113,30 +113,44 @@ class PanelWidthTests(_LayoutFixture):
                         "scrollbar",
                     )
 
-    def test_v2_field_text_fits_visible_width(self):
+    @staticmethod
+    def _longest_text(field) -> str:
+        """Longest possible value per the V-2 contract."""
+        if isinstance(field, QComboBox):
+            if field.count() == 0:
+                return ""
+            return max(
+                (field.itemText(i) for i in range(field.count())),
+                key=lambda text: QFontMetrics(field.font()).horizontalAdvance(text),
+            )
+        if isinstance(field, QSpinBox):
+            return f"{field.prefix()}{field.maximum()}{field.suffix()}"
+        return field.text()
+
+    def test_v2_every_field_fits_its_longest_value(self):
+        """V-2: every QComboBox/QSpinBox (zoom + preset included), longest value."""
         panel = self._panel()
+        fields = panel.findChildren(QComboBox) + panel.findChildren(QSpinBox)
+        self.assertTrue(fields)
         for theme in THEMES:
             for size in SIZES:
                 with self.subTest(theme=theme, size=size):
                     self._apply(theme, size)
-                    for name in ControlPanel._FIELD_NAMES:
-                        field = getattr(panel, name)
+                    for field in fields:
                         if field.isHidden():
                             continue
-                        text = (
-                            field.currentText()
-                            if isinstance(field, QComboBox)
-                            else field.text()
-                        )
-                        padding = PADDING + (DROPDOWN if isinstance(
-                            field, (QComboBox, QSpinBox)) else 0)
+                        text = self._longest_text(field)
+                        if not text:
+                            continue
+                        padding = PADDING + DROPDOWN
                         advance = QFontMetrics(field.font()).horizontalAdvance(
                             text
                         )
                         self.assertLessEqual(
                             advance,
                             field.width() - padding,
-                            f"{theme}/{size}: {name} text {text!r} is clipped "
+                            f"{theme}/{size}: {field.objectName() or type(field).__name__}"
+                            f" longest value {text!r} is clipped "
                             f"({advance} > {field.width() - padding})",
                         )
 
@@ -165,7 +179,7 @@ class StatusBarCompositionTests(_LayoutFixture):
 
     def test_v4_status_bar_has_two_elidable_labels(self):
         for theme in THEMES:
-            for size in (13, 24):
+            for size in SIZES:
                 with self.subTest(theme=theme, size=size):
                     self._apply(theme, size)
                     labels = self.w.status.findChildren(QLabel)
@@ -180,6 +194,53 @@ class StatusBarCompositionTests(_LayoutFixture):
                             hasattr(self.w, removed),
                             f"{removed} must no longer exist (M-5)",
                         )
+
+
+class StateStatusElisionTests(_LayoutFixture):
+    """L-1: the state label elides visually while keeping its full text."""
+
+    def test_state_text_elided_on_paint_but_text_stays_full(self):
+        long_text = "Decoded " + "0123456789" * 5
+        self._apply("light", 13)
+        self.w._set_state(long_text, "ok")
+        label = self.w.state_status
+        # Callers read .text(): it must keep the full HTML state string.
+        self.assertIn(long_text, label.text())
+
+        # Shrink to the window's own minimum so the bar is narrower than the
+        # status text, then check the paint path really uses elision.
+        self.w.resize(self.w.minimumSizeHint().width(), 700)
+        _pump()
+        metrics = QFontMetrics(label.font())
+        rect = label.contentsRect()
+        self.assertGreater(
+            metrics.horizontalAdvance("● " + long_text), rect.width(),
+            "test setup: the status text must be wider than the label",
+        )
+        elided = label.elided_text()
+        self.assertNotEqual(elided, long_text)
+        self.assertLess(len(elided), len(long_text),
+                        f"paint text was not shortened: {elided!r}")
+        available = rect.width() - metrics.horizontalAdvance("● ")
+        self.assertLessEqual(
+            metrics.horizontalAdvance(elided), available + 1,
+            "elided text must fit the label's paint area",
+        )
+
+        calls: list[int] = []
+        original = label.elided_text
+        label.elided_text = lambda: calls.append(1) or original()
+        label.repaint()
+        _pump(2)
+        self.assertTrue(calls, "paintEvent must go through the elision path")
+        del label.elided_text
+
+        # Widening the window restores the full text.
+        self.w.resize(1600, 700)
+        _pump()
+        self.assertEqual(label.elided_text(), long_text)
+        pixmap = label.grab()
+        self.assertFalse(pixmap.isNull())
 
 
 class ReadoutStripHeightTests(_LayoutFixture):
