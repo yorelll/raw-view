@@ -401,30 +401,42 @@ class ListTableSurfaceTests(_SurfaceTestBase):
 class DialogContrastTests(_SurfaceTestBase):
     """T-4: an outlined button's real background is main_bg at AA contrast."""
 
+    # Plan §3.1 expected accent-on-main_bg ratios; ±0.01 guards token drift.
+    _EXPECTED_RATIO = {"light": 4.58, "dark": 6.43}
+
     def test_t4_secondary_button_background_and_accent_contrast(self):
         from raw_view.gui.dialogs import SettingsDialog
 
-        theme = "light"
-        _apply_product_theme(theme)
-        palette = THEME_PALETTES[theme]
-        main_bg = palette["main_bg"].lower()
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                palette = THEME_PALETTES[theme]
+                main_bg = palette["main_bg"].lower()
 
-        dialog = self._track(SettingsDialog(self.settings))
-        dialog.show()
-        self._settle()
-        button = dialog.template_reset_btn
-        self.assertEqual(button.objectName(), "secondaryButton")
-        rendered_bg = _most_common(
-            dialog.grab().toImage(), button, dialog
-        )
-        self.assertEqual(
-            rendered_bg, main_bg,
-            f"描边按钮的实际绘制背景必须是 main_bg，实测 {rendered_bg}",
-        )
-        ratio = _contrast_ratio(palette["accent"], rendered_bg)
-        self.assertGreaterEqual(
-            ratio, 4.5,
-            f"accent on {rendered_bg} = {ratio:.2f}:1 低于 WCAG AA",
-        )
-        # Plan §3.1 expected value; ±0.01 guards accidental token drift.
-        self.assertAlmostEqual(ratio, 4.58, delta=0.01)
+                dialog = self._track(SettingsDialog(self.settings))
+                dialog.show()
+                self._settle()
+                button = dialog.template_reset_btn
+                self.assertEqual(
+                    button.objectName(), "secondaryButton",
+                    f"{theme}: 被测按钮必须是描边 secondaryButton",
+                )
+                rendered_bg = _most_common(
+                    dialog.grab().toImage(), button, dialog
+                )
+                self.assertEqual(
+                    rendered_bg, main_bg,
+                    f"{theme}: 描边按钮的实际绘制背景必须是 main_bg，"
+                    f"实测 {rendered_bg}",
+                )
+                ratio = _contrast_ratio(palette["accent"], rendered_bg)
+                self.assertGreaterEqual(
+                    ratio, 4.5,
+                    f"{theme}: accent on {rendered_bg} = {ratio:.2f}:1 "
+                    "低于 WCAG AA",
+                )
+                self.assertAlmostEqual(
+                    ratio, self._EXPECTED_RATIO[theme], delta=0.01,
+                    msg=f"{theme}: accent on {rendered_bg} 期望 "
+                    f"{self._EXPECTED_RATIO[theme]}±0.01，实测 {ratio:.4f}",
+                )
