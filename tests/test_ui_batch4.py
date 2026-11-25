@@ -609,35 +609,46 @@ class ProductNameTests(_Batch4TestBase):
         from raw_view.gui.app import MainWindow
         from raw_view.gui.dialogs import AboutDialog
 
-        self.settings.ui_theme = "light"
-        window = self._track(MainWindow())
-        window.settings = self.settings
-        self.assertEqual(
-            window.windowTitle(), "raw-view",
-            f"窗口标题应为 raw-view，实测 {window.windowTitle()}",
-        )
-        menu_texts = [
-            action.text()
-            for action in window.findChildren(type(window.save_action))
-        ]
-        self.assertIn(
-            "About raw-view", menu_texts,
-            "Help 菜单项必须使用 raw-view",
-        )
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                window = self._track(MainWindow())
+                window.settings = self.settings
+                window._apply_theme()
+                self.assertEqual(
+                    window.windowTitle(), "raw-view",
+                    f"{theme}: 窗口标题应为 raw-view，"
+                    f"实测 {window.windowTitle()}",
+                )
+                menu_texts = [
+                    action.text()
+                    for action in window.findChildren(type(window.save_action))
+                ]
+                self.assertIn(
+                    "About raw-view", menu_texts,
+                    f"{theme}: Help 菜单项必须使用 raw-view",
+                )
 
-        dialog = self._track(AboutDialog())
-        dialog.show()
-        self._settle()
-        title = dialog.findChild(QLabel, "aboutTitle")
-        self.assertIsNotNone(title)
-        self.assertEqual(
-            title.text(), "raw-view",
-            f"About 正文标题应为 raw-view，实测 {title.text()}",
-        )
-        self.assertEqual(
-            dialog.windowTitle(), "About raw-view",
-            f"About 窗口标题应为 About raw-view，实测 {dialog.windowTitle()}",
-        )
+                dialog = self._track(AboutDialog())
+                dialog.show()
+                self._settle()
+                title = dialog.findChild(QLabel, "aboutTitle")
+                self.assertIsNotNone(title)
+                self.assertEqual(
+                    title.text(), "raw-view",
+                    f"{theme}: About 正文标题应为 raw-view，"
+                    f"实测 {title.text()}",
+                )
+                self.assertEqual(
+                    dialog.windowTitle(), "About raw-view",
+                    f"{theme}: About 窗口标题应为 About raw-view，"
+                    f"实测 {dialog.windowTitle()}",
+                )
+                for widget in (dialog, window):
+                    if widget in self._widgets:
+                        self._widgets.remove(widget)
+                    destroy_widget(widget)
 
 
 # ---------------------------------------------------------------------------
@@ -756,48 +767,82 @@ class EmptyRecentFilesTests(_Batch4TestBase):
 
         from raw_view.gui.app import MainWindow
 
-        self.settings.ui_theme = "light"
-        window = self._track(MainWindow())
-        window.settings = self.settings
-        window._apply_theme()
-        window.show()
-        self._settle()
-        window.settings.clear_recent_files()
-        window._refresh_recent_files_menu()
-        self._settle()
-        self.assertFalse(
-            window._empty_recent_list.isVisible(),
-            "无最近记录时列表必须隐藏",
-        )
-        self.assertFalse(
-            window._empty_recent_label.isVisible(),
-            "无最近记录时标题必须隐藏",
-        )
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                window = self._track(MainWindow())
+                window.settings = self.settings
+                window._apply_theme()
+                window.show()
+                self._settle()
+                try:
+                    window.settings.clear_recent_files()
+                    window._refresh_recent_files_menu()
+                    self._settle()
+                    self.assertFalse(
+                        window._empty_recent_list.isVisible(),
+                        f"{theme}: 无最近记录时列表必须隐藏",
+                    )
+                    self.assertFalse(
+                        window._empty_recent_label.isVisible(),
+                        f"{theme}: 无最近记录时标题必须隐藏",
+                    )
 
-        paths = [
-            os.path.join(self._tmp, f"recent_{index}.raw")
-            for index in range(7)
-        ]
-        for path in paths:
-            window.settings.add_recent_file(path)
-        window._refresh_recent_files_menu()
-        self._settle()
-        self.assertTrue(window._empty_recent_list.isVisible())
-        self.assertTrue(window._empty_recent_label.isVisible())
-        self.assertLessEqual(
-            window._empty_recent_list.count(), 5,
-            "最近文件列表最多 5 条",
-        )
-        newest = window._empty_recent_list.item(0)
-        self.assertEqual(
-            newest.data(Qt.UserRole), paths[-1],
-            "最近文件按最新在前排列",
-        )
-        with patch.object(
-            MainWindow, "_open_recent_file", autospec=True
-        ) as opener:
-            window._empty_recent_list.itemClicked.emit(newest)
-        opener.assert_called_once_with(window, paths[-1])
+                    paths = [
+                        os.path.join(self._tmp, f"recent_{index}.raw")
+                        for index in range(7)
+                    ]
+                    for path in paths:
+                        window.settings.add_recent_file(path)
+                    window._refresh_recent_files_menu()
+                    self._settle()
+                    self.assertTrue(window._empty_recent_list.isVisible())
+                    self.assertTrue(window._empty_recent_label.isVisible())
+                    self.assertLessEqual(
+                        window._empty_recent_list.count(), 5,
+                        f"{theme}: 最近文件列表最多 5 条",
+                    )
+                    newest = window._empty_recent_list.item(0)
+                    self.assertEqual(
+                        newest.data(Qt.UserRole), paths[-1],
+                        f"{theme}: 最近文件按最新在前排列",
+                    )
+
+                    # Mouse activation (single click).
+                    with patch.object(
+                        MainWindow, "_open_recent_file", autospec=True
+                    ) as opener:
+                        window._empty_recent_list.itemClicked.emit(newest)
+                    opener.assert_called_once_with(window, paths[-1])
+
+                    # Keyboard/AT activation: QAbstractItemView emits
+                    # ``activated`` on Enter, never ``clicked``.
+                    with patch.object(
+                        MainWindow, "_open_recent_file", autospec=True
+                    ) as opener:
+                        window._empty_recent_list.itemActivated.emit(newest)
+                    opener.assert_called_once_with(window, paths[-1])
+
+                    # Real key event path: focus the list, select the row and
+                    # press Enter.
+                    view = window._empty_recent_list
+                    APP.setActiveWindow(window)
+                    window.activateWindow()
+                    window.raise_()
+                    view.setCurrentRow(0)
+                    view.setFocus(Qt.TabFocusReason)
+                    self._settle()
+                    with patch.object(
+                        MainWindow, "_open_recent_file", autospec=True
+                    ) as opener:
+                        QTest.keyClick(view, Qt.Key_Return)
+                        self._settle()
+                    opener.assert_called_once_with(window, paths[-1])
+                finally:
+                    if window in self._widgets:
+                        self._widgets.remove(window)
+                    destroy_widget(window)
 
 
 # ---------------------------------------------------------------------------

@@ -1048,6 +1048,12 @@ class MainWindow(QMainWindow):
             "Double-click or press Enter to open a recently used file."
         )
         self._empty_recent_list.itemClicked.connect(self._on_empty_recent_clicked)
+        # Keyboard/AT users activate with Enter, which QAbstractItemView emits
+        # as ``activated`` only — without this the accessible description
+        # ("press Enter") promised something that did nothing.
+        self._empty_recent_list.itemActivated.connect(
+            self._on_empty_recent_clicked
+        )
         vbox.addWidget(self._empty_recent_label)
         vbox.addWidget(self._empty_recent_list)
         self._refresh_empty_recent_list()
