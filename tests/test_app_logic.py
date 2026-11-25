@@ -541,6 +541,34 @@ class PresetManagerConditionalRowsTests(unittest.TestCase):
             if form.getWidgetPosition(getattr(dlg, name))[0] >= 0
         ]
 
+    def _assert_no_blank_rows(self, dlg, expected_visible):
+        """Every row must own a non-empty label and a visible field."""
+        from PyQt5.QtWidgets import QFormLayout
+
+        form = dlg._cond_form
+        labels = dict(dlg._cond_row_specs)
+        expected_labels = (
+            ["Type", "Format"]
+            + [labels[name] for name in expected_visible]
+            + ["Width", "Height", "Offset"]
+        )
+        self.assertEqual(form.rowCount(), len(expected_labels))
+        actual_labels = []
+        for row in range(form.rowCount()):
+            label_item = form.itemAt(row, QFormLayout.LabelRole)
+            field_item = form.itemAt(row, QFormLayout.FieldRole)
+            self.assertIsNotNone(label_item)
+            self.assertIsNotNone(field_item)
+            label = label_item.widget()
+            field = field_item.widget()
+            self.assertIsNotNone(label)
+            self.assertIsNotNone(field)
+            self.assertTrue(label.text().strip())
+            self.assertFalse(label.isHidden())
+            self.assertFalse(field.isHidden())
+            actual_labels.append(label.text())
+        self.assertEqual(actual_labels, expected_labels)
+
     def test_rows_mirror_panel_type_rules(self):
         cases = (
             ("RAW", "RAW12", "Bayer Color",
@@ -565,6 +593,10 @@ class PresetManagerConditionalRowsTests(unittest.TestCase):
                 dlg = PresetManagerDialog(settings)
                 try:
                     self.assertEqual(self._visible(dlg), expected)
+                    self.assertEqual(
+                        dlg._cond_form.rowCount(), 5 + len(expected),
+                    )
+                    self._assert_no_blank_rows(dlg, expected)
                     # Removed rows leave no label or usable control behind.
                     for name, _label in dlg._cond_row_specs:
                         field = getattr(dlg, name)
@@ -592,6 +624,104 @@ class PresetManagerConditionalRowsTests(unittest.TestCase):
             self.assertIn("bayer_combo", self._visible(dlg))
         finally:
             destroy_widget(dlg)
+
+    def test_type_and_format_changes_drop_stale_rows(self):
+        """L-1: transitions rebuild the form without blank slots."""
+        cases = (
+            (
+                ("RAW", "RAW12", "Bayer Color"),
+                ("RAW", "RAW12", "Grayscale"),
+                ["align_combo", "endian_combo", "preview_combo"],
+            ),
+            (
+                ("RAW", "RAW12", "Bayer Color"),
+                ("YUV", "YUYV", "Bayer Color"),
+                [],
+            ),
+            (
+                ("YUV", "YUYV", "Bayer Color"),
+                ("Standard Image", "N/A", "Bayer Color"),
+                [],
+            ),
+            (
+                ("YUV", "YUYV", "Bayer Color"),
+                ("YUV", "YOnly10", "Bayer Color"),
+                ["align_combo", "endian_combo"],
+            ),
+        )
+        for start, end, expected in cases:
+            with self.subTest(start=start, end=end):
+                settings = _PresetSettings([
+                    SensorPreset(
+                        name="transition",
+                        image_type=start[0],
+                        format_name=start[1],
+                        preview_mode=start[2],
+                    )
+                ])
+                dlg = PresetManagerDialog(settings)
+                try:
+                    self._assert_no_blank_rows(dlg, self._visible(dlg))
+                    dlg.type_combo.setCurrentText(end[0])
+                    dlg.format_combo.setCurrentText(end[1])
+                    dlg.preview_combo.setCurrentText(end[2])
+                    self.assertEqual(self._visible(dlg), expected)
+                    self._assert_no_blank_rows(dlg, expected)
+                finally:
+                    destroy_widget(dlg)
+
+    def test_yonly_edits_persist_through_save_and_reopen(self):
+        """L-1: values and the conditional row set survive a settings reload."""
+        settings = _PresetSettings([
+            SensorPreset(
+                name="yonly persisted",
+                image_type="YUV",
+                format_name="YOnly12",
+                alignment="msb",
+                endianness="little",
+                preview_mode="Grayscale",
+                width=640,
+                height=480,
+                offset=0,
+            )
+        ])
+        dlg = PresetManagerDialog(settings)
+        try:
+            self.assertEqual(
+                self._visible(dlg), ["align_combo", "endian_combo"],
+            )
+            dlg.width_spin.setValue(1280)
+            dlg.height_spin.setValue(720)
+            dlg.align_combo.setCurrentText("lsb")
+            dlg.offset_spin.setValue(16)
+            dlg._on_save_clicked()
+        finally:
+            destroy_widget(dlg)
+
+        saved = settings.sensor_presets[0]
+        self.assertEqual(
+            (saved.image_type, saved.format_name),
+            ("YUV", "YOnly12"),
+        )
+        self.assertEqual(
+            (saved.width, saved.height, saved.alignment, saved.offset),
+            (1280, 720, "lsb", 16),
+        )
+
+        reopened = PresetManagerDialog(settings)
+        try:
+            self.assertEqual(reopened.width_spin.value(), 1280)
+            self.assertEqual(reopened.height_spin.value(), 720)
+            self.assertEqual(reopened.align_combo.currentText(), "lsb")
+            self.assertEqual(reopened.offset_spin.value(), 16)
+            self.assertEqual(
+                self._visible(reopened), ["align_combo", "endian_combo"],
+            )
+            self._assert_no_blank_rows(
+                reopened, ["align_combo", "endian_combo"],
+            )
+        finally:
+            destroy_widget(reopened)
 
 
 class PresetManagerFormatFilterTests(unittest.TestCase):
@@ -1491,11 +1621,106 @@ class FramenavThemingTests(unittest.TestCase):
                 self.assertIn("#2A2D4A", sheet)
 
     def test_framenav_no_longer_sets_hardcoded_stylesheet(self):
+        from PyQt5.QtGui import QFontMetrics
+
         nav = FrameNavBar()
-        self.assertEqual(nav.styleSheet(), "")
-        # layout/metrics are preserved
-        self.assertEqual(nav.first_btn.width(), 36)
-        self.assertEqual(nav.first_btn.height(), 32)
+        try:
+            self.assertEqual(nav.styleSheet(), "")
+            # 36x32 is a floor; the derived size must still contain the glyph.
+            self.assertGreaterEqual(nav.first_btn.width(), 36)
+            self.assertGreaterEqual(nav.first_btn.height(), 32)
+            fm = QFontMetrics(nav.first_btn.font())
+            self.assertGreaterEqual(
+                nav.first_btn.width(), fm.horizontalAdvance(nav.first_btn.text()),
+            )
+        finally:
+            destroy_widget(nav)
+
+    def test_nav_metrics_grow_with_theme_font_size(self):
+        """H-1: all nav glyphs, large frame numbers and ``/ N`` fit at 10-24."""
+        from PyQt5.QtGui import QFontMetrics
+
+        old_sheet = self._app.styleSheet()
+        try:
+            for theme in ("light", "dark"):
+                for font_size in (10, 13, 20, 24):
+                    with self.subTest(theme=theme, font_size=font_size):
+                        self._app.setStyleSheet(
+                            build_ui_stylesheet(theme, font_size)
+                        )
+                        nav = FrameNavBar()
+                        try:
+                            nav.show()
+                            self._app.processEvents()
+                            button_fm = QFontMetrics(nav.first_btn.font())
+                            for button in nav._nav_buttons:
+                                self.assertGreaterEqual(
+                                    button.width(),
+                                    button_fm.horizontalAdvance(button.text()),
+                                    f"{button.text()!r} is clipped",
+                                )
+                                self.assertGreaterEqual(
+                                    button.height(), button_fm.height(),
+                                )
+                                self.assertGreaterEqual(button.width(), 36)
+                                self.assertGreaterEqual(button.height(), 32)
+                            spin_fm = QFontMetrics(nav.frame_spin.font())
+                            self.assertGreaterEqual(
+                                nav.frame_spin.width(),
+                                spin_fm.horizontalAdvance("1000000"),
+                                "frame spin cannot show a 7-digit frame number",
+                            )
+                            label_fm = QFontMetrics(nav._total_label.font())
+                            self.assertGreaterEqual(
+                                nav._total_label.height(), label_fm.height(),
+                            )
+                        finally:
+                            destroy_widget(nav)
+        finally:
+            self._app.setStyleSheet(old_sheet)
+            self._app.processEvents()
+
+
+class HelpDocumentStyleTests(unittest.TestCase):
+    """M-1: heading pixel sizes must beat QTextDocument's built-in h2/h3."""
+
+    @staticmethod
+    def _block_format(browser, prefix):
+        block = browser.document().begin()
+        while block.isValid():
+            if block.text().startswith(prefix):
+                return block.begin().fragment().charFormat()
+            block = block.next()
+        raise AssertionError(f"heading not found: {prefix}")
+
+    def test_heading_and_body_sizes_follow_setting(self):
+        from PyQt5.QtWidgets import QTextBrowser
+        from raw_view.gui.dialogs.help import HelpDialog
+
+        for theme in ("light", "dark"):
+            expected_color = THEME_PALETTES[theme]["text_color"]
+            for font_size in (10, 13, 20, 24):
+                with self.subTest(theme=theme, font_size=font_size):
+                    dlg = HelpDialog(theme=theme, font_size=font_size)
+                    try:
+                        browser = dlg.findChild(QTextBrowser, "helpBrowser")
+                        self.assertIsNotNone(browser)
+                        for prefix, expected_px in (
+                            ("RAW/YUV Format Help", font_size + 3),
+                            ("RAW aligned (LSB/MSB)", font_size + 1),
+                            ("LSB aligned:", font_size),
+                        ):
+                            fmt = self._block_format(browser, prefix)
+                            self.assertEqual(
+                                fmt.font().pixelSize(), expected_px,
+                                f"{prefix!r} has the wrong rendered size",
+                            )
+                            self.assertEqual(
+                                fmt.foreground().color().name(),
+                                expected_color.lower(),
+                            )
+                    finally:
+                        destroy_widget(dlg)
 
 
 # ── M-10: directory drag-drop scanning ───────────────────────────────────

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -38,18 +39,17 @@ class FrameNavBar(QWidget):
         layout.setSpacing(6)
         layout.setAlignment(Qt.AlignCenter)
 
-        _NAV_H = 32
-        _NAV_W = 36
+        self._nav_min_h = 32
+        self._nav_min_w = 36
+        self._spin_min_w = 52
 
         # ── Buttons ────────────────────────────────────────────────────
         # Icon mapping: │◀  ◀  ▶  ▶│
         self.first_btn = QPushButton("\u2502\u25C0")   # │◀
-        self.first_btn.setFixedSize(_NAV_W, _NAV_H)
         self.first_btn.setAccessibleName("First frame")
         self.first_btn.setAccessibleDescription("Go to the first frame (Home).")
         self.first_btn.setToolTip("First frame (Home)")
         self.prev_btn = QPushButton("\u25C0")           # ◀
-        self.prev_btn.setFixedSize(_NAV_W, _NAV_H)
         self.prev_btn.setAccessibleName("Previous frame")
         self.prev_btn.setAccessibleDescription("Go to the previous frame (Left or Up).")
         self.prev_btn.setToolTip("Previous frame (Left / Up)")
@@ -57,8 +57,6 @@ class FrameNavBar(QWidget):
         # Current frame / total
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(1, 1_000_000)
-        self.frame_spin.setFixedWidth(52)
-        self.frame_spin.setFixedHeight(_NAV_H)
         self.frame_spin.setAlignment(Qt.AlignCenter)
         self.frame_spin.setProperty("mono", True)
         self.frame_spin.setEnabled(False)
@@ -67,21 +65,23 @@ class FrameNavBar(QWidget):
 
         self._total_label = QLabel("/ 0")
         self._total_label.setProperty("mono", True)
-        self._total_label.setFixedHeight(_NAV_H)
         self._total_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._total_label.setAccessibleName("Total frames")
         self._total_label.setAccessibleDescription("Total number of frames in the file.")
 
         self.next_btn = QPushButton("\u25B6")           # ▶
-        self.next_btn.setFixedSize(_NAV_W, _NAV_H)
         self.next_btn.setAccessibleName("Next frame")
         self.next_btn.setAccessibleDescription("Go to the next frame (Right or Down).")
         self.next_btn.setToolTip("Next frame (Right / Down)")
         self.last_btn = QPushButton("\u25B6\u2502")     # ▶│
-        self.last_btn.setFixedSize(_NAV_W, _NAV_H)
         self.last_btn.setAccessibleName("Last frame")
         self.last_btn.setAccessibleDescription("Go to the last frame (End).")
         self.last_btn.setToolTip("Last frame (End)")
+
+        self._nav_buttons = (
+            self.first_btn, self.prev_btn, self.next_btn, self.last_btn,
+        )
+        self._update_metrics()
 
         # Note: button/spin/label colours are themed globally via
         # ``build_ui_stylesheet`` (#frameNavBar …) in models.py, so they
@@ -108,6 +108,47 @@ class FrameNavBar(QWidget):
         self.last_btn.clicked.connect(self._last)
 
     # ── public API ───────────────────────────────────────────────────
+
+    def _update_metrics(self) -> None:
+        """Size controls from the active font instead of fixed 36x32 boxes.
+
+        The stylesheet can enlarge ``frameNavBar`` text at runtime (font-size
+        setting), so constants alone clip ``│◀`` / ``▶│`` and large frame
+        numbers.  Recompute on font/style changes; the old 36x32 remains the
+        minimum for compact themes.
+        """
+        button_fm = QFontMetrics(self.first_btn.font())
+        button_w = max(
+            self._nav_min_w,
+            max(button_fm.horizontalAdvance(btn.text()) for btn in self._nav_buttons) + 10,
+        )
+        button_h = max(self._nav_min_h, button_fm.height() + 8)
+        for btn in self._nav_buttons:
+            btn.setFixedSize(button_w, button_h)
+
+        spin_fm = QFontMetrics(self.frame_spin.font())
+        spin_w = max(
+            self._spin_min_w,
+            spin_fm.horizontalAdvance("1000000") + 40,
+        )
+        spin_h = max(self._nav_min_h, spin_fm.height() + 10)
+        self.frame_spin.setFixedSize(spin_w, spin_h)
+
+        label_fm = QFontMetrics(self._total_label.font())
+        self._total_label.setFixedHeight(
+            max(self._nav_min_h, label_fm.height() + 8)
+        )
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._update_metrics()
+
+    def showEvent(self, event) -> None:
+        # A stylesheet installed on QApplication before construction is applied
+        # during polish without a StyleChange event, so size once after show.
+        super().showEvent(event)
+        self._update_metrics()
 
     def set_frame_info(self, current: int, total: int) -> None:
         """Update frame display and enable/disable nav buttons.

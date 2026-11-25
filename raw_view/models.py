@@ -1813,6 +1813,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["nav_button_bg"]};
             border: 1px solid {p["nav_button_border"]};
             border-radius: 6px;
+            font-family: "Segoe UI Symbol", "DejaVu Sans", sans-serif;
             font-weight: bold;
             color: {p["nav_button_text"]};
             font-size: {max(font_size + 1, 10)}px;

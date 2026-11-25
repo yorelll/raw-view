@@ -37,12 +37,12 @@ def build_help_document_css(theme: str, font_size: int) -> str:
             padding: 12px;
             font-size: {size}px;
         }}
-        h2 {{
+        p.help-h2 {{
             color: {palette["text_color"]};
             font-size: {size + 3}px;
             font-weight: 600;
         }}
-        h3 {{
+        p.help-h3 {{
             color: {palette["text_color"]};
             font-size: {size + 1}px;
             font-weight: 600;
@@ -60,6 +60,18 @@ def build_help_document_css(theme: str, font_size: int) -> str:
             color: {palette["accent"]};
         }}
     """
+
+
+def build_help_document_html(theme: str, font_size: int) -> str:
+    """Return HELP_HTML with heading tags mapped to explicit CSS classes.
+
+    Qt's rich-text engine applies its built-in h2/h3 sizes after
+    ``setDefaultStyleSheet``, so a stylesheet rule alone cannot shrink them.
+    Mapping the headings to ``<p class="help-h2|h3">`` makes the requested
+    pixel sizes authoritative while leaving the visible text untouched.
+    """
+    html = HELP_HTML.replace("<h2>", '<p class="help-h2">').replace("</h2>", "</p>")
+    return html.replace("<h3>", '<p class="help-h3">').replace("</h3>", "</p>")
 
 
 class KeyboardShortcutsDialog(QDialog):
@@ -144,7 +156,7 @@ class HelpDialog(QDialog):
         browser.document().setDefaultStyleSheet(
             build_help_document_css(theme, int(font_size))
         )
-        browser.setHtml(HELP_HTML)
+        browser.setHtml(build_help_document_html(theme, int(font_size)))
         layout.addWidget(browser, 1)
         close_btn = QPushButton("Close")
         close_btn.setObjectName("secondaryButton")
