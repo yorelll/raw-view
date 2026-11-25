@@ -1291,6 +1291,10 @@ class ControlPanel(QWidget):
             with QSignalBlocker(self.preset_combo):
                 self.preset_combo.setCurrentIndex(-1)
             self.preset_combo.update()
+            # The blocked setCurrentIndex(-1) does not emit currentTextChanged,
+            # so the tooltip would otherwise keep the name restored by the
+            # rebuild above while the box shows the empty-state hint (r4).
+            self._sync_preset_tooltip()
 
     def set_preset_names(self, names: list[str], current: str | None = None) -> None:
         """Backward-compatible names-only population for older callers/tests."""

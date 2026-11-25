@@ -299,6 +299,32 @@ class PresetNameElisionTests(_LayoutFixture):
         self.assertEqual(combo.display_text(), self.SHORT)
         self.assertEqual(combo.toolTip(), self.SHORT)
 
+    def test_late_reorder_on_placeholder_clears_tooltip(self):
+        """r4: a deferred re-order must not leave the old preset name in the tooltip."""
+        self._apply("light", 24)
+        panel = self._panel()
+        combo = self._select(self.LONG_27)
+        self.assertEqual(combo.currentIndex(), 0)
+        self.assertEqual(combo.toolTip(), self.LONG_27)
+
+        # User arrows back to the empty state; the signal resets the tooltip.
+        combo.setCurrentIndex(-1)
+        _pump()
+        self.assertEqual(combo.currentIndex(), -1)
+        self.assertEqual(combo.toolTip(), ControlPanel._PRESET_TOOLTIP)
+
+        # A late recent-use re-order rebuilds the model (restores the old
+        # selection internally) and then puts the box back on the placeholder.
+        panel._preset_reorder_pending = True
+        panel._maybe_apply_preset_reorder()
+        _pump()
+        self.assertEqual(combo.currentIndex(), -1)
+        self.assertIsNone(combo.currentData())
+        self.assertEqual(
+            combo.toolTip(), ControlPanel._PRESET_TOOLTIP,
+            "placeholder must not keep the previous preset name in the tooltip",
+        )
+
     def test_tooltip_restored_when_selection_is_cleared(self):
         self._apply("light", 24)
         combo = self._select(self.LONG_27)
