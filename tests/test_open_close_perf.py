@@ -750,6 +750,76 @@ class BatchUiRefreshTests(_WindowFixture):
         self.assertEqual(nav.call_count, 1)
 
 
+# ── 0.6.2: decode QThread must be stopped before page teardown ───────────
+
+
+class DecodeQuiesceTests(_WindowFixture):
+    """Closing/rebuilding pages while a decode QThread runs spun Qt forever.
+
+    The CI watchdog caught it on Ubuntu inside ``QMenu.clear()`` and
+    ``QGraphicsView.__init__``; it reproduces on Windows as a 100%-CPU spin in
+    ``removeTab`` / ``setParent(None)``.  The fix stops the thread (bounded)
+    before the widget tree is touched.
+    """
+
+    def test_close_all_stops_inflight_decode_before_destroying_pages(self):
+        import time
+
+        from PyQt5.QtTest import QTest
+
+        def _slow_run(_worker):  # patched DecodeWorker.run: stays in flight
+            time.sleep(0.15)
+
+        with mock.patch.object(app_module.DecodeWorker, "run", _slow_run):
+            self.w._open_paths(self._many([f"q{i}.raw" for i in range(6)]))
+            QTest.qWait(5)
+            thread = self.w.__dict__.get("_thread")
+            self.assertIsNotNone(thread, "an async decode must be in flight")
+            self.w.close_all_items()
+
+        self.assertEqual(self.w.items, [])
+        self.assertIsNone(self.w.__dict__.get("_thread"))
+        self.assertFalse(
+            _thread_is_running(thread),
+            "close-all must stop the decode QThread before destroying pages",
+        )
+
+    def test_quiesce_decode_thread_is_bounded_for_a_blocked_worker(self):
+        """A long decode must not make tab teardown block indefinitely."""
+        import time
+
+        from PyQt5.QtCore import QThread
+
+        class _SlowThread(QThread):
+            def run(self):  # noqa: D401 - mirrors DecodeWorker.run
+                time.sleep(0.4)
+
+        thread = _SlowThread()
+        thread.start()
+        try:
+            self.assertTrue(thread.isRunning())
+            self.w._thread = thread
+            self.w._worker = None
+            started = time.perf_counter()
+            self.w._quiesce_decode_thread(timeout_ms=40)
+            elapsed = time.perf_counter() - started
+            self.assertLess(
+                elapsed, 0.3,
+                "quiesce must return within its bound instead of waiting for "
+                "a long decode",
+            )
+            self.assertIsNone(self.w.__dict__.get("_thread"))
+        finally:
+            thread.wait(3000)
+
+
+def _thread_is_running(thread) -> bool:
+    try:
+        return thread.isRunning()
+    except RuntimeError:  # pragma: no cover - wrapper already deleted
+        return False
+
+
 # ── S6: background-tab close skips the panel reload ──────────────────────
 
 

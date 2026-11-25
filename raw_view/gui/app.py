@@ -2057,6 +2057,12 @@ class MainWindow(QMainWindow):
         # the status bar already correct for the unchanged current item.
         was_current = self.item_tabs.currentIndex() == index
         page = self.item_tabs.widget(index)
+        # 0.2.2-L-1 / 0.3.1-M-1 / 0.4.1-M-2：若被关闭项正是当前在途解码目标，
+        # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
+        # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
+        # 必须在 removeTab / 销毁页面 **之前** 做：一个仍在运行的解码 QThread
+        # 会让随后的 QWidget 拆树操作死循环（_quiesce_decode_thread 说明）。
+        self._cancel_decode_for(closing)
         self._loading_item = True
         self.item_tabs.removeTab(index)
         self.items.pop(index)
@@ -2070,10 +2076,6 @@ class MainWindow(QMainWindow):
         # open+close cycle, with app.setStyleSheet() degrading from 0.5 s to 5 s
         # after 40 leaked pages).
         self._detach_item_from_page(closing, page)
-        # 0.2.2-L-1 / 0.3.1-M-1 / 0.4.1-M-2：若被关闭项正是当前在途解码目标，
-        # 断开其 worker 的 finished/error 槽——否则其迟到结果会画到新当前标签上
-        # （_should_apply_decode 依对象身份/pending 判定，但关闭后新标签接管）。
-        self._cancel_decode_for(closing)
         # Closing an item a batch-open queue is waiting for must not stall the
         # queue: drop it from the pending list and, if it was the in-flight one,
         # advance now (its late signals were just disconnected above).
@@ -2415,6 +2417,12 @@ class MainWindow(QMainWindow):
         # Take over the open queue *before* entering the batch, so no queue step
         # can be in flight while this batch dispatches its own decodes.
         self._take_over_open_queue_for_reload()
+        # Rebuilding every page must not overlap a still-running decode thread:
+        # destroying/constructing the QGraphicsView while a QThread is alive can
+        # spin Qt's widget machinery (see _quiesce_decode_thread).  Reload All
+        # rebuilds and re-decodes every item anyway, so discarding the current
+        # request is safe.
+        self._quiesce_decode_thread()
         owner = self._batch_begin()
         self._reload_all_state = {"index": 0, "batch_owner": owner}
         try:
@@ -2627,7 +2635,12 @@ class MainWindow(QMainWindow):
 
         逐项关闭时把目录扫描/面板重载/整窗重绘延后到批量结束统一做一次
         （旧实现每关一个 tab 就全量重扫目录，30 个标签下总耗时可达数秒）。
+
+        全部关闭时先停掉在途解码线程（有界等待）：否则在删到那一个标签之前
+        就会在其它页面上做 QWidget 拆树，而一个仍在运行的 QThread 会让拆树
+        操作死循环。所有标签都要关，取消在途解码没有副作用。
         """
+        self._quiesce_decode_thread()
         owner = self._batch_begin()
         try:
             while self.items:
@@ -2644,6 +2657,12 @@ class MainWindow(QMainWindow):
         count = len(self.items)
         if not (0 <= index < count):
             return
+        # If the item whose decode is in flight is among those being removed,
+        # stop its thread before the first page is destroyed (the in-flight item
+        # may not be the rightmost one, so close_item alone is too late).
+        pending = self.__dict__.get("_pending_decode_item")
+        if pending is not None and pending in self.items[index + 1:]:
+            self._quiesce_decode_thread()
         owner = self._batch_begin()
         try:
             while count > index + 1:
@@ -3651,7 +3670,7 @@ class MainWindow(QMainWindow):
         避免在 PyQt 包装层之外（``MainWindow.__new__`` 测试桩）触碰 ``Signal``
         对象抛 RuntimeError。
         """
-        worker = self._worker
+        worker = self.__dict__.get("_worker")
         self._cancel_async_decode()
         if worker is not None:
             try:
@@ -3659,6 +3678,39 @@ class MainWindow(QMainWindow):
                 worker.error.disconnect(self._on_decode_error)
             except (TypeError, RuntimeError):
                 pass
+
+    #: How long a page teardown/rebuild may wait for an in-flight decode thread
+    #: to actually stop.  Long enough for a normal frame to finish, short enough
+    #: that closing a tab while a huge frame decodes does not freeze the UI.
+    _DECODE_QUIESCE_MS = 500
+
+    def _quiesce_decode_thread(self, timeout_ms: int | None = None) -> None:
+        """Detach the in-flight decode and let its thread stop before UI work.
+
+        Removing/rebuilding tab pages (``QTabWidget.removeTab``,
+        ``QWidget.setParent(None)``, constructing a ``QGraphicsView``) while the
+        decode ``QThread`` is still starting or running can wedge Qt's widget
+        machinery in a 100%-CPU spin (reproduced on Windows and reported by the
+        CI watchdog on Ubuntu inside ``recent_menu.clear()``,
+        ``ImageView.__init__`` and ``setParent``).  The thread is pure CPU and
+        cannot be interrupted mid-decode, so give it a *bounded* moment to
+        finish, then continue; the result it would have delivered has already
+        been discarded by :meth:`_disconnect_decode`.
+        """
+        thread = self.__dict__.get("_thread")
+        # Always detach (the pre-existing contract: late results are discarded),
+        # even when only a test stub is present and there is no live thread.
+        self._disconnect_decode()
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(
+                    self._DECODE_QUIESCE_MS if timeout_ms is None else timeout_ms
+                )
+        except RuntimeError:  # pragma: no cover - wrapper already deleted
+            pass
 
     def _cancel_decode_for(self, item: ViewerItem | None) -> None:
         """若 *item* 正是当前在途解码的目标，则断开其 worker 的连接。
@@ -3668,12 +3720,16 @@ class MainWindow(QMainWindow):
         内部），代数不需要变化也能让迟到的信号被丢弃（``item is None`` 或
         ``id(pending) != id(item)``）。这里不递增代数，避免无谓地让其它在途
         结果作废；等价于 0.3.0 审查 L-3 建议的“命中/关闭时也清理在途引用”。
+
+        断开后还要等线程真正停下（有界）再让调用方销毁/重建页面：仅断开
+        信号不够，一个仍在运行的 QThread 已足以让随后的 QWidget 操作死循环
+        （见 :meth:`_quiesce_decode_thread`）。
         """
         if item is None:
             return
         # 用 __dict__.get：MainWindow.__new__ 测试桩可能没有该属性。
         if self.__dict__.get("_pending_decode_item") is item:
-            self._disconnect_decode()
+            self._quiesce_decode_thread()
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt override
         """窗口关闭/退出：断开在途解码的信号（0.2.2-L-1 / 0.3.1-L-1 / 0.4.x-M-2）。
