@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -42,6 +42,15 @@ class FrameNavBar(QWidget):
         self._nav_min_h = 32
         self._nav_min_w = 36
         self._spin_min_w = 52
+
+        # A stylesheet swap fires changeEvent before child fonts/layout have
+        # settled.  Coalesce a deferred pass so we can measure the styled
+        # QSpinBox chrome instead of guessing its width.
+        self._metrics_timer = QTimer(self)
+        self._metrics_timer.setSingleShot(True)
+        self._metrics_timer.setInterval(0)
+        self._metrics_timer.timeout.connect(self._sync_metrics)
+        self._metrics_passes_left = 0
 
         # ── Buttons ────────────────────────────────────────────────────
         # Icon mapping: │◀  ◀  ▶  ▶│
@@ -127,10 +136,15 @@ class FrameNavBar(QWidget):
             btn.setFixedSize(button_w, button_h)
 
         spin_fm = QFontMetrics(self.frame_spin.font())
-        spin_w = max(
-            self._spin_min_w,
-            spin_fm.horizontalAdvance("1000000") + 40,
-        )
+        text_w = spin_fm.horizontalAdvance("1000000")
+        editor = self.frame_spin.lineEdit()
+        editor_w = editor.width() if editor is not None else 0
+        outer_w = self.frame_spin.width()
+        # The spin-box chrome (frame, padding and the up/down buttons) is
+        # style-dependent and grows with the font; derive it from the live
+        # editor width rather than hard-coding a padding guess.
+        chrome_w = outer_w - editor_w if editor_w > 0 and outer_w > editor_w else 0
+        spin_w = max(self._spin_min_w, text_w + 8 + chrome_w)
         spin_h = max(self._nav_min_h, spin_fm.height() + 10)
         self.frame_spin.setFixedSize(spin_w, spin_h)
 
@@ -139,16 +153,35 @@ class FrameNavBar(QWidget):
             max(self._nav_min_h, label_fm.height() + 8)
         )
 
+    def _sync_metrics(self) -> None:
+        """Finish a deferred metric refresh after fonts and layout settle."""
+        self._update_metrics()
+        if self._metrics_passes_left > 0:
+            self._metrics_passes_left -= 1
+            self._metrics_timer.start()
+
+    def _refresh_metrics(self) -> None:
+        """Apply metrics now and over the next few event-loop turns.
+
+        ``changeEvent`` runs before child controls have picked up the new
+        stylesheet font, and ``showEvent`` runs before the first layout.  A
+        short sequence of zero-delay passes converges on the measured spin-box
+        chrome without using fixed sleeps.
+        """
+        self._metrics_passes_left = 3
+        self._update_metrics()
+        self._metrics_timer.start()
+
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in (QEvent.FontChange, QEvent.StyleChange):
-            self._update_metrics()
+            self._refresh_metrics()
 
     def showEvent(self, event) -> None:
         # A stylesheet installed on QApplication before construction is applied
-        # during polish without a StyleChange event, so size once after show.
+        # during polish without a StyleChange event, so size after show too.
         super().showEvent(event)
-        self._update_metrics()
+        self._refresh_metrics()
 
     def set_frame_info(self, current: int, total: int) -> None:
         """Update frame display and enable/disable nav buttons.

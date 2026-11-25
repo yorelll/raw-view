@@ -1665,10 +1665,17 @@ class FramenavThemingTests(unittest.TestCase):
                                 self.assertGreaterEqual(button.width(), 36)
                                 self.assertGreaterEqual(button.height(), 32)
                             spin_fm = QFontMetrics(nav.frame_spin.font())
+                            spin_text = spin_fm.horizontalAdvance("1000000")
                             self.assertGreaterEqual(
                                 nav.frame_spin.width(),
-                                spin_fm.horizontalAdvance("1000000"),
+                                spin_text,
                                 "frame spin cannot show a 7-digit frame number",
+                            )
+                            editor = nav.frame_spin.lineEdit()
+                            self.assertIsNotNone(editor)
+                            self.assertGreaterEqual(
+                                editor.width(), spin_text + 4,
+                                "frame spin's text area clips a 7-digit number",
                             )
                             label_fm = QFontMetrics(nav._total_label.font())
                             self.assertGreaterEqual(
@@ -1676,6 +1683,67 @@ class FramenavThemingTests(unittest.TestCase):
                             )
                         finally:
                             destroy_widget(nav)
+        finally:
+            self._app.setStyleSheet(old_sheet)
+            self._app.processEvents()
+
+    def test_nav_recomputes_after_live_stylesheet_swap(self):
+        """H-1b: a restyle of an already-shown nav must resize every control."""
+        from PyQt5.QtGui import QFontMetrics
+        from PyQt5.QtTest import QTest
+
+        old_sheet = self._app.styleSheet()
+        try:
+            for theme in ("light", "dark"):
+                with self.subTest(theme=theme):
+                    self._app.setStyleSheet(
+                        build_ui_stylesheet(theme, 13)
+                    )
+                    nav = FrameNavBar()
+                    try:
+                        nav.show()
+                        self._app.processEvents()
+                        QTest.qWait(0)
+
+                        # Simulate the settings dialog applying a larger font
+                        # to an already visible main window.
+                        self._app.setStyleSheet(
+                            build_ui_stylesheet(theme, 24)
+                        )
+                        self._app.processEvents()
+                        QTest.qWait(0)
+                        self._app.processEvents()
+
+                        button_fm = QFontMetrics(nav.first_btn.font())
+                        self.assertGreaterEqual(
+                            nav.first_btn.font().pixelSize(), 25,
+                            "live stylesheet swap did not reach the nav font",
+                        )
+                        for button in nav._nav_buttons:
+                            self.assertGreaterEqual(
+                                button.width(),
+                                button_fm.horizontalAdvance(button.text()),
+                                f"{button.text()!r} is clipped after restyle",
+                            )
+                            self.assertGreaterEqual(
+                                button.height(), button_fm.height(),
+                            )
+
+                        spin_fm = QFontMetrics(nav.frame_spin.font())
+                        spin_text = spin_fm.horizontalAdvance("1000000")
+                        editor = nav.frame_spin.lineEdit()
+                        self.assertIsNotNone(editor)
+                        self.assertGreaterEqual(
+                            editor.width(), spin_text + 4,
+                            "frame spin text area is clipped after restyle",
+                        )
+                        label_fm = QFontMetrics(nav._total_label.font())
+                        self.assertGreaterEqual(
+                            nav._total_label.height(), label_fm.height(),
+                            "total label is clipped after restyle",
+                        )
+                    finally:
+                        destroy_widget(nav)
         finally:
             self._app.setStyleSheet(old_sheet)
             self._app.processEvents()
