@@ -1047,10 +1047,10 @@ class MainWindow(QMainWindow):
         self._empty_recent_list.setAccessibleDescription(
             "Double-click or press Enter to open a recently used file."
         )
-        self._empty_recent_list.itemClicked.connect(self._on_empty_recent_clicked)
-        # Keyboard/AT users activate with Enter, which QAbstractItemView emits
-        # as ``activated`` only — without this the accessible description
-        # ("press Enter") promised something that did nothing.
+        # Activate (double-click / Enter) opens; a single click only selects.
+        # Connecting BOTH itemClicked and itemActivated double-fired on a real
+        # double-click (click + activate), which reloaded an open file twice and
+        # popped two "File not found" boxes for a deleted recent entry.
         self._empty_recent_list.itemActivated.connect(
             self._on_empty_recent_clicked
         )

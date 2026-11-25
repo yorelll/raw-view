@@ -809,23 +809,6 @@ class EmptyRecentFilesTests(_Batch4TestBase):
                         f"{theme}: 最近文件按最新在前排列",
                     )
 
-                    # Mouse activation (single click).
-                    with patch.object(
-                        MainWindow, "_open_recent_file", autospec=True
-                    ) as opener:
-                        window._empty_recent_list.itemClicked.emit(newest)
-                    opener.assert_called_once_with(window, paths[-1])
-
-                    # Keyboard/AT activation: QAbstractItemView emits
-                    # ``activated`` on Enter, never ``clicked``.
-                    with patch.object(
-                        MainWindow, "_open_recent_file", autospec=True
-                    ) as opener:
-                        window._empty_recent_list.itemActivated.emit(newest)
-                    opener.assert_called_once_with(window, paths[-1])
-
-                    # Real key event path: focus the list, select the row and
-                    # press Enter.
                     view = window._empty_recent_list
                     APP.setActiveWindow(window)
                     window.activateWindow()
@@ -833,12 +816,62 @@ class EmptyRecentFilesTests(_Batch4TestBase):
                     view.setCurrentRow(0)
                     view.setFocus(Qt.TabFocusReason)
                     self._settle()
+                    row_point = view.visualItemRect(view.item(0)).center()
+
+                    # Single click only selects (L-1 revised semantics).
+                    with patch.object(
+                        MainWindow, "_open_recent_file", autospec=True
+                    ) as opener:
+                        QTest.mouseClick(
+                            view.viewport(), Qt.LeftButton, pos=row_point
+                        )
+                        self._settle()
+                    opener.assert_not_called()
+                    self.assertEqual(
+                        view.currentRow(), 0,
+                        f"{theme}: 单击后最近文件行应被选中",
+                    )
+
+                    # Real double click opens exactly once (click + activate
+                    # must not double-fire).
+                    with patch.object(
+                        MainWindow, "_open_recent_file", autospec=True
+                    ) as opener:
+                        QTest.mouseClick(
+                            view.viewport(), Qt.LeftButton, pos=row_point
+                        )
+                        QTest.mouseDClick(
+                            view.viewport(), Qt.LeftButton, pos=row_point
+                        )
+                        self._settle()
+                    opener.assert_called_once_with(window, paths[-1])
+
+                    # Keyboard/AT activation: Enter opens exactly once.
                     with patch.object(
                         MainWindow, "_open_recent_file", autospec=True
                     ) as opener:
                         QTest.keyClick(view, Qt.Key_Return)
                         self._settle()
                     opener.assert_called_once_with(window, paths[-1])
+
+                    # A deleted recent entry asks for exactly one warning on a
+                    # double click, not one per event.
+                    with patch(
+                        "raw_view.gui.app.QMessageBox.warning"
+                    ) as warning:
+                        QTest.mouseClick(
+                            view.viewport(), Qt.LeftButton, pos=row_point
+                        )
+                        QTest.mouseDClick(
+                            view.viewport(), Qt.LeftButton, pos=row_point
+                        )
+                        self._settle()
+                    warning.assert_called_once()
+                    self.assertIn(
+                        "File not found",
+                        warning.call_args.args[2],
+                        f"{theme}: 缺失最近项应弹出 File not found 警告",
+                    )
                 finally:
                     if window in self._widgets:
                         self._widgets.remove(window)
