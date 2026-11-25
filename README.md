@@ -2,7 +2,7 @@
 
 Python RAW/YUV 图像查看与格式转换工具。
 
-> **当前版本：0.5.10** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
+> **当前版本：0.6.0** —— 正式发布通过 GitHub Releases 分发 Windows **单文件 exe + zip 压缩包**（见下方
 > *发布与下载* 与 `docs/release_exe.md`）。
 
 ## 功能
@@ -26,15 +26,17 @@ Python RAW/YUV 图像查看与格式转换工具。
 - Convert 页的输出只有一行 **`Output file`**：选中输入文件后，按 Settings 的输出模板自动填入**输入文件同目录**的完整路径，用户可直接编辑该路径或点 Browse 另选；之后修改格式/尺寸等参数不会覆盖手动改过的路径。Variant Convert 仍提供 *Same directory as input*（默认勾选）与可见的 *Output folder*（取消勾选后使用 Settings 的 *Default output folder*，默认 `convert_out`，相对名会建在每个输入文件所在目录下），勾选/取消勾选来回切换时输出位置始终可判断
 - 内置 Help：格式排列、Packed bit 规则与示例
 - 默认显示为 Fit to Window，可自行缩放
-- **帧导航**：图像下方提供 ⏮ 首帧 / ‹ 上帧 / 帧号输入框（`1 / N`）/ › 下帧 / ⏭ 末帧 控件；键盘 ←/↑ 上一帧、→/↓ 下一帧、Home 首帧、End 末帧；自动检测总帧数，帧号从 1 开始
+- **帧导航**：图像下方提供 `│◀` 首帧 / `◀` 上帧 / 帧号输入框（`1 / N`）/ `▶` 下帧 / `▶│` 末帧 控件；键盘 ←/↑ 上一帧、→/↓ 下一帧、Home 首帧、End 末帧；自动检测总帧数，帧号从 1 开始；按钮、帧号框与 `/ N` 标签会随 **UI font size** 自动放大（10–24px 不裁切、7 位帧号完整显示）
+- **读数带**：每个标签页图像上方一行显示当前格式（如 `RAW12` / `YUYV`）、对齐与端序、`2560×1440`、帧字节数与 `1 / N` 帧号；数字使用等宽字体，切换标签时一眼看清当前参数
 - **缩放控件**：缩放滑块（10%-1000%，实线轨道 + 圆形手柄）+ 可编辑数值框（滑动粗调、输入精调）、双击图像切换 Fit/1:1
 - **可拖拽分栏**：左侧参数面板与右侧图像预览之间为可拖动分隔条，自由调整两者宽度
 - **全屏模式**：F11 进入/退出全屏（菜单项动态切换 Fullscreen / Exit Fullscreen 并显示勾选），Escape 退出
 - **图像旋转/翻转**：旋转 90°（Ctrl+R / Ctrl+Shift+R）、水平翻转（Ctrl+H）、垂直翻转（Ctrl+Shift+V）
 - **标签页切换**：Ctrl+Tab / Ctrl+Shift+Tab 或右键菜单切换多文件标签页
-- **现代主题**：基于 qt-material 的 Material Design 界面，统一 Material 蓝（`#1976D2`）主色（滑块/滚动条/菜单高亮/下拉箭头/复选勾选/按钮全部同色），卡片式圆角面板叠加层，Light/Dark 双主题（**默认 Dark**，深色下输入框/文字满足 WCAG AA 对比度）；Windows 标题栏随主题变深/变浅（DWM 沉浸式深色）；按钮分三级：主操作实心（Primary）、次操作描边（Secondary）、危险操作红色描边（Danger）、跳转操作文字链接
-- **状态栏状态点**：Ready/解码成功=绿色、解码中=琥珀色、参数已改未 Apply=琥珀色、错误=红色圆点，一眼感知系统状态；未加载文件时预览区显示空状态引导（图标 + 说明 + Open File 按钮）
-- **转换反馈**：Convert 转换中按钮显示 “Converting…” 并禁用防重复点击，完成后提示 ✅ 输出路径 + 文件大小、失败提示 ❌ 原因；Generate Variants 显示 “Generating n/N…” 进度；批量转换显示逐文件进度与汇总报告
+- **现代主题**：石墨中性底色 + 单一蓝强调色（填充 `#1F6FC4`，暗色文字 `#5B9BEA`），Light/Dark 各一套 token（正文/次要/提示三级文字角色，成功/警告/危险按主题重新取值，均满足 WCAG AA）；参数面板为真实卡片（表面 + 1px 发丝 + 12px 圆角），菜单栏/工具栏/状态栏统一表面，标签页选中态与悬停态可区分；Windows 标题栏随主题变深/变浅（DWM 沉浸式深色）；按钮分四级：主操作实心（Primary）、次操作描边（Secondary）、危险操作红色描边（Danger）、跳转操作文字链接
+- **参数面板**：按 Preset / Format / Geometry / View 分组，控件 30px、行距 6px，Width 与 Height 合并为 `Size` 一行；默认 1200×700 下 RAW 与 YUV 都不出现滚动条
+- **状态栏状态点**：Ready/解码成功=绿色、解码中=琥珀色、参数已改未 Apply=琥珀色、错误=红色圆点，颜色来自主题 token；未加载文件时预览区显示 2×2 RGGB 色块标记 + 说明 + Open File 按钮
+- **转换反馈**：Convert 转换中按钮显示 “Converting…” 并禁用防重复点击，完成后提示输出路径 + 文件大小、失败提示原因；Generate Variants 显示 “Generating n/N…” 进度；批量转换显示逐文件进度与汇总报告
 - **应用图标 / Logo**：内置 indigo/violet 传感器 Bayer 马赛克风格 logo（`assets/logo.svg`），用作窗口/任务栏图标与工具栏品牌标识；打包 exe 使用 `assets/raw-view.ico`
 - **日志系统**：文件日志（RotatingFileHandler，最大 5MB，保留 3 份）+ 控制台日志，记录解码错误、转换异常、崩溃信息。**CLI 失败时终端只显示一行 `Error: ...`，完整 traceback 记入日志文件**（文件 handler 为 DEBUG、控制台 handler 为 INFO）；`RAW_VIEW_LOG_LEVEL` 控制级别，`RAW_VIEW_LOG_DIR` 可重定向日志目录（测试用）
 - **Sensor 预设**：可把任意一组解码参数（type / format / alignment / endianness / preview / Bayer / width / height / offset）保存为命名预设；下次打开 RAW 时在面板顶部 **Preset** 下拉框中选择，即可自动填充所有字段（**填充后需点击 Apply 才会生效渲染**，避免误刷新）。主界面只负责选择：右侧漏斗按钮可在 **All / RAW / YUV / Standard images** 四类间切换浏览范围，下拉列表按最近使用优先、其余按名称排序；名称/结构化搜索只在 **Manage presets** 管理对话框中进行。保存与管理通过左侧控制面板的右键菜单进入；管理对话框支持 Rename / Import / Export 与右键操作，双击列表项可就地重命名
