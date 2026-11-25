@@ -266,9 +266,11 @@ class SettingsDialog(QDialog):
         try:
             import qtawesome as qta
 
-            from raw_view.models import ACTION_ICON_COLOR
+            from raw_view.models import action_icon_colors
 
-            button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
+            # M-9: dialogs are short-lived; construct with the live theme.
+            color, _ = action_icon_colors(self._settings.ui_theme)
+            button.setIcon(qta.icon("fa5s.info-circle", color=color))
         except Exception:
             button.setText("i")
         button.setIconSize(QSize(16, 16))

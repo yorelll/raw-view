@@ -54,9 +54,8 @@ from raw_view.formats import (
 from raw_view.logger import get_logger
 from raw_view.models import (
     AppSettings,
-    ACTION_ICON_COLOR,
-    ACTION_ICON_DISABLED_COLOR,
     ACTION_ICON_NAMES,
+    action_icon_colors,
     IMAGE_EXTENSIONS,
     MATERIAL_EXTRA,
     THEME_XML,
@@ -911,16 +910,16 @@ class MainWindow(QMainWindow):
         view_menu = menu.addMenu("View")
 
         # Zoom group
-        zoom_in = QAction(self._menu_icon("fa5s.search-plus"), "Zoom In", self)
+        zoom_in = self._action_with_icon("fa5s.search-plus", "Zoom In")
         zoom_in.setShortcut(QKeySequence.ZoomIn)
         zoom_in.triggered.connect(self._zoom_in_current)
-        zoom_out = QAction(self._menu_icon("fa5s.search-minus"), "Zoom Out", self)
+        zoom_out = self._action_with_icon("fa5s.search-minus", "Zoom Out")
         zoom_out.setShortcut(QKeySequence.ZoomOut)
         zoom_out.triggered.connect(self._zoom_out_current)
-        fit = QAction(self._menu_icon("fa5s.expand-arrows-alt"), "Fit to Window", self)
+        fit = self._action_with_icon("fa5s.expand-arrows-alt", "Fit to Window")
         fit.setShortcut("Ctrl+0")
         fit.triggered.connect(self._fit_image)
-        reset_zoom = QAction(self._menu_icon("fa5s.compress"), "Actual Size", self)
+        reset_zoom = self._action_with_icon("fa5s.compress", "Actual Size")
         reset_zoom.setShortcut("Ctrl+1")
         reset_zoom.setToolTip("Reset zoom to 100% (1:1)")
         reset_zoom.triggered.connect(self._reset_zoom_current)
@@ -929,7 +928,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
 
         # Display-mode group
-        self.fullscreen_action = QAction(self._menu_icon("fa5s.expand"), "Fullscreen", self)
+        self.fullscreen_action = self._action_with_icon("fa5s.expand", "Fullscreen")
         self.fullscreen_action.setShortcut("F11")
         self.fullscreen_action.setCheckable(True)
         self.fullscreen_action.triggered.connect(self._toggle_fullscreen)
@@ -938,39 +937,37 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
 
         # Transform group
-        rotate_cw = QAction(self._menu_icon("fa5s.redo"), "Rotate CW", self)
+        rotate_cw = self._action_with_icon("fa5s.redo", "Rotate CW")
         rotate_cw.setShortcut("Ctrl+R")
         rotate_cw.triggered.connect(self._rotate_cw_current)
-        rotate_ccw = QAction(self._menu_icon("fa5s.undo"), "Rotate CCW", self)
+        rotate_ccw = self._action_with_icon("fa5s.undo", "Rotate CCW")
         rotate_ccw.setShortcut("Ctrl+Shift+R")
         rotate_ccw.triggered.connect(self._rotate_ccw_current)
-        flip_h = QAction(self._menu_icon("fa5s.arrows-alt-h"), "Flip Horizontal", self)
+        flip_h = self._action_with_icon("fa5s.arrows-alt-h", "Flip Horizontal")
         flip_h.setShortcut("Ctrl+H")
         flip_h.triggered.connect(self._flip_h_current)
-        flip_v = QAction(self._menu_icon("fa5s.arrows-alt-v"), "Flip Vertical", self)
+        flip_v = self._action_with_icon("fa5s.arrows-alt-v", "Flip Vertical")
         flip_v.setShortcut("Ctrl+Shift+V")
         flip_v.triggered.connect(self._flip_v_current)
         view_menu.addActions([rotate_cw, rotate_ccw, flip_h, flip_v])
 
         # ── Tools ──
         tools_menu = menu.addMenu("Tools")
-        self.convert_action = QAction(
-            self._menu_icon(ACTION_ICON_NAMES["convert"]), "Convert...", self
+        self.convert_action = self._action_with_icon(
+            ACTION_ICON_NAMES["convert"], "Convert..."
         )
         self.convert_action.triggered.connect(self.open_convert_dialog)
-        self.batch_convert_action = QAction(
-            self._menu_icon("fa5s.layer-group"), "Batch Convert...", self
+        self.batch_convert_action = self._action_with_icon(
+            "fa5s.layer-group", "Batch Convert..."
         )
         self.batch_convert_action.triggered.connect(self.open_batch_convert_dialog)
-        settings_action = QAction(
-            self._menu_icon(ACTION_ICON_NAMES["settings"]), "Settings...", self
+        settings_action = self._action_with_icon(
+            ACTION_ICON_NAMES["settings"], "Settings..."
         )
         settings_action.triggered.connect(self.open_settings_dialog)
         tools_menu.addActions([self.convert_action, self.batch_convert_action])
         tools_menu.addSeparator()
-        fourcc_action = QAction(
-            self._menu_icon("fa5s.search"), "FourCC Lookup...", self
-        )
+        fourcc_action = self._action_with_icon("fa5s.search", "FourCC Lookup...")
         fourcc_action.triggered.connect(self.open_fourcc_dialog)
         tools_menu.addAction(fourcc_action)
         tools_menu.addSeparator()
@@ -1018,6 +1015,7 @@ class MainWindow(QMainWindow):
             (self.batch_convert_action, "fa5s.layer-group"),
         ]:
             action.setIcon(self._build_action_icon(icon_name))
+            action.setProperty("iconName", icon_name)
             toolbar.addAction(action)
 
         # 上一/下一文件的入口保留在 Navigate 菜单（Ctrl+Left/Right），不再是
@@ -1030,10 +1028,12 @@ class MainWindow(QMainWindow):
 
         settings_icon = self._build_action_icon(ACTION_ICON_NAMES["settings"])
         settings_action = toolbar.addAction(settings_icon, "Settings")
+        settings_action.setProperty("iconName", ACTION_ICON_NAMES["settings"])
         settings_action.triggered.connect(self.open_settings_dialog)
 
         help_icon = self._build_action_icon(ACTION_ICON_NAMES["help"])
         help_action = toolbar.addAction(help_icon, "Help")
+        help_action.setProperty("iconName", ACTION_ICON_NAMES["help"])
         help_action.triggered.connect(self.show_help)
 
     # ── Apply shortcut guard ─────────────────────────────────────────
@@ -1185,6 +1185,10 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         self._apply_theme_impl()
+        # M-9: icon colour lives in THEME_PALETTES, so every action glyph must
+        # be regenerated after a theme switch; otherwise the toolbar keeps the
+        # previous theme's blue.
+        self._refresh_action_icons()
         # Explicit refresh hook: the panel must NOT listen to PaletteChange
         # itself (that event also fires during construction).
         panel = self.__dict__.get("panel")
@@ -1226,6 +1230,15 @@ class MainWindow(QMainWindow):
                 f" image: url('{_asset('check.png')}'); }}\n"
                 "QComboBox::down-arrow {"
                 f" image: url('{_asset('chevron_down.png')}'); width: 12px; height: 12px; }}\n"
+                # H-4: the pseudo-state rules are the ones qt-material ships,
+                # and they outrank the plain selector above.  Disabled combos
+                # get a faded copy of the same glyph (alpha x0.45); focused
+                # combos keep the full glyph (qt-material's :focus SVG uses
+                # an ``icon:`` resource this process cannot resolve).
+                "QComboBox::down-arrow:focus {"
+                f" image: url('{_asset('chevron_down.png')}'); width: 12px; height: 12px; }}\n"
+                "QComboBox::down-arrow:disabled {"
+                f" image: url('{_asset('chevron_down_disabled.png')}'); width: 12px; height: 12px; }}\n"
                 "QTabBar::close-button {"
                 f" image: url('{_asset('close.png')}'); }}\n"
                 "QTabBar::close-button:hover {"
@@ -1238,16 +1251,30 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
 
     def _build_action_icon(self, icon_name: str) -> QIcon:
+        """Build an action icon with the *current theme's* icon tokens (M-9)."""
         import qtawesome as qta
 
+        theme = getattr(getattr(self, "settings", None), "ui_theme", "dark")
+        color, disabled_color = action_icon_colors(theme)
         try:
-            return qta.icon(icon_name, color=ACTION_ICON_COLOR, color_disabled=ACTION_ICON_DISABLED_COLOR)
+            return qta.icon(
+                icon_name, color=color, color_disabled=disabled_color
+            )
         except (KeyError, TypeError, ValueError):
             return QIcon()
 
-    def _menu_icon(self, icon_name: str) -> QIcon:
-        """Icon for a menu action (same style as toolbar icons)."""
-        return self._build_action_icon(icon_name)
+    def _action_with_icon(self, icon_name: str, text: str) -> QAction:
+        """Create a self-owned action and remember its glyph for theme refresh."""
+        action = QAction(self._build_action_icon(icon_name), text, self)
+        action.setProperty("iconName", icon_name)
+        return action
+
+    def _refresh_action_icons(self) -> None:
+        """Re-render every themed action glyph (toolbar + menus) for M-9."""
+        for action in self.findChildren(QAction):
+            icon_name = action.property("iconName")
+            if icon_name:
+                action.setIcon(self._build_action_icon(str(icon_name)))
 
     # ── Image helpers ─────────────────────────────────────────────────
 

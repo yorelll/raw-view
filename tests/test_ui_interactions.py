@@ -1211,12 +1211,28 @@ class AccessibilityAndDialogConsistencyTests(unittest.TestCase):
                         f"QPushButton#{object_name}:hover", sheet,
                         f"{theme} 样式必须覆盖 {object_name} 的 hover 状态",
                     )
-                # Hover/focus/pressed selectors all explicitly clear the border;
-                # this protects against the native button frame reappearing.
-                self.assertGreaterEqual(
-                    sheet.count("border: none;"), 8,
-                    f"{theme} info 状态不应有外部边框",
-                )
+                    # H-1 / WCAG 2.4.7: focus must now paint a ring instead of
+                    # clearing the frame.  Hover/pressed keep clearing the
+                    # native frame (no border on idle mouse states).
+                    focus_start = sheet.index(f"QPushButton#{object_name}:focus")
+                    focus_rule = sheet[focus_start:sheet.index("}", focus_start)]
+                    self.assertIn(
+                        "border", focus_rule,
+                        f"{theme}/{object_name}: focus 必须声明可见边框",
+                    )
+                    self.assertNotIn(
+                        "border: none", focus_rule,
+                        f"{theme}/{object_name}: focus 不得清空边框",
+                    )
+                    for state in (":hover", ":pressed"):
+                        state_start = sheet.index(
+                            f"QPushButton#{object_name}{state}"
+                        )
+                        state_rule = sheet[state_start:sheet.index("}", state_start)]
+                        self.assertIn(
+                            "border: none", state_rule,
+                            f"{theme}/{object_name}{state}: 必须继续清除原生边框",
+                        )
         finally:
             destroy_widget(settings_dialog)
             destroy_widget(variant_button)

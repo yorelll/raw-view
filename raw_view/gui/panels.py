@@ -29,7 +29,8 @@ from raw_view.formats import (
     expected_frame_size_yuv,
 )
 from raw_view.models import (
-    ACTION_ICON_COLOR,
+    action_icon_colors,
+    current_theme_name,
     BAYER_PATTERNS,
     PRESET_CATEGORY_ALL,
     PRESET_CATEGORY_CHOICES,
@@ -43,8 +44,14 @@ from raw_view.models import (
 )
 
 
-def _qta_icon(name: str, color: str = ACTION_ICON_COLOR):
-    """Build a qtawesome icon, tolerant of failures/headless envs."""
+def _qta_icon(name: str, color: str | None = None):
+    """Build a qtawesome icon, tolerant of failures/headless envs.
+
+    ``color`` defaults to the *current* theme's ``icon_color`` token (M-9);
+    callers that know the theme pass it explicitly.
+    """
+    if color is None:
+        color = action_icon_colors(current_theme_name())[0]
     try:
         import qtawesome as qta
 
@@ -1016,6 +1023,13 @@ class ControlPanel(QWidget):
         """
         state = self.pin_state()
         self.pin_btn.setIcon(_qta_icon("fa5s.thumbtack", self._pin_icon_color()))
+        # The filter glyph also carries icon_color; rebuild it on theme switch
+        # so a live Light->Dark switch cannot leave the old blue behind (M-9).
+        self.preset_filter_btn.setIcon(
+            _qta_icon("fa5s.filter", action_icon_colors(
+                "dark" if self._is_dark_palette(self.palette()) else "light"
+            )[0])
+        )
         if state == "off":
             self.pin_btn.setToolTip(
                 "Pin the current parameters to apply to other files (Ctrl+N)."

@@ -381,8 +381,6 @@ UI_THEMES = {"light", "dark"}
 #: 发布新版本时只需改这一处。
 APP_VERSION = "0.6.0"
 
-ACTION_ICON_COLOR = "#4A90D9"
-ACTION_ICON_DISABLED_COLOR = "#9E9E9E"
 ACTION_ICON_NAMES = {
     "open": "fa5s.folder-open",
     "save": "fa5s.save",
@@ -406,6 +404,14 @@ THEME_PALETTES = {
         "hint_text": "#4E535C",
         "panel_bg": "#FFFFFF",
         "border_color": "#DCDEE3",
+        # Input-control outline (H-3).  border_color stays for cards/headers/
+        # panels; inputs are separate because a 1.35:1 hairline is below the
+        # 3:1 WCAG 1.4.11 boundary.  #848A96 gives 3.47:1 on panel_bg and
+        # 3.12:1 on main_bg.
+        "input_border": "#848A96",
+        # Keyboard focus ring (H-1).  Same value as text_color but a distinct
+        # semantic token; solid buttons draw it on top of their fill.
+        "focus_ring": "#1A1C20",
         "input_bg": "#FFFFFF",
         "button_bg": "#1F6FC4",
         "button_hover_bg": "#1A5EA8",
@@ -415,6 +421,11 @@ THEME_PALETTES = {
         "button_text_color": "#FFFFFF",
         "accent": "#1F6FC4",
         "accent_light": "#E9F0FA",
+        # Toolbar/menu/info icon colours (M-9).  Same value as accent, but a
+        # separate token so icon colour can diverge from button colour later.
+        # Disabled = #A2A8B3 on white = 2.39:1, strictly below enabled 5.09:1.
+        "icon_color": "#1F6FC4",
+        "icon_disabled_color": "#A2A8B3",
         "card_shadow": "rgba(26,28,32,0.08)",
         "success": "#2F7D46",
         "warning": "#A25B06",
@@ -444,6 +455,10 @@ THEME_PALETTES = {
         "hint_text": "#9AA1AA",
         "panel_bg": "#1A1D22",
         "border_color": "#32363D",
+        # H-3: 3.12:1 on input_bg, 3.53:1 on panel_bg, 3.86:1 on main_bg.
+        "input_border": "#6B7380",
+        # H-1: light focus ring for dark surfaces (13.89:1 on main_bg).
+        "focus_ring": "#E7E9EC",
         "input_bg": "#24272E",
         "button_bg": "#1F6FC4",
         "button_hover_bg": "#2A7FD8",
@@ -451,6 +466,9 @@ THEME_PALETTES = {
         "button_text_color": "#FFFFFF",
         "accent": "#5B9BEA",
         "accent_light": "#1D2A3B",
+        # Disabled = #4A505A on #1A1D22 = 2.08:1 < enabled 5.89:1.
+        "icon_color": "#5B9BEA",
+        "icon_disabled_color": "#4A505A",
         "card_shadow": "rgba(0,0,0,0.35)",
         "success": "#66BB6A",
         "warning": "#E0A32E",
@@ -484,6 +502,43 @@ THEME_PALETTES = {
 # instead of qt-material's default magenta-purple.
 THEME_XML = {"dark": "theme_dark_blue.xml", "light": "theme_light_blue.xml"}
 MATERIAL_EXTRA = {"font_family": "Segoe UI", "density_scale": "-1"}
+
+
+def action_icon_colors(theme: object) -> tuple[str, str]:
+    """Return ``(enabled, disabled)`` icon colours for *theme* (M-9).
+
+    The old module-level constants were hard-coded blues/greys; icon colour
+    now lives in ``THEME_PALETTES`` so switching themes cannot leave a bright
+    blue glyph on a dark toolbar.
+    """
+    palette = THEME_PALETTES[normalize_ui_theme(theme)]
+    return palette["icon_color"], palette["icon_disabled_color"]
+
+
+# Backwards-compatible module constants (call sites that cannot know the theme
+# at import time use :func:`action_icon_colors` instead).  Kept derived so the
+# values can never drift from the palettes.
+ACTION_ICON_COLOR = THEME_PALETTES["dark"]["icon_color"]
+ACTION_ICON_DISABLED_COLOR = THEME_PALETTES["dark"]["icon_disabled_color"]
+
+
+def current_theme_name() -> str:
+    """Best-effort logical theme from the live QApplication palette.
+
+    Used by widgets that are constructed after the app theme is applied and
+    have no AppSettings reference (dialogs, panel icons).  Falls back to
+    ``"dark"`` (the app default) when there is no QApplication.
+    """
+    try:
+        from PyQt5.QtGui import QColor, QPalette
+        from PyQt5.QtWidgets import QApplication
+    except Exception:  # pragma: no cover - PyQt always available in the GUI
+        return "dark"
+    app = QApplication.instance()
+    if app is None:
+        return "dark"
+    base = QColor(app.palette().color(QPalette.Base))
+    return "dark" if base.lightnessF() < 0.5 else "light"
 
 
 # ── Data models ─────────────────────────────────────────────────────────
@@ -1490,7 +1545,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QComboBox, QSpinBox, QLineEdit, QAbstractSpinBox {{
             background: {p["input_bg"]};
             color: {p["text_color"]};
-            border: 1px solid {p["border_color"]};
+            border: 1px solid {p["input_border"]};
             border-radius: 6px;
             padding: 0px 8px;
             min-height: 28px;
@@ -1503,7 +1558,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QAbstractSpinBox:disabled {{
             color: {p["text_secondary"]};
             background: {p["input_bg"]};
-            border: 1px solid {p["border_color"]};
+            border: 1px solid {p["input_border"]};
         }}
         QComboBox {{
             combobox-popup: 0;
@@ -1525,7 +1580,7 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QCheckBox::indicator, QRadioButton::indicator {{
             width: 18px;
             height: 18px;
-            border: 1px solid {p["border_color"]};
+            border: 1px solid {p["input_border"]};
             border-radius: 4px;
             background: {p["input_bg"]};
         }}
@@ -1578,6 +1633,15 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QToolBar QToolButton:checked {{
             background: {p["accent_light"]};
+        }}
+        /*
+         * The shared reset above zeroes every border on hover/pressed/checked
+         * so the toolbar stays chrome-free; :focus is deliberately NOT in that
+         * list and paints its own ring.  It has to come after the reset or the
+         * zero-border group would win (equal specificity, later rule).
+         */
+        QToolBar QToolButton:focus {{
+            border: 2px solid {p["accent"]};
         }}
         QStatusBar {{
             background: {p["panel_bg"]};
@@ -1688,12 +1752,18 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton {{
             text-transform: none;
         }}
+        /*
+         * H-1: keyboard focus must be visible on every button family.
+         * A 2px ring is painted on the widget's own border; padding is
+         * reduced by the same 2px so border+padding stays constant and the
+         * focused widget keeps exactly its unfocused size() (T-5 asserts it).
+         */
         QPushButton#accentButton {{
             background: {p["button_bg"]};
             color: {p["button_text_color"]};
-            border: none;
+            border: 2px solid transparent;
             border-radius: 6px;
-            padding: 0px 16px;
+            padding: 0px 14px;
             min-height: 30px;
             max-height: 30px;
             font-weight: 600;
@@ -1704,6 +1774,9 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QPushButton#accentButton:hover {{
             background: {p["button_hover_bg"]};
+        }}
+        QPushButton#accentButton:focus {{
+            border-color: {p["focus_ring"]};
         }}
         QPushButton#accentButton:disabled {{
             background: {p["border_color"]};
@@ -1723,6 +1796,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["accent_light"]};
             color: {p["secondary_hover_text"]};
         }}
+        QPushButton#secondaryButton:focus {{
+            border: 2px solid {p["accent"]};
+            padding: 0px 13px;
+        }}
         QPushButton#secondaryButton:disabled {{
             background: transparent;
             color: {p["text_secondary"]};
@@ -1741,6 +1818,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             color: {p["secondary_hover_text"]};
             text-decoration: underline;
         }}
+        QPushButton#textButton:focus {{
+            border: 2px solid {p["accent"]};
+            padding: 0px 8px;
+        }}
         QPushButton#iconButton {{
             background: transparent;
             border: 1px solid {p["border_color"]};
@@ -1750,6 +1831,10 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         QPushButton#iconButton:hover {{
             background: {p["accent_light"]};
             border: 1px solid {p["accent"]};
+        }}
+        QPushButton#iconButton:focus {{
+            border: 2px solid {p["accent"]};
+            padding: 3px;
         }}
         QToolButton#presetFilterButton, QToolButton#pinButton {{
             background: {p["panel_bg"]};
@@ -1772,6 +1857,12 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["accent_light"]};
             border: 1px solid {p["accent"]};
         }}
+        /* H-1: the panel's two tool buttons are not inside a QToolBar, so the
+           toolbar rule above does not reach them.  Keep the 1px width of the
+           idle transparent border so focus never changes geometry. */
+        QToolButton#presetFilterButton:focus, QToolButton#pinButton:focus {{
+            border: 1px solid {p["accent"]};
+        }}
         QPushButton#dangerButton {{
             background: transparent;
             color: {p["danger"]};
@@ -1786,14 +1877,19 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["danger"]};
             color: {p["button_text_color"]};
         }}
+        /* Solid destructive button: focus ring uses focus_ring, like the
+           accent (solid) button; padding absorbs the extra border width. */
+        QPushButton#dangerButton:focus {{
+            border: 2px solid {p["focus_ring"]};
+            padding: 0px 13px;
+        }}
         /*
-         * Help icons are deliberately borderless in every native state.  The
+         * Help icons are borderless while idle/hovered/pressed.  The
          * Settings dialog gives the buttons a more specific object name after
          * construction (templateHelp/variantHelp), so style the shared
          * suffix as well as the factory names.  ``outline: none`` is included
-         * for native styles that paint a focus ring outside the widget rect.
-         * Focus remains enabled; keyboard activation and the accessible name
-         * are intentionally unaffected.
+         * for native styles that paint a focus ring outside the widget rect;
+         * the keyboard focus ring itself is our own 2px accent border (H-1).
          */
         QPushButton#infoButton, QPushButton#variantInfoButton,
         QPushButton#templateHelp, QPushButton#variantHelp {{
@@ -1804,12 +1900,22 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
         }}
         QPushButton#infoButton:hover, QPushButton#variantInfoButton:hover,
         QPushButton#templateHelp:hover, QPushButton#variantHelp:hover,
-        QPushButton#infoButton:focus, QPushButton#variantInfoButton:focus,
-        QPushButton#templateHelp:focus, QPushButton#variantHelp:focus,
         QPushButton#infoButton:pressed, QPushButton#variantInfoButton:pressed,
         QPushButton#templateHelp:pressed, QPushButton#variantHelp:pressed {{
             background: transparent;
             border: none;
+            outline: none;
+        }}
+        /*
+         * H-1: the info glyphs are fixed-size (24x24), so a 2px ring cannot
+         * change their geometry.  Keep `outline: none` (we paint the ring on
+         * the widget border ourselves) so no native focus frame appears.
+         */
+        QPushButton#infoButton:focus, QPushButton#variantInfoButton:focus,
+        QPushButton#templateHelp:focus, QPushButton#variantHelp:focus {{
+            background: transparent;
+            border: 2px solid {p["accent"]};
+            border-radius: 4px;
             outline: none;
         }}
         QPushButton#infoButton:disabled, QPushButton#variantInfoButton:disabled,
@@ -1882,6 +1988,11 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             background: {p["nav_button_disabled_bg"]};
             border: 1px solid {p["nav_button_disabled_border"]};
             color: {p["nav_button_disabled_text"]};
+        }}
+        /* H-1: frame-nav buttons are QPushButtons too.  1px (same as idle)
+           keeps their fixed metrics unchanged when focus arrives. */
+        QWidget#frameNavBar QPushButton:focus {{
+            border: 1px solid {p["accent"]};
         }}
         QWidget#frameNavBar QSpinBox {{
             padding: 2px 4px;

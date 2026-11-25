@@ -101,6 +101,9 @@ class BatchConvertDialog(QDialog):
         self._file_table.horizontalHeader().setStretchLastSection(True)
         self._file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._file_table.setSelectionBehavior(QTableWidget.SelectRows)
+        # B1-L2: pair every row with main_bg (the QTableWidget alternate colour
+        # from batch 1); FourCC already enabled this, Batch never did.
+        self._file_table.setAlternatingRowColors(True)
         self._file_table.verticalHeader().setVisible(False)
         # 0.4.0-L-2：空表引导。QTableWidget 没有 setPlaceholderText；用一个只读
         # 覆盖标签提示“Add Files 或拖放文件”，随表格行数/尺寸变化显隐与定位，

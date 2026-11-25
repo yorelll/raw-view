@@ -38,8 +38,16 @@ from _qt_cleanup import (  # noqa: E402
     destroy_widget,
     end_widget_leak_check,
 )
-from PyQt5.QtCore import QPoint, QRect, QSettings  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QTextBrowser  # noqa: E402
+from PyQt5.QtCore import QPoint, QRect, QSettings, Qt  # noqa: E402
+from PyQt5.QtGui import QColor, QIcon  # noqa: E402
+from PyQt5.QtWidgets import (  # noqa: E402
+    QApplication,
+    QPushButton,
+    QTableWidgetItem,
+    QTextBrowser,
+    QToolBar,
+    QToolButton,
+)
 
 from raw_view.models import (  # noqa: E402
     MATERIAL_EXTRA,
@@ -440,3 +448,499 @@ class DialogContrastTests(_SurfaceTestBase):
                     msg=f"{theme}: accent on {rendered_bg} 期望 "
                     f"{self._EXPECTED_RATIO[theme]}±0.01，实测 {ratio:.4f}",
                 )
+
+
+# ---------------------------------------------------------------------------
+# Shared render helpers for 0.6.2 batch 2 (T-5 ... T-9)
+# ---------------------------------------------------------------------------
+
+
+def _max_channel_diff(a: QColor, b: QColor) -> int:
+    """Largest per-channel difference; the plan's 40/255 pixel threshold."""
+    return max(
+        abs(a.red() - b.red()),
+        abs(a.green() - b.green()),
+        abs(a.blue() - b.blue()),
+    )
+
+
+def _most_common_inset(image, widget, ancestor, inset: int = 4) -> str:
+    """Dominant colour inside *widget*, ignoring its border and corners."""
+    rect = widget.rect()
+    origin = widget.mapTo(ancestor, QPoint(0, 0))
+    counts: Counter = Counter()
+    step_x = max(1, (rect.width() - 2 * inset) // 8)
+    step_y = max(1, (rect.height() - 2 * inset) // 4)
+    for x in range(inset, rect.width() - inset, step_x):
+        for y in range(inset, rect.height() - inset, step_y):
+            counts[image.pixelColor(origin + QPoint(x, y)).name().lower()] += 1
+    return counts.most_common(1)[0][0]
+
+
+def _diff_pixels(before, after, widget, ancestor) -> int:
+    """Pixels inside *widget* whose RGB changed by >=40/255 in any channel."""
+    rect = widget.rect()
+    origin = widget.mapTo(ancestor, QPoint(0, 0))
+    changed = 0
+    for x in range(rect.width()):
+        for y in range(rect.height()):
+            point = origin + QPoint(x, y)
+            if _max_channel_diff(
+                before.pixelColor(point), after.pixelColor(point)
+            ) >= 40:
+                changed += 1
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# T-5 -- keyboard focus ring visibility and size invariance (H-1)
+# ---------------------------------------------------------------------------
+
+
+class FocusRingTests(_SurfaceTestBase):
+    """T-5: every button family paints a visible ring without changing size."""
+
+    @staticmethod
+    def _toolbar_buttons(window) -> list:
+        toolbar = window.findChild(QToolBar, "mainToolbar")
+        buttons = []
+        for action in toolbar.actions():
+            widget = toolbar.widgetForAction(action)
+            if isinstance(widget, QToolButton):
+                buttons.append(widget)
+        return buttons
+
+    def test_t5_focus_ring_is_visible_and_keeps_size(self):
+        from raw_view.gui.app import MainWindow
+        from raw_view.gui.dialogs import SettingsDialog
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                self.settings.ui_font_size = 13
+
+                dialog = self._track(SettingsDialog(self.settings))
+                window = self._track(MainWindow())
+                window.settings = self.settings
+                window.resize(1180, 800)
+                window._apply_theme()
+                dialog.show()
+                window.show()
+                # The empty-state panel disables every control; enable it so the
+                # real panel Apply button (accentButton[applyPrimary]) can take
+                # keyboard focus for the solid-button ring check.
+                window.panel.set_enabled(True)
+                self._settle()
+
+                tool_buttons = self._toolbar_buttons(window)
+                self.assertGreaterEqual(
+                    len(tool_buttons), 2, f"{theme}: 工具栏至少要有两个 QToolButton"
+                )
+                apply_btn = window.panel.apply_btn
+                self.assertEqual(apply_btn.objectName(), "accentButton")
+                self.assertTrue(
+                    apply_btn.isEnabled(), f"{theme}: 面板 Apply 按钮必须可聚焦"
+                )
+                cases = (
+                    (
+                        "accentButton(applyPrimary)",
+                        apply_btn,
+                        window,
+                        window.panel.width_spin,
+                    ),
+                    (
+                        "secondaryButton",
+                        dialog.template_reset_btn,
+                        dialog,
+                        dialog.template_edit,
+                    ),
+                    (
+                        "infoButton",
+                        dialog.template_help_icon,
+                        dialog,
+                        dialog.template_edit,
+                    ),
+                    ("QToolButton", tool_buttons[0], window, tool_buttons[1]),
+                )
+                try:
+                    for label, button, ancestor, neutral in cases:
+                        APP.setActiveWindow(ancestor)
+                        ancestor.activateWindow()
+                        ancestor.raise_()
+                        neutral.setFocus(Qt.TabFocusReason)
+                        self._settle()
+                        self.assertFalse(
+                            button.hasFocus(),
+                            f"{theme}/{label}: 取样前必须处于未聚焦态",
+                        )
+                        before = ancestor.grab().toImage()
+                        size_before = button.size()
+
+                        button.setFocus(Qt.TabFocusReason)
+                        self._settle()
+                        self.assertTrue(
+                            button.hasFocus(),
+                            f"{theme}/{label}: setFocus 后必须真正获得键盘焦点",
+                        )
+                        after = ancestor.grab().toImage()
+                        size_after = button.size()
+
+                        changed = _diff_pixels(before, after, button, ancestor)
+                        self.assertGreaterEqual(
+                            changed, 40,
+                            f"{theme}/{label}: 聚焦前后按钮区域只有 {changed} 个"
+                            "像素变化（要求 >=40），焦点环不可见",
+                        )
+                        self.assertEqual(
+                            size_before, size_after,
+                            f"{theme}/{label}: 聚焦改变了按钮尺寸 "
+                            f"{size_before} -> {size_after}",
+                        )
+                finally:
+                    for widget in (dialog, window):
+                        if widget in self._widgets:
+                            self._widgets.remove(widget)
+                        destroy_widget(widget)
+
+
+# ---------------------------------------------------------------------------
+# T-6 -- input-control border contrast (H-3)
+# ---------------------------------------------------------------------------
+
+
+class InputBorderContrastTests(_SurfaceTestBase):
+    """T-6: input borders reach 3:1 against both the field and its surface."""
+
+    def test_t6_input_borders_are_at_least_3_to_1(self):
+        from raw_view.gui.dialogs import SettingsDialog
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                palette = THEME_PALETTES[theme]
+                expected_border = palette["input_border"].lower()
+                expected_inner = palette["input_bg"].lower()
+
+                dialog = self._track(SettingsDialog(self.settings))
+                dialog.show()
+                APP.setActiveWindow(dialog)
+                dialog.activateWindow()
+                dialog.raise_()
+                # Park focus on a button so no input paints its accent focus
+                # border while we sample the idle boundary.
+                save_btn = dialog.findChild(QPushButton, "accentButton")
+                save_btn.setFocus(Qt.TabFocusReason)
+                self._settle()
+
+                try:
+                    image = dialog.grab().toImage()
+                    surface = _pixel(
+                        image, dialog, dialog, 3, dialog.size().height() // 2
+                    )
+                    self.assertEqual(
+                        surface, palette["main_bg"].lower(),
+                        f"{theme}: 取样表面必须是 main_bg，实测 {surface}",
+                    )
+
+                    for name in ("theme_combo", "dpi_spin", "template_edit"):
+                        widget = getattr(dialog, name)
+                        self.assertFalse(
+                            widget.hasFocus(), f"{theme}/{name}: 取样时必须未聚焦"
+                        )
+                        inner = _most_common_inset(image, widget, dialog)
+                        self.assertEqual(
+                            inner, expected_inner,
+                            f"{theme}/{name}: 控件内部底色必须是 input_bg，"
+                            f"实测 {inner}",
+                        )
+                        origin = widget.mapTo(dialog, QPoint(0, 0))
+                        width, height = widget.size().width(), widget.size().height()
+                        samples = (
+                            (width // 2, 0),
+                            (width // 2, height - 1),
+                            (0, height // 2),
+                            (width - 1, height // 2),
+                        )
+                        for x, y in samples:
+                            border = image.pixelColor(
+                                origin + QPoint(x, y)
+                            ).name().lower()
+                            self.assertEqual(
+                                border, expected_border,
+                                f"{theme}/{name}@({x},{y}): 边界色必须是 "
+                                f"input_border，实测 {border}",
+                            )
+                            for bg_label, bg in (
+                                ("控件底", inner),
+                                ("所在表面", surface),
+                            ):
+                                ratio = _contrast_ratio(border, bg)
+                                self.assertGreaterEqual(
+                                    ratio, 3.0,
+                                    f"{theme}/{name}@({x},{y}): 边界 {border} "
+                                    f"vs {bg_label} {bg} = {ratio:.2f}:1，"
+                                    "低于 WCAG 1.4.11 的 3:1",
+                                )
+                finally:
+                    if dialog in self._widgets:
+                        self._widgets.remove(dialog)
+                    destroy_widget(dialog)
+
+
+# ---------------------------------------------------------------------------
+# T-7 -- disabled drop-down arrow (H-4)
+# ---------------------------------------------------------------------------
+
+
+class DisabledArrowTests(_SurfaceTestBase):
+    """T-7: disabled combos show a faded arrow; enabled arrows are stronger."""
+
+    @staticmethod
+    def _arrow_stats(window, combo):
+        """Return (background, max channel delta, max contrast) in arrow area."""
+        image = window.grab().toImage()
+        origin = combo.mapTo(window, QPoint(0, 0))
+        width, height = combo.size().width(), combo.size().height()
+        # Right-hand drop-down box, excluding the outer border and the
+        # left-hand divider: the arrow is centred in this band.
+        colours = [
+            image.pixelColor(origin + QPoint(x, y))
+            for x in range(width - 22, width - 3)
+            for y in range(4, height - 4)
+        ]
+        counts: Counter = Counter(c.name().lower() for c in colours)
+        bg_name = counts.most_common(1)[0][0]
+        bg = next(c for c in colours if c.name().lower() == bg_name)
+        max_delta = max(_max_channel_diff(c, bg) for c in colours)
+        max_ratio = max(
+            _contrast_ratio(c.name().lower(), bg_name) for c in colours
+        )
+        return bg_name, max_delta, max_ratio
+
+    def test_t7_disabled_combo_arrow_is_visible_but_fainter(self):
+        from raw_view.gui.app import MainWindow
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                self.settings.ui_font_size = 13
+                window = self._track(MainWindow())
+                window.settings = self.settings
+                window.resize(1180, 800)
+                window._apply_theme()
+                window.show()
+                self._settle()
+
+                combo = window.panel.type_combo
+                try:
+                    self.assertFalse(
+                        combo.isEnabled(),
+                        f"{theme}: 空态面板的 type_combo 必须处于禁用态",
+                    )
+                    disabled_bg, disabled_delta, disabled_ratio = self._arrow_stats(
+                        window, combo
+                    )
+                    self.assertGreaterEqual(
+                        disabled_delta, 40,
+                        f"{theme}: 禁用 combo 的下拉区没有箭头像素"
+                        f"（与背景的最大差仅 {disabled_delta}/255）",
+                    )
+
+                    combo.setEnabled(True)
+                    self._settle()
+                    enabled_bg, enabled_delta, enabled_ratio = self._arrow_stats(
+                        window, combo
+                    )
+                    combo.setEnabled(False)
+                    self._settle()
+
+                    self.assertGreaterEqual(
+                        enabled_delta, 40,
+                        f"{theme}: 对比用的启用箭头不可见"
+                        f"（最大差 {enabled_delta}/255）",
+                    )
+                    # "Fainter" = lower contrast against the field.  In the
+                    # light theme that is literally a lighter glyph; on a dark
+                    # field a faded glyph sits closer to the background, so the
+                    # comparable invariant is the contrast ratio (plan 7.1
+                    # "明显弱于启用").
+                    self.assertLess(
+                        disabled_ratio, enabled_ratio,
+                        f"{theme}: 禁用箭头对比度 {disabled_ratio:.2f}:1 "
+                        f"不低于启用 {enabled_ratio:.2f}:1"
+                        f"（背景 {disabled_bg}/{enabled_bg}）",
+                    )
+                finally:
+                    if window in self._widgets:
+                        self._widgets.remove(window)
+                    destroy_widget(window)
+
+
+# ---------------------------------------------------------------------------
+# T-8 -- icon colour tokens (M-9)
+# ---------------------------------------------------------------------------
+
+
+class IconTokenTests(_SurfaceTestBase):
+    """T-8: toolbar glyphs use icon_color / icon_disabled_color per theme."""
+
+    # Plan 3.1 enabled-icon contrast on panel_bg; +/-0.01 guards token drift.
+    _EXPECTED_ENABLED_RATIO = {"light": 5.09, "dark": 5.89}
+
+    @staticmethod
+    def _dominant_colour(icon: QIcon, mode) -> str:
+        image = icon.pixmap(16, 16, mode).toImage()
+        counts: Counter = Counter()
+        for x in range(16):
+            for y in range(16):
+                colour = image.pixelColor(x, y)
+                if colour.alpha() > 200:
+                    counts[colour.name().lower()] += 1
+        return counts.most_common(1)[0][0]
+
+    def test_t8_icon_colours_follow_tokens_and_theme(self):
+        from raw_view.gui.app import MainWindow
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                self.settings.ui_font_size = 13
+                palette = THEME_PALETTES[theme]
+                window = self._track(MainWindow())
+                window.settings = self.settings
+                window.resize(1180, 800)
+                window._apply_theme()
+                window.show()
+                self._settle()
+                try:
+                    action = window.open_action
+                    enabled = self._dominant_colour(
+                        action.icon(), QIcon.Normal
+                    )
+                    disabled = self._dominant_colour(
+                        action.icon(), QIcon.Disabled
+                    )
+                    self.assertEqual(
+                        enabled, palette["icon_color"].lower(),
+                        f"{theme}: 启用图标主色必须是 icon_color，实测 {enabled}",
+                    )
+                    self.assertEqual(
+                        disabled, palette["icon_disabled_color"].lower(),
+                        f"{theme}: 禁用图标主色必须是 icon_disabled_color，"
+                        f"实测 {disabled}",
+                    )
+                    enabled_ratio = _contrast_ratio(
+                        enabled, palette["panel_bg"]
+                    )
+                    disabled_ratio = _contrast_ratio(
+                        disabled, palette["panel_bg"]
+                    )
+                    self.assertAlmostEqual(
+                        enabled_ratio,
+                        self._EXPECTED_ENABLED_RATIO[theme],
+                        delta=0.01,
+                        msg=f"{theme}: 启用图标对比度期望 "
+                        f"{self._EXPECTED_ENABLED_RATIO[theme]}+/-0.01，"
+                        f"实测 {enabled_ratio:.4f}",
+                    )
+                    self.assertLess(
+                        disabled_ratio, enabled_ratio,
+                        f"{theme}: 禁用图标对比度 {disabled_ratio:.2f}:1 "
+                        f"必须严格低于启用 {enabled_ratio:.2f}:1",
+                    )
+
+                    # A live theme switch must regenerate the very same action
+                    # icon in the other theme's colour (no stale blue).
+                    other = "dark" if theme == "light" else "light"
+                    window.settings.ui_theme = other
+                    window._apply_theme()
+                    self._settle()
+                    switched = self._dominant_colour(
+                        window.open_action.icon(), QIcon.Normal
+                    )
+                    self.assertEqual(
+                        switched, THEME_PALETTES[other]["icon_color"].lower(),
+                        f"{theme}->{other}: 切换主题后 action 图标未跟随"
+                        f"（实测 {switched}）",
+                    )
+                    self.assertNotEqual(
+                        switched, enabled,
+                        f"{theme}->{other}: 图标颜色在两主题下必须不同",
+                    )
+                finally:
+                    if window in self._widgets:
+                        self._widgets.remove(window)
+                    destroy_widget(window)
+
+
+# ---------------------------------------------------------------------------
+# T-9 -- Batch table alternating rows (B1-L2)
+# ---------------------------------------------------------------------------
+
+
+class BatchZebraTests(_SurfaceTestBase):
+    """T-9: Batch rows alternate panel_bg / main_bg in both themes."""
+
+    def test_t9_batch_table_has_alternating_rows(self):
+        from raw_view.gui.dialogs import BatchConvertDialog
+
+        for theme in _THEMES:
+            with self.subTest(theme=theme):
+                _apply_product_theme(theme)
+                self.settings.ui_theme = theme
+                palette = THEME_PALETTES[theme]
+                panel_bg = palette["panel_bg"].lower()
+                main_bg = palette["main_bg"].lower()
+
+                dialog = self._track(BatchConvertDialog(self.settings))
+                table = dialog._file_table
+                # Two rows are enough to prove the alternation and both fit
+                # the dialog's default height (a clipped row samples the body
+                # colour, not its own stripe).
+                table.setRowCount(2)
+                for row in range(2):
+                    for column in range(4):
+                        table.setItem(
+                            row, column, QTableWidgetItem(f"r{row}c{column}")
+                        )
+                dialog.show()
+                self._settle()
+                try:
+                    self.assertTrue(
+                        table.alternatingRowColors(),
+                        f"{theme}: Batch 表格必须开启交替行",
+                    )
+                    image = dialog.grab().toImage()
+                    viewport = table.viewport()
+                    row_colours = []
+                    for row in range(2):
+                        rect = table.visualItemRect(table.item(row, 0))
+                        x = rect.right() - 6
+                        y = rect.center().y()
+                        counts: Counter = Counter()
+                        for dx in (-6, -4, -2):
+                            point = viewport.mapTo(
+                                dialog, QPoint(x + dx, y)
+                            )
+                            counts[
+                                image.pixelColor(point).name().lower()
+                            ] += 1
+                        row_colours.append(counts.most_common(1)[0][0])
+                    self.assertEqual(
+                        row_colours[0], panel_bg,
+                        f"{theme}: Batch 首行必须是 panel_bg，"
+                        f"实测 {row_colours}",
+                    )
+                    self.assertEqual(
+                        row_colours[1], main_bg,
+                        f"{theme}: Batch 交替行必须是 main_bg，"
+                        f"实测 {row_colours}",
+                    )
+                finally:
+                    if dialog in self._widgets:
+                        self._widgets.remove(dialog)
+                    destroy_widget(dialog)

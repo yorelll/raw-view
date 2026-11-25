@@ -26,7 +26,12 @@ from PyQt5.QtWidgets import (
 )
 
 from raw_view.formats import RAW_BITS, YUV_BYTES_PER_PIXEL
-from raw_view.models import ACTION_ICON_COLOR, BAYER_PATTERNS, COMMON_SIZES
+from raw_view.models import (
+    action_icon_colors,
+    current_theme_name,
+    BAYER_PATTERNS,
+    COMMON_SIZES,
+)
 
 # Custom (user-added) sizes are tinted through the stylesheet's
 # QCheckBox[customSize="true"] rule (accent token).
@@ -45,7 +50,8 @@ def _info_icon(tooltip: str) -> QPushButton:
     try:
         import qtawesome as qta
 
-        button.setIcon(qta.icon("fa5s.info-circle", color=ACTION_ICON_COLOR))
+        color, _ = action_icon_colors(current_theme_name())
+        button.setIcon(qta.icon("fa5s.info-circle", color=color))
     except Exception:
         button.setText("i")
     button.setIconSize(QSize(16, 16))
