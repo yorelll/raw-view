@@ -204,7 +204,11 @@ class StateStatusElisionTests(_LayoutFixture):
     """L-1: the state label elides visually while keeping its full text."""
 
     def test_state_text_elided_on_paint_but_text_stays_full(self):
-        long_text = "Decoded " + "0123456789" * 5
+        # The sample must stay wider than the *whole* bar at the window's
+        # minimum width: since S-1 the permanent state label keeps priority
+        # over the left file label, so it is only squeezed when the bar cannot
+        # fit the state text at all.
+        long_text = "Decoded " + "0123456789" * 8
         self._apply("light", 13)
         self.w._set_state(long_text, "ok")
         label = self.w.state_status

@@ -1593,6 +1593,14 @@ def build_ui_stylesheet(theme: str, font_size: int) -> str:
             border: none;
             border-bottom: 1px solid {p["border_color"]};
         }}
+        /*
+         * S-2: the style's own toolbar item spacing is 1 px, which reads as a
+         * solid block of glyphs.  6 px keeps every neighbour pair visibly
+         * apart (acceptance floor: 4 px) without stretching the bar.
+         */
+        QToolBar {{
+            spacing: 6px;
+        }}
         QToolBar QToolButton,
         QToolBar QToolButton:hover,
         QToolBar QToolButton:pressed,

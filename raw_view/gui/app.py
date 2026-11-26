@@ -21,8 +21,6 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -881,6 +879,11 @@ class MainWindow(QMainWindow):
         # panel.  Both labels report a zero minimum width (StatusLabel) so no
         # status text can raise the window's minimum width (H-6).
         self.status = QStatusBar()
+        # The size grip would sit between the state label and the bar's right
+        # edge (24 px in the measured layout), pushing the state text away
+        # from the corner.  The window frame already offers resizing, so drop
+        # it to let the state label own the right edge.
+        self.status.setSizeGripEnabled(False)
         self.setStatusBar(self.status)
         self.file_status = ElidedStatusLabel("File: -")
         self.state_status = StateStatusLabel()
@@ -889,9 +892,11 @@ class MainWindow(QMainWindow):
             QSizePolicy.Preferred, QSizePolicy.Preferred
         )
         self._set_state("Ready", "ok")
-        # No stretch factors: each label starts at its size hint and only
-        # shrinks (with elision) when the bar is narrower than both together.
-        self.status.addPermanentWidget(self.file_status)
+        # S-1: the file name/size is anchored left, the decode state right.
+        # The left item takes all leftover width (stretch 1), so it starts at
+        # the bar's left margin and elides first; the permanent state widget
+        # keeps its size hint and is never squeezed before the path is.
+        self.status.addWidget(self.file_status, 1)
         self.status.addPermanentWidget(self.state_status)
 
         # Control panel
@@ -1034,64 +1039,8 @@ class MainWindow(QMainWindow):
         btn_row.addStretch(1)
         vbox.addLayout(btn_row)
 
-        # L-1: recognition beats recall — list the five most recent files right
-        # under Open.  The whole block is hidden when there is no history, so a
-        # fresh install still shows exactly one action.
-        self._empty_recent_label = QLabel("Recent files")
-        self._empty_recent_label.setAlignment(Qt.AlignCenter)
-        self._empty_recent_label.setObjectName("statusPlaceholder")
-        self._empty_recent_list = QListWidget()
-        self._empty_recent_list.setObjectName("emptyRecentList")
-        self._empty_recent_list.setMaximumWidth(380)
-        self._empty_recent_list.setAccessibleName("Recent files")
-        self._empty_recent_list.setAccessibleDescription(
-            "Double-click or press Enter to open a recently used file."
-        )
-        # Activate (double-click / Enter) opens; a single click only selects.
-        # Connecting BOTH itemClicked and itemActivated double-fired on a real
-        # double-click (click + activate), which reloaded an open file twice and
-        # popped two "File not found" boxes for a deleted recent entry.
-        self._empty_recent_list.itemActivated.connect(
-            self._on_empty_recent_clicked
-        )
-        vbox.addWidget(self._empty_recent_label)
-        vbox.addWidget(self._empty_recent_list)
-        self._refresh_empty_recent_list()
-
         vbox.addStretch(1)
         return widget
-
-    def _on_empty_recent_clicked(self, item: QListWidgetItem) -> None:
-        path = item.data(Qt.UserRole)
-        if isinstance(path, str) and path:
-            self._open_recent_file(path)
-
-    def _refresh_empty_recent_list(self) -> None:
-        """Show at most five recent files on the empty state (L-1)."""
-        widget = self.__dict__.get("_empty_recent_list")
-        label = self.__dict__.get("_empty_recent_label")
-        settings = self.__dict__.get("settings")
-        if widget is None or label is None or settings is None:
-            return
-        files = list(getattr(settings, "recent_files", []) or [])[:5]
-        widget.blockSignals(True)
-        try:
-            widget.clear()
-            for path in files:
-                entry = QListWidgetItem(os.path.basename(path) or path)
-                entry.setData(Qt.UserRole, path)
-                entry.setToolTip(path)
-                widget.addItem(entry)
-        finally:
-            widget.blockSignals(False)
-        visible = bool(files)
-        label.setVisible(visible)
-        widget.setVisible(visible)
-        if visible:
-            row_h = widget.sizeHintForRow(0)
-            if row_h <= 0:
-                row_h = 24
-            widget.setFixedHeight(row_h * len(files) + 2 * widget.frameWidth() + 2)
 
     def _update_center_stack(self) -> None:
         """Show the tabbed views when items exist, else the empty state."""
@@ -1361,6 +1310,12 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setObjectName("mainToolbar")
+        # S-2: 24 px glyphs at the default 13 px UI font instead of the style's
+        # 25-36 px default; the bar then reads as a compact row rather than a
+        # wall of icons.  Button spacing comes from the QSS ``QToolBar``
+        # ``spacing`` rule (>= 4 px between neighbours).
+        toolbar.setIconSize(self._toolbar_icon_size())
+        self.main_toolbar = toolbar
 
         # ── Brand mark (logo only — the window title already says the name) ──
         logo_label = QLabel()
@@ -1561,6 +1516,11 @@ class MainWindow(QMainWindow):
         # be regenerated after a theme switch; otherwise the toolbar keeps the
         # previous theme's blue.
         self._refresh_action_icons()
+        # S-2: the glyph size follows ``ui_font_size``, so a font change must
+        # resize the toolbar too (a stylesheet swap cannot set icon-size).
+        toolbar = self.__dict__.get("main_toolbar")
+        if toolbar is not None:
+            toolbar.setIconSize(self._toolbar_icon_size())
         # M-7: frame-nav glyphs are QIcons built from theme tokens, so they must
         # be regenerated too (a stylesheet swap cannot recolour a pixmap).
         for item in self.__dict__.get("items", []):
@@ -1642,6 +1602,21 @@ class MainWindow(QMainWindow):
             )
         else:
             self.setStyleSheet(build_ui_stylesheet(selected_theme, font_size))
+
+    def _toolbar_icon_size(self) -> QSize:
+        """Toolbar glyph edge, derived from the UI font and capped at 24 px.
+
+        The default 13 px UI font yields exactly 24 px (S-2 / V-3); larger
+        fonts keep 24 so the toolbar never grows past its 44 px height budget,
+        and smaller fonts scale down proportionally instead of looking huge.
+        """
+        try:
+            font_size = int(self.settings.ui_font_size)
+        except (AttributeError, TypeError, ValueError):
+            font_size = 13
+        font_size = max(1, font_size)
+        edge = max(16, min(24, round(font_size * 24 / 13)))
+        return QSize(edge, edge)
 
     def _build_action_icon(self, icon_name: str) -> QIcon:
         """Build an action icon with the *current theme's* icon tokens (M-9)."""
@@ -4640,8 +4615,6 @@ class MainWindow(QMainWindow):
 
     def _refresh_recent_files_menu(self) -> None:
         self.recent_menu.clear()
-        # L-1: the empty state mirrors the same history (five most recent).
-        self._refresh_empty_recent_list()
         files = self.settings.recent_files
         if not files:
             action = QAction("(No recent files)", self)
