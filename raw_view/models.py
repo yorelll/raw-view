@@ -379,7 +379,7 @@ UI_THEMES = {"light", "dark"}
 
 #: 应用版本号（单一来源，ENG-6）。About / Help / CLI --version 都从这里取，
 #: 发布新版本时只需改这一处。
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 
 ACTION_ICON_NAMES = {
     "open": "fa5s.folder-open",
