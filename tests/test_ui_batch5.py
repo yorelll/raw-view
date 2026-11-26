@@ -1,8 +1,10 @@
 """0.6.5 batch 5 — status-bar split, toolbar density, empty-state recents.
 
-Contract: ``docs/ui-review/ui-fix-plan-0.6.5-batch5.md`` §4.  Every visual
-measurement runs in **both** themes at the default 13 px UI font (V-2 also
-shrinks the window to 700 px, the narrow layout the report describes).
+Contract: ``docs/ui-review/ui-fix-plan-0.6.5-batch5.md`` §4 (r2: the state
+label accepts up to 24 px from the right edge so the native size grip stays).
+Every visual measurement runs in **both** themes at the default 13 px UI font
+(V-2 also shrinks the window to 700 px, the narrow layout the report
+describes).
 
 Teardown goes through ``destroy_widget`` and the L3 widget-leak guard, per
 ``CLAUDE.md`` §4.
@@ -33,6 +35,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QLabel,
     QListWidget,
     QPushButton,
+    QSizeGrip,
     QToolBar,
     QToolButton,
 )
@@ -150,13 +153,28 @@ class StatusBarSplitTests(_Batch5TestBase):
                     file_label.x(), 12,
                     f"{theme}: 文件标签左边缘 x={file_label.x()} > 12",
                 )
+                # The native size grip sits in the bottom-right corner; the
+                # state label ends just before it.  24 px is the accepted
+                # margin (r2: keeping the affordance beats a 12 px margin).
+                self.assertTrue(
+                    bar.isSizeGripEnabled(),
+                    f"{theme}: 原生 size grip 被关闭",
+                )
+                grips = [
+                    grip
+                    for grip in bar.findChildren(QSizeGrip)
+                    if grip.isVisible()
+                ]
+                self.assertTrue(
+                    grips, f"{theme}: 原生 size grip 不可见"
+                )
                 state_right_gap = bar.width() - (
                     state_label.x() + state_label.width()
                 )
                 self.assertLessEqual(
-                    state_right_gap, 12,
+                    state_right_gap, 24,
                     f"{theme}: 状态标签右边缘距状态栏右边缘 "
-                    f"{state_right_gap}px > 12",
+                    f"{state_right_gap}px > 24",
                 )
                 # The visible text ends well before the state label: the two
                 # regions are separated, not stacked on the right.

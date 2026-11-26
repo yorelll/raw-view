@@ -879,11 +879,9 @@ class MainWindow(QMainWindow):
         # panel.  Both labels report a zero minimum width (StatusLabel) so no
         # status text can raise the window's minimum width (H-6).
         self.status = QStatusBar()
-        # The size grip would sit between the state label and the bar's right
-        # edge (24 px in the measured layout), pushing the state text away
-        # from the corner.  The window frame already offers resizing, so drop
-        # it to let the state label own the right edge.
-        self.status.setSizeGripEnabled(False)
+        # Keep the platform's native size grip: it reserves ~24 px between the
+        # state label and the bar's right edge, and V-1 accepts up to that
+        # margin rather than removing a native resize affordance.
         self.setStatusBar(self.status)
         self.file_status = ElidedStatusLabel("File: -")
         self.state_status = StateStatusLabel()

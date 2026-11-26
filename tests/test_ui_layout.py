@@ -179,7 +179,12 @@ class WindowMinimumWidthTests(_LayoutFixture):
 
 
 class StatusBarCompositionTests(_LayoutFixture):
-    """V-4: exactly two permanent labels, neither imposing a minimum width."""
+    """V-4: two elidable labels, neither imposing a minimum width.
+
+    S-1 split the bar: the file label is a normal left-region item
+    (``addWidget``, stretches and elides first) while the state label is the
+    right-region permanent widget.
+    """
 
     def test_v4_status_bar_has_two_elidable_labels(self):
         for theme in THEMES:
